@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "training-framework"
+version = "0.1.0"
+authors = [
+  { name="Abhishek Bisht", email="abhishekbisht1429@gmail.com" },
+]
+description = "A framework for model training"
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.4",
+    "omegaconf>=2.3.0",
+    "torch>=2.11.0",
+    "pyyaml"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
