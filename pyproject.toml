@@ -21,7 +21,10 @@ dependencies = [
     "numpy>=2.4.4",
     "omegaconf>=2.3.0",
     "torch>=2.11.0",
-    "pyyaml"
+    "pyyaml",
+    "OmegaConf",
+    "pytest",
+    "tensorboard>=2.20.0"
 ]
 
 [tool.setuptools.packages.find]
