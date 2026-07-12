@@ -1,3 +1,4 @@
+import os
 from typing import Any
 
 import pytest
@@ -89,12 +90,6 @@ def sample_session_config():
     }
 
 @pytest.fixture
-def sample_checkpointer_config():
-    return {
-        'checkpoint_every': 10,
-    }
-
-@pytest.fixture
 def sample_tensorboard_config():
     return {
         'host': '0.0.0.0',
@@ -107,13 +102,35 @@ def test_1(sample_session_config):
     with session:
         session.start()
 
-def test_checkpointer(sample_session_config, sample_checkpointer_config):
+def test_checkpointer(sample_session_config, tmp_path):
     session = TrainingSession(sample_session_config)
     session.add_iteration_component(SampleIterationComponent())
-    session.add_iteration_wrapper(Checkpointer(sample_checkpointer_config))
+    session.add_iteration_wrapper(Checkpointer({
+        'checkpoint_every': 10,
+        'checkpoints_dir': str(tmp_path)
+    }))
 
     with session:
         session.start()
+
+    filepath_1 = os.path.join(str(tmp_path), sorted(os.listdir(str(tmp_path)))[0])
+    filepath_2 = os.path.join(str(tmp_path), sorted(os.listdir(str(tmp_path)))[1])
+
+    # load checkpoint
+    reloaded_session_1 = Checkpointer.load_checkpoint(filepath_1)
+    reloaded_session_2 = Checkpointer.load_checkpoint(filepath_2)
+
+    assert reloaded_session_1.session_config == session.session_config
+    assert reloaded_session_2.session_config == session.session_config
+
+    assert reloaded_session_1.iteration == 1
+    assert reloaded_session_2.iteration == 10
+
+    assert len(reloaded_session_1._iteration_wrappers) == 1
+    assert len(reloaded_session_2._iteration_wrappers) == 1
+
+    assert reloaded_session_1._iteration_wrappers[0].call_wrapper_every == session._iteration_wrappers[0].call_wrapper_every
+    assert reloaded_session_2._iteration_wrappers[0].call_wrapper_every == session._iteration_wrappers[0].call_wrapper_every
 
 
 def test_tensorboard(sample_session_config, sample_tensorboard_config):

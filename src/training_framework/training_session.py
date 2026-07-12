@@ -247,15 +247,9 @@ class TrainingSession:
                 # Log or warn here so one broken resource doesn't halt the whole cleanup
                 print(f"Error releasing resource '{resource_key}': {e}")
 
-            # 2. Safely remove the namespace from the central dictionary
-
-        self._resources.clear()
-
         # clean up wrappers
         for wrapper in self._iteration_wrappers:
             wrapper.release()
-
-        self._iteration_wrappers.clear()
 
     def _check_ready(self):
         if not self._ready:
