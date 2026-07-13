@@ -1,11 +1,14 @@
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from torch import nn
 import torch.nn.functional as F
 
+from training_framework.configurator import Configurator
 from training_framework.resources import Checkpointer, Tensorboard, Logger
 from training_framework.dataloader import InfiniteSampler
 from training_framework.training_session import TrainingSession, IterationComponent
@@ -98,9 +101,20 @@ def sample_session_config(tmp_path):
         }
     }
 
-# def test_configurator():
-#     # TODO: complete this
-#     pass
+def test_configurator(sample_session_config, tmp_path):
+    # create a temp config yaml
+    file_path = str(tmp_path / 'config.yaml')
+    with open(file_path, 'w') as f:
+        yaml.safe_dump(sample_session_config, f)
+
+    sys.argv = ["", f"{file_path}"]
+    configurator = Configurator()
+
+    session_config = configurator.get_session_config()
+    logger_config = configurator.get_resource_config("logger")
+
+    assert session_config == sample_session_config
+    assert logger_config == sample_session_config['logger']
 
 
 def test_logger(sample_session_config):

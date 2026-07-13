@@ -1,4 +1,6 @@
 import argparse
+from copy import deepcopy
+
 from omegaconf import OmegaConf
 
 
@@ -23,4 +25,4 @@ class Configurator:
     def get_resource_config(self, key: str):
         if key not in self._config:
             raise KeyError(key)
-        return self._config[key]
+        return deepcopy(self._config[key])
