@@ -8,12 +8,19 @@ class Configurator:
         self._parser.add_argument('config', type=str)
         self._parser.add_argument('--override', type=str, nargs='*', default=None)
 
-    def generate_config(self, args):
-        args = self._parser.parse_args()
-        config = OmegaConf.load(args.config)
-
-        if args.override is not None:
-            cli_config = OmegaConf.from_dotlist(args.override)
+        self._args = self._parser.parse_args()
+        config = OmegaConf.load(self._args.config)
+        if self._args.override is not None:
+            cli_config = OmegaConf.from_dotlist(self._args.override)
             config = OmegaConf.merge(config, cli_config)
 
-        return OmegaConf.to_container(config)
+        self._config = config
+
+
+    def get_session_config(self):
+        return OmegaConf.to_container(self._config)
+
+    def get_resource_config(self, key: str):
+        if key not in self._config:
+            raise KeyError(key)
+        return self._config[key]

@@ -1,15 +1,14 @@
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
-import torch
 from torch import nn
 import torch.nn.functional as F
 
-from training_framework import training_session
-from training_framework.checkpointer import Checkpointer
+from training_framework.resources import Checkpointer, Tensorboard, Logger
 from training_framework.dataloader import InfiniteSampler
-from training_framework.training_session import TrainingSession, IterationComponent, Tensorboard
+from training_framework.training_session import TrainingSession, IterationComponent
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -60,7 +59,6 @@ class SampleIterationComponent(IterationComponent):
         self._model = nn.Sequential(nn.Linear(5, 2))
 
     def run(self, training_iterator: "TrainingSession") -> None:
-        print('iteration : ', training_iterator.iteration)
         feature_batch, label_batch = next(self._dataloader_iter)
         feature_batch.to(device=training_iterator.device)
         label_batch.to(device=training_iterator.device)
@@ -79,42 +77,57 @@ class SampleIterationComponent(IterationComponent):
 
 
 @pytest.fixture
-def sample_session_config():
+def sample_session_config(tmp_path):
     return {
         'max_iterations': 50,
         'batch_size': 4,
-        'sessions_dir': "tests/outputs/sessions",
+        'sessions_dir': str(tmp_path / 'sessions'),
         'device': 'cpu',
-        'log_every': 1,
         'rng_seed': 0,
+        'logger': {
+            'log_every': 1,
+            'log_file': str(tmp_path / 'log.txt')
+        },
+        'checkpointer': {
+            'checkpoint_every': 10,
+            'checkpoints_dir': str(tmp_path)
+        },
+        'tensorboard': {
+            'host': '0.0.0.0',
+            'port': 16032,
+        }
     }
 
-@pytest.fixture
-def sample_tensorboard_config():
-    return {
-        'host': '0.0.0.0',
-        'port': 16032
-    }
-def test_1(sample_session_config):
+# def test_configurator():
+#     # TODO: complete this
+#     pass
+
+
+def test_logger(sample_session_config):
     session = TrainingSession(sample_session_config)
     session.add_iteration_component(SampleIterationComponent())
+    session.add_iteration_wrapper(Logger(sample_session_config['logger']))
 
     with session:
         session.start()
 
-def test_checkpointer(sample_session_config, tmp_path):
+    log_file_path = Path(sample_session_config['logger']['log_file'])
+    with open(log_file_path, 'r') as f:
+        assert log_file_path.stat().st_size > 0
+        for i, line in enumerate(f.readlines()):
+            assert line == f'Iteration {i+1}/{sample_session_config["max_iterations"]}\n'
+
+def test_checkpointer(sample_session_config):
     session = TrainingSession(sample_session_config)
     session.add_iteration_component(SampleIterationComponent())
-    session.add_iteration_wrapper(Checkpointer({
-        'checkpoint_every': 10,
-        'checkpoints_dir': str(tmp_path)
-    }))
+    session.add_iteration_wrapper(Checkpointer(sample_session_config['checkpointer']))
 
     with session:
         session.start()
 
-    filepath_1 = os.path.join(str(tmp_path), sorted(os.listdir(str(tmp_path)))[0])
-    filepath_2 = os.path.join(str(tmp_path), sorted(os.listdir(str(tmp_path)))[1])
+    checkpoints_dir = Path(sample_session_config['checkpointer']['checkpoints_dir'])
+    filepath_1 = os.path.join(str(checkpoints_dir), sorted(os.listdir(str(checkpoints_dir)))[0])
+    filepath_2 = os.path.join(str(checkpoints_dir), sorted(os.listdir(str(checkpoints_dir)))[1])
 
     # load checkpoint
     reloaded_session_1 = Checkpointer.load_checkpoint(filepath_1)
@@ -133,9 +146,9 @@ def test_checkpointer(sample_session_config, tmp_path):
     assert reloaded_session_2._iteration_wrappers[0].call_wrapper_every == session._iteration_wrappers[0].call_wrapper_every
 
 
-def test_tensorboard(sample_session_config, sample_tensorboard_config):
+def test_tensorboard(sample_session_config):
     session = TrainingSession(sample_session_config)
-    session.register_resource(Tensorboard(sample_tensorboard_config))
+    session.register_resource(Tensorboard(sample_session_config['tensorboard']))
 
     with session:
         session.start()
