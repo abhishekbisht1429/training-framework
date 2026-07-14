@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "training-framework"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
   { name="Abhishek Bisht", email="abhishekbisht1429@gmail.com" },
 ]
 description = "A framework for model training"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
