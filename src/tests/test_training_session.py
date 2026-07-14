@@ -116,6 +116,22 @@ def test_configurator(sample_session_config, tmp_path):
     assert session_config == sample_session_config
     assert logger_config == sample_session_config['logger']
 
+def test_configurator_override(sample_session_config, tmp_path):
+    # create a temp config yaml
+    file_path = str(tmp_path / 'config.yaml')
+    with open(file_path, 'w') as f:
+        yaml.safe_dump(sample_session_config, f)
+
+    sys.argv = ["", f"{file_path}", "--override", "checkpointer.checkpoint_every=5"]
+    configurator = Configurator()
+
+    session_config = configurator.get_session_config()
+    checkpointer_config = configurator.get_resource_config("checkpointer")
+
+    assert checkpointer_config != sample_session_config['checkpointer']
+    assert checkpointer_config['checkpoint_every'] == 5
+
+
 
 def test_logger(sample_session_config):
     session = TrainingSession(sample_session_config)

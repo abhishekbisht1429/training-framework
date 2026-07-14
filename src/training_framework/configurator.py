@@ -1,5 +1,6 @@
 import argparse
 from copy import deepcopy
+from typing import Mapping
 
 from omegaconf import OmegaConf
 
@@ -25,4 +26,6 @@ class Configurator:
     def get_resource_config(self, key: str):
         if key not in self._config:
             raise KeyError(key)
+        if not isinstance(self._config[key], Mapping):
+            raise ValueError("The value corresponding to the key '{}' is not a mapping".format(key))
         return deepcopy(self._config[key])
