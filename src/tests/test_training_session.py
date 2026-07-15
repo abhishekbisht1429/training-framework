@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import pytest
 import yaml
@@ -11,7 +11,8 @@ import torch.nn.functional as F
 from training_framework.configurator import Configurator
 from training_framework.resources import Checkpointer, Tensorboard, Logger
 from training_framework.dataloader import InfiniteSampler
-from training_framework.training_session import TrainingSession, IterationComponent
+from training_framework.training_session import TrainingSession, Step, step
+from training_framework.training_engine import TrainingEngine
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -48,7 +49,8 @@ class DummyClassificationDataset(Dataset):
 
         return torch.stack(features_batch), torch.stack(labels_batch)
 
-class SampleIterationComponent(IterationComponent):
+@step("sample_step")
+class SampleStep(Step):
     def __init__(self):
         dataset = DummyClassificationDataset()
         dataloader = DataLoader(
@@ -58,9 +60,9 @@ class SampleIterationComponent(IterationComponent):
             collate_fn=dataset.collate_fn,
         )
         self._dataloader_iter = iter(dataloader)
-
         self._model = nn.Sequential(nn.Linear(5, 2))
 
+    @override
     def run(self, training_iterator: "TrainingSession") -> None:
         feature_batch, label_batch = next(self._dataloader_iter)
         feature_batch.to(device=training_iterator.device)
@@ -72,10 +74,12 @@ class SampleIterationComponent(IterationComponent):
 
         training_iterator.share_value("loss", loss.item())
 
-    def __getstate__(self) -> Any:
+    @override
+    def get_state(self) -> Any:
         pass
 
-    def __setstate__(self, state: Any) -> None:
+    @override
+    def set_state(self, state: Any) -> None:
         pass
 
 
@@ -93,13 +97,40 @@ def sample_session_config(tmp_path):
         },
         'checkpointer': {
             'checkpoint_every': 10,
-            'checkpoints_dir': str(tmp_path)
+            'checkpoints_dir': str(tmp_path / "checkpoints")
         },
         'tensorboard': {
             'host': '0.0.0.0',
             'port': 16032,
         }
     }
+
+@pytest.fixture
+def sample_session_config2(tmp_path):
+    return {
+        'max_iterations': 50,
+        'batch_size': 4,
+        'sessions_dir': str(tmp_path / 'sessions2'),
+        'device': 'cpu',
+        'rng_seed': 0,
+        'logger': {
+            'log_every': 1,
+            'log_file': str(tmp_path / 'log2.txt')
+        },
+        'checkpointer': {
+            'checkpoint_every': 10,
+            'checkpoints_dir': str(tmp_path / "checkpoints2")
+        },
+        'tensorboard': {
+            'host': '0.0.0.0',
+            'port': 16033,
+        }
+    }
+
+
+@pytest.fixture
+def training_engine():
+    return TrainingEngine({})
 
 def test_configurator(sample_session_config, tmp_path):
     # create a temp config yaml
@@ -133,13 +164,15 @@ def test_configurator_override(sample_session_config, tmp_path):
 
 
 
-def test_logger(sample_session_config):
+def test_logger(sample_session_config, training_engine):
     session = TrainingSession(sample_session_config)
-    session.add_iteration_component(SampleIterationComponent())
-    session.add_iteration_wrapper(Logger(sample_session_config['logger']))
+    session.add_step(SampleStep())
+    session.register_hook(Logger(sample_session_config['logger']))
 
-    with session:
-        session.start()
+    training_engine.register_session(session)
+
+    with training_engine:
+        training_engine._run_session(0)
 
     log_file_path = Path(sample_session_config['logger']['log_file'])
     with open(log_file_path, 'r') as f:
@@ -147,13 +180,14 @@ def test_logger(sample_session_config):
         for i, line in enumerate(f.readlines()):
             assert line == f'Iteration {i+1}/{sample_session_config["max_iterations"]}\n'
 
-def test_checkpointer(sample_session_config):
+def test_checkpointer(sample_session_config, training_engine):
     session = TrainingSession(sample_session_config)
-    session.add_iteration_component(SampleIterationComponent())
-    session.add_iteration_wrapper(Checkpointer(sample_session_config['checkpointer']))
+    session.add_step(SampleStep())
+    session.register_hook(Checkpointer(sample_session_config['checkpointer']))
 
-    with session:
-        session.start()
+    with training_engine:
+        training_engine.register_session(session)
+        training_engine._run_session(0)
 
     checkpoints_dir = Path(sample_session_config['checkpointer']['checkpoints_dir'])
     filepath_1 = os.path.join(str(checkpoints_dir), sorted(os.listdir(str(checkpoints_dir)))[0])
@@ -169,16 +203,34 @@ def test_checkpointer(sample_session_config):
     assert reloaded_session_1.iteration == 1
     assert reloaded_session_2.iteration == 10
 
-    assert len(reloaded_session_1._iteration_wrappers) == 1
-    assert len(reloaded_session_2._iteration_wrappers) == 1
+    assert len(reloaded_session_1._hooks) == 1
+    assert len(reloaded_session_2._hooks) == 1
 
-    assert reloaded_session_1._iteration_wrappers[0].call_wrapper_every == session._iteration_wrappers[0].call_wrapper_every
-    assert reloaded_session_2._iteration_wrappers[0].call_wrapper_every == session._iteration_wrappers[0].call_wrapper_every
+    assert reloaded_session_1._hooks[0].call_wrapper_every == session._hooks[0].call_wrapper_every
+    assert reloaded_session_2._hooks[0].call_wrapper_every == session._hooks[0].call_wrapper_every
 
 
-def test_tensorboard(sample_session_config):
+def test_tensorboard(sample_session_config, training_engine):
     session = TrainingSession(sample_session_config)
     session.register_resource(Tensorboard(sample_session_config['tensorboard']))
 
-    with session:
-        session.start()
+    with training_engine:
+        training_engine.register_session(session)
+        training_engine._run_session(0)
+
+
+def test_thread_execution(sample_session_config, sample_session_config2, training_engine):
+    session1 = TrainingSession(sample_session_config)
+    session1.add_step(SampleStep())
+    session1.register_hook(Logger(sample_session_config['logger']))
+    session1.register_hook(Checkpointer(sample_session_config['checkpointer']))
+
+    session2 = TrainingSession(sample_session_config2)
+    session2.add_step(SampleStep())
+    session2.register_hook(Logger(sample_session_config['logger']))
+    session2.register_hook(Checkpointer(sample_session_config['checkpointer']))
+
+    with training_engine:
+        training_engine.register_session(session1)
+        training_engine.register_session(session2)
+        training_engine.run_all()

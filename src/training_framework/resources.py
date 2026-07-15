@@ -2,15 +2,16 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any, override
+from typing import Any, override, List
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from training_framework.training_session import TrainingSession, Wrapper, Resource
+from training_framework.training_session import TrainingSession, LifecycleHook, Resource, Stateful, hook, resource
 from training_framework.util import timestamp_str
 
-class Checkpointer(Wrapper):
+@hook("checkpointer")
+class Checkpointer(LifecycleHook, Stateful):
 
     def __init__(self, config: dict):
         self._config = config
@@ -28,6 +29,10 @@ class Checkpointer(Wrapper):
         os.makedirs(self._checkpoints_dir, exist_ok=True)
 
     @override
+    def teardown(self):
+        pass
+
+    @override
     def pre_iteration_callback(self, session: "TrainingSession") -> None:
         pass
 
@@ -42,23 +47,22 @@ class Checkpointer(Wrapper):
 
 
     @override
-    def __getstate__(self) -> Any:
+    def get_state(self) -> Any:
         return {
             'config': self._config,
         }
 
     @override
-    def __setstate__(self, state: Any) -> None:
+    def set_state(self, state: Any) -> None:
         self._config = state['config']
         self.call_wrapper_every = self._config['checkpoint_every']
-
 
     @classmethod
     def load_checkpoint(cls, path, map_location="cpu") -> TrainingSession:
         return torch.load(path, map_location=map_location, weights_only=False)
 
-
-class Logger(Wrapper):
+@hook("logger")
+class Logger(LifecycleHook):
 
     def __init__(self, config: dict):
         self._config = config
@@ -71,7 +75,7 @@ class Logger(Wrapper):
         except FileNotFoundError as e:
             pass
 
-    def release(self) -> None:
+    def teardown(self) -> None:
         if self._log_file is not sys.stdout:
             self._log_file.close()
 
@@ -93,7 +97,7 @@ class Logger(Wrapper):
         self._config = state['config']
         self.call_wrapper_every = self._config['log_every']
 
-
+@resource("tensorboard")
 class Tensorboard(Resource):
 
     def __init__(self, config: dict):
@@ -101,12 +105,14 @@ class Tensorboard(Resource):
         self._tb_process = None
         self._tb_summary_writer = None
 
-    def __getstate__(self) -> Any:
+    @override
+    def get_state(self) -> Any:
         return {
             'config': self._config,
         }
 
-    def __setstate__(self, state: Any) -> None:
+    @override
+    def set_state(self, state: Any) -> None:
         self._config = state['config']
         self._tb_process = None
         self._tb_summary_writer = None
@@ -136,7 +142,7 @@ class Tensorboard(Resource):
             print("Failed to start tensorboard process...")
             raise RuntimeError("Failed to start tensorboard process...")
 
-    def release(self):
+    def teardown(self):
         print("releasing resources...")
         self._tb_summary_writer.close()
         self._tb_process.terminate()
