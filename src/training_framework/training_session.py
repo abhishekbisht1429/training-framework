@@ -10,7 +10,7 @@ from typing import List, Any, override
 import numpy as np
 import torch
 
-from training_framework.util import context_entry, context_exit, requires_context
+from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta
 
 
 # ==================== Hook Registry ================
@@ -56,7 +56,7 @@ class Stateful(ABC):
     def __setstate__(self, state: Any) -> None:
         self.set_state(state)
 
-class Hook(ABC):
+class Hook(ABC, metaclass=CaptureInitMeta):
     name: str
     pass
 
@@ -87,7 +87,7 @@ class LifecycleHook(SessionHook, IterationHook, ABC):
     """
     pass
 
-class Resource(Stateful, ABC):
+class Resource(Stateful, ABC, metaclass=CaptureInitMeta):
     name: str
 
     @abstractmethod
@@ -99,7 +99,7 @@ class Resource(Stateful, ABC):
         pass
 
 
-class Step(Stateful, ABC):
+class Step(Stateful, ABC, metaclass=CaptureInitMeta):
     name: str
 
     @abstractmethod
@@ -115,7 +115,7 @@ class SessionPhase(Enum):
     INTERRUPTED = auto()
 
 
-class TrainingSession(Stateful):
+class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def __init__(self, config: dict):
         self._config = config
@@ -169,21 +169,25 @@ class TrainingSession(Stateful):
                 key: {
                     'name': resource.name,
                     'state': resource.get_state(),
+                    'init_args': resource._init_args
                 } for key, resource in self._resources.items()
             },
             'steps_state': [
                 {
                     'name': step.name,
                     'state': step.get_state(),
+                    'init_args': step._init_args
                 } for step in self._steps
             ],
             'hooks_state': [
                 {
                     'name': hook.name,
-                    'state': hook.get_state() if isinstance(hook, Stateful) else None
+                    'state': hook.get_state() if isinstance(hook, Stateful) else None,
+                    'init_args': hook._init_args
                 }
                 for hook in self._hooks
             ],
+            'init_args': self._init_args
         }
 
         return state
@@ -211,7 +215,8 @@ class TrainingSession(Stateful):
         for key, resource_info in state['resources_state'].items():
             cls = RESOURCE_REGISTRY[resource_info['name']]
             resource_state = resource_info['state']
-            obj = cls.__new__(cls)
+            init_args = resource_info['init_args']
+            obj = cls(**init_args)
             obj.set_state(resource_state)
             self._resources[key] = obj
 
@@ -221,7 +226,8 @@ class TrainingSession(Stateful):
         for step_info in state['steps_state']:
             cls = STEP_REGISTRY[step_info['name']]
             step_state = step_info['state']
-            obj = cls.__new__(cls)
+            init_args = step_info['init_args']
+            obj = cls(**init_args)
             obj.set_state(step_state)
             self._steps.append(obj)
 
@@ -229,13 +235,20 @@ class TrainingSession(Stateful):
         self._hooks: List[Hook] = []
         for hook_info in state['hooks_state']:
             cls = HOOK_REGISTRY[hook_info['name']]
-            obj = cls.__new__(cls)
+            init_args = hook_info['init_args']
+            obj = cls(**init_args)
             if issubclass(cls, Stateful):
                 hook_state = hook_info['state']
                 obj.set_state(hook_state)
             self._hooks.append(obj)
 
         self._init_transient_infra()
+
+    @override
+    def __setstate__(self, state):
+        init_args = state['init_args']
+        self.__init__(**init_args)
+        self.set_state(state)
 
     # --------------------------- Public properties----------------------
     @property
