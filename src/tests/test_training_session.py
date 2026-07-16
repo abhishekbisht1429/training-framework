@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from training_framework.configurator import Configurator
 from training_framework.resources import Checkpointer, Tensorboard, Logger
 from training_framework.dataloader import InfiniteSampler
-from training_framework.training_session import TrainingSession, Step, step
+from training_framework.training_session import TrainingSession, Step, step, SessionPhase
 from training_framework.training_engine import TrainingEngine
 
 import torch
@@ -238,30 +238,73 @@ def test_checkpointer(sample_config, training_engine):
     assert reloaded_session_2._hooks[0].call_every == session._hooks[0].call_every
 
 
-def test_tensorboard(sample_config, training_engine):
-    sample_session_config = sample_config['sessions'][0]
+def test_tensorboard(sample_config, training_engine, monkeypatch):
+    sample_session_config = sample_config["sessions"][0]
+
+    class DummyProcess:
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    class DummySummaryWriter:
+        def __init__(self, log_dir):
+            self.log_dir = log_dir
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    dummy_process = DummyProcess()
+
+    monkeypatch.setattr("training_framework.resources.subprocess.Popen", lambda *args, **kwargs: dummy_process)
+    monkeypatch.setattr("training_framework.resources.SummaryWriter", DummySummaryWriter)
+    monkeypatch.setattr("training_framework.resources.time.sleep", lambda *_args, **_kwargs: None)
 
     session = TrainingSession(sample_session_config)
-    session.register_resource(Tensorboard(sample_session_config['tensorboard']))
+    tensorboard = Tensorboard(sample_session_config["tensorboard"])
+    resource_id = session.register_resource(tensorboard)
+
+    assert session.get_resource(resource_id) is tensorboard
+    assert tensorboard.summary_writer is None
 
     with training_engine:
         training_engine.register_session(session)
         training_engine._run_session(0)
 
+    assert tensorboard.summary_writer is None
+    assert dummy_process.terminated is True
+    assert session._phase is SessionPhase.FINISHED
 
 def test_thread_execution(sample_config, training_engine, tmp_path):
-
-    # create a temp config yaml
-    file_path = str(tmp_path / 'config.yaml')
-    with open(file_path, 'w') as f:
+    file_path = str(tmp_path / "config.yaml")
+    with open(file_path, "w") as f:
         yaml.safe_dump(sample_config, f)
 
     sys.argv = ["", f"{file_path}"]
     configurator = Configurator()
-
     sessions = configurator.create_sessions()
+
+    assert len(sessions) == len(sample_config["sessions"])
+    for created_session, expected_config in zip(sessions, sample_config["sessions"]):
+        assert created_session.session_config.max_iterations == expected_config["max_iterations"]
+        assert created_session.device.type == expected_config["device"]
 
     with training_engine:
         for session in sessions:
             training_engine.register_session(session)
+
+        assert len(training_engine._sessions) == len(sessions)
+        assert len(training_engine._session_threads) == len(sessions)
+
         training_engine.run_all()
+
+        assert all(not thread.is_alive() for thread in training_engine._session_threads)
+
+    for session in sessions:
+        assert session.iteration <= session.session_config.max_iterations
+        assert session._phase in {SessionPhase.NEW, SessionPhase.PAUSED, SessionPhase.FINISHED}

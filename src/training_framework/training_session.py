@@ -229,12 +229,10 @@ class TrainingSession(Stateful):
         self._hooks: List[Hook] = []
         for hook_info in state['hooks_state']:
             cls = HOOK_REGISTRY[hook_info['name']]
+            obj = cls.__new__(cls)
             if issubclass(cls, Stateful):
                 hook_state = hook_info['state']
-                obj = cls.__new__(cls)
                 obj.set_state(hook_state)
-            else:
-                obj = cls()
             self._hooks.append(obj)
 
         self._init_transient_infra()
