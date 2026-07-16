@@ -16,7 +16,7 @@ class Checkpointer(LifecycleHook, Stateful):
     def __init__(self, config: dict):
         self._config = config
         self._checkpoints_dir = None
-        self.call_wrapper_every = config['checkpoint_every']
+        self.call_every = config['checkpoint_every']
 
     @override
     def setup(self, session: TrainingSession) -> Any:
@@ -55,7 +55,7 @@ class Checkpointer(LifecycleHook, Stateful):
     @override
     def set_state(self, state: Any) -> None:
         self._config = state['config']
-        self.call_wrapper_every = self._config['checkpoint_every']
+        self.call_every = self._config['checkpoint_every']
 
     @classmethod
     def load_checkpoint(cls, path, map_location="cpu") -> TrainingSession:
@@ -66,8 +66,8 @@ class Logger(LifecycleHook):
 
     def __init__(self, config: dict):
         self._config = config
-        self.call_wrapper_every = config['log_every']
-        self._log_file = sys.stdout
+        self.call_every = config['log_every']
+        self._log_file = config['log_file'] if 'log_file' in config else sys.stdout
 
     def setup(self, session: TrainingSession) -> Any:
         if self._log_file is not sys.stdout:
@@ -97,7 +97,7 @@ class Logger(LifecycleHook):
 
     def __setstate__(self, state: Any) -> None:
         self._config = state['config']
-        self.call_wrapper_every = self._config['log_every']
+        self.call_every = self._config['log_every']
 
 @resource("tensorboard")
 class Tensorboard(Resource):

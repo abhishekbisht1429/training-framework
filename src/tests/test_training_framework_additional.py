@@ -110,8 +110,8 @@ class AdditionalResource(Resource, Stateful):
 
 @hook("test_additional_hook")
 class AdditionalHook(LifecycleHook, Stateful):
-    def __init__(self, call_wrapper_every: int = 1):
-        self.call_wrapper_every = call_wrapper_every
+    def __init__(self, call_every: int = 1):
+        self.call_every = call_every
         self.events: list[str] = []
         self.pre_iterations: list[int] = []
         self.post_iterations: list[int] = []
@@ -134,7 +134,7 @@ class AdditionalHook(LifecycleHook, Stateful):
 
     def get_state(self) -> Any:
         return {
-            "call_wrapper_every": self.call_wrapper_every,
+            "call_every": self.call_every,
             "events": list(self.events),
             "pre_iterations": list(self.pre_iterations),
             "post_iterations": list(self.post_iterations),
@@ -142,7 +142,7 @@ class AdditionalHook(LifecycleHook, Stateful):
         }
 
     def set_state(self, state: Any) -> None:
-        self.call_wrapper_every = state["call_wrapper_every"]
+        self.call_every = state["call_every"]
         self.events = list(state["events"])
         self.pre_iterations = list(state["pre_iterations"])
         self.post_iterations = list(state["post_iterations"])
@@ -296,7 +296,7 @@ def test_registration_validation_and_lookup(minimal_session_config):
 
     class UnregisteredHook(LifecycleHook):
         def __init__(self):
-            self.call_wrapper_every = 1
+            self.call_every = 1
 
         def setup(self, session: TrainingSession):
             pass
@@ -333,7 +333,7 @@ def test_registration_validation_and_lookup(minimal_session_config):
         session.register_resource(UnregisteredResource())
 
     step_obj = AdditionalStep()
-    hook_obj = AdditionalHook(call_wrapper_every=1)
+    hook_obj = AdditionalHook(call_every=1)
     resource_obj = AdditionalResource()
 
     session.add_step(step_obj)
@@ -353,8 +353,8 @@ def test_context_lifecycle_and_iteration_order(base_session_config):
     session = TrainingSession(base_session_config)
     resource_a = AdditionalResource()
     resource_b = AdditionalResource()
-    hook_a = AdditionalHook(call_wrapper_every=1)
-    hook_b = AdditionalHook(call_wrapper_every=2)
+    hook_a = AdditionalHook(call_every=1)
+    hook_b = AdditionalHook(call_every=2)
     step_a = AdditionalStep()
     step_b = ToyModelStep()
 
@@ -400,7 +400,7 @@ def test_context_lifecycle_and_iteration_order(base_session_config):
         assert third == 3
         assert session.iteration == 3
 
-    # NOTE: For first and last iterations all hooks are called regardless of the value of call_wrapper_every
+    # NOTE: For first and last iterations all hooks are called regardless of the value of call_every
     assert hook_a.events == ["setup", "pre:1", "post:1", "pre:2", "post:2", "teardown", "setup", "pre:3", "post:3", "teardown"]
     assert hook_b.events == ["setup", "pre:1", "post:1", "pre:2", "post:2", "teardown", "setup", "pre:3", "post:3", "teardown"]
     assert hook_a.pre_iterations == [1, 2, 3]
@@ -416,7 +416,7 @@ def test_context_lifecycle_and_iteration_order(base_session_config):
 def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session_config):
     session = TrainingSession(base_session_config)
     resource = AdditionalResource()
-    hook = AdditionalHook(call_wrapper_every=1)
+    hook = AdditionalHook(call_every=1)
     step = AdditionalStep()
 
     session.register_resource(resource)
@@ -447,7 +447,7 @@ def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session
     assert restored_resource.events == resource.events
     assert restored_step.calls == step.calls
     assert restored_hook.events == hook.events
-    assert restored_hook.call_wrapper_every == hook.call_wrapper_every
+    assert restored_hook.call_every == hook.call_every
 
 
 def test_infinite_sampler_yields_permutations_forever():

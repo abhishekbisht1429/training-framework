@@ -70,7 +70,7 @@ class SessionHook(Hook, ABC):
         pass
 
 class IterationHook(Hook, ABC):
-    call_wrapper_every: int
+    call_every: int
     @abstractmethod
     def pre_iteration_callback(self, session: "TrainingSession") -> None:
         pass
@@ -82,7 +82,7 @@ class IterationHook(Hook, ABC):
 class LifecycleHook(SessionHook, IterationHook, ABC):
     """
     An instance of this class wraps two callbacks (pre and post) around training iteration.
-    The callbacks would be called for an iteration that is multiple of 'call_wrapper_every'.
+    The callbacks would be called for an iteration that is multiple of 'call_every'.
     pre would be called before the iteration starts and post would be called after it is finished.
     """
     pass
@@ -359,7 +359,7 @@ class TrainingSession(Stateful):
 
         # 1. Run pre iteration methods
         for iter_hook in self._iteration_hooks:
-            if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_wrapper_every == 0:
+            if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
                 iter_hook.pre_iteration_callback(self)
 
         # 2. Run iteration components
@@ -368,7 +368,7 @@ class TrainingSession(Stateful):
 
         # 3. Run post iteration methods
         for iter_hook in reversed(self._iteration_hooks):
-            if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_wrapper_every == 0:
+            if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
                 iter_hook.post_iteration_callback(self)
 
         self._clear_iteration_state()
