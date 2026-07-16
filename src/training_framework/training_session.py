@@ -216,7 +216,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             cls = RESOURCE_REGISTRY[resource_info['name']]
             resource_state = resource_info['state']
             init_args = resource_info['init_args']
-            obj = cls(**init_args)
+            obj = cls(*init_args['args'], **init_args['kwargs'])
             obj.set_state(resource_state)
             self._resources[key] = obj
 
@@ -227,7 +227,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             cls = STEP_REGISTRY[step_info['name']]
             step_state = step_info['state']
             init_args = step_info['init_args']
-            obj = cls(**init_args)
+            obj = cls(*init_args['args'], **init_args['kwargs'])
             obj.set_state(step_state)
             self._steps.append(obj)
 
@@ -236,7 +236,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         for hook_info in state['hooks_state']:
             cls = HOOK_REGISTRY[hook_info['name']]
             init_args = hook_info['init_args']
-            obj = cls(**init_args)
+            obj = cls(*init_args['args'], **init_args['kwargs'])
             if issubclass(cls, Stateful):
                 hook_state = hook_info['state']
                 obj.set_state(hook_state)
@@ -247,7 +247,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @override
     def __setstate__(self, state):
         init_args = state['init_args']
-        self.__init__(**init_args)
+        self.__init__(*init_args['args'], **init_args['kwargs'])
         self.set_state(state)
 
     # --------------------------- Public properties----------------------

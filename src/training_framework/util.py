@@ -1,7 +1,7 @@
 import functools
 import pickle
 import time
-import inspect
+from functools import wraps
 from abc import ABCMeta
 
 
@@ -45,32 +45,26 @@ def requires_context(func):
         return func(self, *args, **kwargs)
     return wrapper
 
+
 class CaptureInitMeta(ABCMeta):
     def __new__(mcls, name, bases, namespace):
         cls = super().__new__(mcls, name, bases, namespace)
 
-        # Only wrap if this class defines its own __init__
-        # and it has not already been wrapped.
-        init_in_class = namespace.get("__init__")
-        if init_in_class is None:
+        init = cls.__init__
+
+        # Avoid wrapping twice if a parent already wrapped it.
+        if getattr(init, "_captures_init_args", False):
             return cls
 
-        if getattr(init_in_class, "_captures_init_args", False):
-            return cls
-
-        original_init = init_in_class
-
-        @functools.wraps(original_init)
+        @wraps(init)
         def wrapped_init(self, *args, **kwargs):
-            sig = inspect.signature(original_init)
-            bound = sig.bind(self, *args, **kwargs)
-            bound.apply_defaults()
-
+            # Store the exact call shape for later reconstruction.
             self._init_args = {
-                k: v for k, v in bound.arguments.items() if k != "self"
+                "args": args,
+                "kwargs": kwargs,
             }
 
-            return original_init(self, *args, **kwargs)
+            return init(self, *args, **kwargs)
 
         wrapped_init._captures_init_args = True
         cls.__init__ = wrapped_init
