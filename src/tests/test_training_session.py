@@ -63,24 +63,16 @@ class SampleStep(Step):
         self._model = nn.Sequential(nn.Linear(5, 2))
 
     @override
-    def run(self, training_iterator: "TrainingSession") -> None:
+    def run(self, session: "TrainingSession") -> None:
         feature_batch, label_batch = next(self._dataloader_iter)
-        feature_batch.to(device=training_iterator.device)
-        label_batch.to(device=training_iterator.device)
+        feature_batch.to(device=session.device)
+        label_batch.to(device=session.device)
 
         output = self._model.forward(feature_batch)
         loss = F.cross_entropy(output, label_batch)
         loss.backward()
 
-        training_iterator.share_value("loss", loss.item())
-
-    @override
-    def get_state(self) -> Any:
-        pass
-
-    @override
-    def set_state(self, state: Any) -> None:
-        pass
+        session.iteration_context["loss"] = loss.item()
 
 
 @pytest.fixture

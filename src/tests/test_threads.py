@@ -22,7 +22,7 @@ class BlockingStep(Step, Stateful):
 
     def run(self, session):
         self.run_calls += 1
-        session.share_value("ran", True)
+        session.iteration_context["ran"] = True
         self.started_event.set()
         self.release_event.wait(timeout=2)
 

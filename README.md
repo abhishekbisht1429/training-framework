@@ -168,7 +168,7 @@ Steps may publish values into the session shared state.
 Example:
 
 ```python
-session.share_value("loss", loss)
+session.iteration_context["loss"] = loss
 ```
 
 ---
@@ -230,8 +230,8 @@ Steps
 Steps and hooks communicate using the shared session state.
 
 ```
-session.share_value(key, value)
-value = session.get_shared_value(key)
+session.iteration_context[key] = value
+value = session.iteration_context[key]
 ```
 
 The shared state exists only during the current iteration and is cleared afterwards.

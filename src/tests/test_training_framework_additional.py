@@ -64,8 +64,8 @@ class AdditionalStep(Step, Stateful):
 
     def run(self, session: TrainingSession) -> None:
         self.calls += 1
-        session.share_value("step_called", True)
-        session.share_value("step_index", self.calls)
+        session.iteration_context["step_called"] = True
+        session.iteration_context["step_index"] = self.calls
         self.last_seen_loss = self.calls * 1.0
 
     def get_state(self) -> Any:
@@ -200,7 +200,7 @@ class ToyModelStep(Step, Stateful):
         loss = F.cross_entropy(output, y)
         loss.backward()
         self.seen_losses.append(float(loss.item()))
-        session.share_value("loss", float(loss.item()))
+        session.iteration_context["loss"] = float(loss.item())
 
     def get_state(self) -> Any:
         return {"seen_losses": list(self.seen_losses)}
@@ -263,10 +263,10 @@ def test_requires_context_for_shared_state_and_iteration(minimal_session_config)
     session = TrainingSession(minimal_session_config)
 
     with pytest.raises(RuntimeError, match="Use within"):
-        session.share_value("x", 1)
+        session.iteration_context["x"] = 1
 
     with pytest.raises(RuntimeError, match="Use within"):
-        session.get_shared_value("x")
+        session.iteration_context["x"]
 
     with pytest.raises(RuntimeError, match="Use within"):
         next(session)

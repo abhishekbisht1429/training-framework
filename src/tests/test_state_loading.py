@@ -13,7 +13,7 @@ from training_framework.training_session import (
     TrainingSession,
     hook,
     resource,
-    step,
+    step, StatefulResource,
 )
 
 
@@ -40,7 +40,7 @@ class CheckpointRngStep(Step, Stateful):
             int(torch.randint(0, 10**6, (1,)).item()),
         )
         self.samples.append(sample)
-        session.share_value(f"{self.label}_sample", sample)
+        session.iteration_context[f"{self.label}_sample"] = sample
 
     def get_state(self):
         return {"samples": list(self.samples)}
@@ -50,7 +50,7 @@ class CheckpointRngStep(Step, Stateful):
 
 
 @resource("checkpoint_resource")
-class CheckpointResource(Resource):
+class CheckpointResource(StatefulResource):
     def __init__(self, prefix, multiplier=2):
         self.prefix = prefix
         self.multiplier = multiplier
@@ -107,7 +107,7 @@ class CheckpointHook(SessionHook, Stateful):
         self.seen_session_dirs = list(state["seen_session_dirs"])
 
 
-class BaseInheritedResource(Resource):
+class BaseInheritedResource(StatefulResource):
     def __init__(self, label, factor=11):
         self.label = label
         self.factor = factor

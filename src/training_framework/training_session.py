@@ -158,6 +158,9 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         torch.cuda.manual_seed(self._session_config.rng_seed)
         np.random.seed(self._session_config.rng_seed)
 
+        # shared session context
+        self._session_context: dict[str, Any] = {}
+
         self._init_transient_infra()
 
         self._phase = SessionPhase.NEW
@@ -183,14 +186,14 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             'resources_state': {
                 key: {
                     'name': resource.name,
-                    'state': resource.get_state(),
+                    'state': resource.get_state() if isinstance(resource, Stateful) else None,
                     'init_args': resource._init_args
                 } for key, resource in self._resources.items()
             },
             'steps_state': [
                 {
                     'name': step.name,
-                    'state': step.get_state(),
+                    'state': step.get_state() if isinstance(step, Stateful) else None,
                     'init_args': step._init_args
                 } for step in self._steps
             ],
@@ -202,6 +205,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 }
                 for hook in self._hooks
             ],
+            'session_context': self._session_context,
             'init_args': self._init_args
         }
 
@@ -229,10 +233,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._resources: dict[str, Resource] = {}
         for key, resource_info in state['resources_state'].items():
             cls = RESOURCE_REGISTRY[resource_info['name']]
-            resource_state = resource_info['state']
             init_args = resource_info['init_args']
             obj = cls(*init_args['args'], **init_args['kwargs'])
-            obj.set_state(resource_state)
+            if issubclass(cls, Stateful):
+                resource_state = resource_info['state']
+                obj.set_state(resource_state)
             self._resources[key] = obj
 
 
@@ -240,10 +245,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._steps: List[Step] = []
         for step_info in state['steps_state']:
             cls = STEP_REGISTRY[step_info['name']]
-            step_state = step_info['state']
             init_args = step_info['init_args']
             obj = cls(*init_args['args'], **init_args['kwargs'])
-            obj.set_state(step_state)
+            if issubclass(cls, Stateful):
+                step_state = step_info['state']
+                obj.set_state(step_state)
             self._steps.append(obj)
 
         # Rebuild hooks
@@ -257,6 +263,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 obj.set_state(hook_state)
             self._hooks.append(obj)
 
+        # Restore session context
+        self._session_context = state['session_context']
         self._init_transient_infra()
 
     @override
@@ -278,6 +286,14 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def device(self):
         return self._device
 
+    @property
+    def session_context(self):
+        return self._session_context
+
+    @property
+    @requires_context
+    def iteration_context(self):
+        return self._shared_state
     # --------------------------------------------------------------------
 
     # ---------------------- Helper private attributes ----------------------
@@ -298,15 +314,15 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     # ---------------------- Shared Context Management -----------------------
 
-    @requires_context
-    def share_value(self, key: str, value: Any):
-        self._shared_state[key] = value
-
-    @requires_context
-    def get_shared_value(self, key: str) -> Any:
-        if key not in self._shared_state:
-            raise KeyError(f"{key} not found in shared state")
-        return self._shared_state[key]
+    # @requires_context
+    # def share_value(self, key: str, value: Any):
+    #     self._shared_state[key] = value
+    #
+    # @requires_context
+    # def get_shared_value(self, key: str) -> Any:
+    #     if key not in self._shared_state:
+    #         raise KeyError(f"{key} not found in shared state")
+    #     return self._shared_state[key]
 
     @requires_context
     def _clear_iteration_state(self):
@@ -430,7 +446,10 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         for session_hook in self._session_hooks:
             session_hook.teardown()
 
-        # 3. Update the phase
+        # 3. clear session context
+        self._session_context.clear()
+
+        # 4. Update the phase
         if self._phase is SessionPhase.READY:
             self._phase = SessionPhase.NEW
         elif self._phase is SessionPhase.RUNNING:
