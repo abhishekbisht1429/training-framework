@@ -84,47 +84,66 @@ class SampleStep(Step):
 
 
 @pytest.fixture
-def sample_session_config(tmp_path):
+def sample_config(tmp_path):
     return {
-        'max_iterations': 50,
-        'batch_size': 4,
-        'sessions_dir': str(tmp_path / 'sessions'),
-        'device': 'cpu',
-        'rng_seed': 0,
-        'logger': {
-            'log_every': 1,
-            'log_file': str(tmp_path / 'log.txt')
-        },
-        'checkpointer': {
-            'checkpoint_every': 10,
-            'checkpoints_dir': str(tmp_path / "checkpoints")
-        },
-        'tensorboard': {
-            'host': '0.0.0.0',
-            'port': 16032,
-        }
-    }
-
-@pytest.fixture
-def sample_session_config2(tmp_path):
-    return {
-        'max_iterations': 50,
-        'batch_size': 4,
-        'sessions_dir': str(tmp_path / 'sessions2'),
-        'device': 'cpu',
-        'rng_seed': 0,
-        'logger': {
-            'log_every': 1,
-            'log_file': str(tmp_path / 'log2.txt')
-        },
-        'checkpointer': {
-            'checkpoint_every': 10,
-            'checkpoints_dir': str(tmp_path / "checkpoints2")
-        },
-        'tensorboard': {
-            'host': '0.0.0.0',
-            'port': 16033,
-        }
+        'sessions': [
+            {
+                'max_iterations': 50,
+                'batch_size': 4,
+                'sessions_dir': str(tmp_path / 'sessions'),
+                'device': 'cpu',
+                'rng_seed': 0,
+                'logger': {
+                    'log_every': 1,
+                    'log_file': str(tmp_path / 'log.txt')
+                },
+                'checkpointer': {
+                    'checkpoint_every': 10,
+                    'checkpoints_dir': str(tmp_path / "checkpoints")
+                },
+                'tensorboard': {
+                    'host': '0.0.0.0',
+                    'port': 16032,
+                }
+            },
+            {
+                'max_iterations': 50,
+                'batch_size': 4,
+                'sessions_dir': str(tmp_path / 'sessions2'),
+                'device': 'cpu',
+                'rng_seed': 0,
+                'logger': {
+                    'log_every': 1,
+                    'log_file': str(tmp_path / 'log2.txt')
+                },
+                'checkpointer': {
+                    'checkpoint_every': 10,
+                    'checkpoints_dir': str(tmp_path / "checkpoints2")
+                },
+                'tensorboard': {
+                    'host': '0.0.0.0',
+                    'port': 16033,
+                }
+            },
+            {
+                'max_iterations': 50,
+                'batch_size': 4,
+                'sessions_dir': str(tmp_path / 'sessions3'),
+                'device': 'cpu',
+                'rng_seed': 0,
+                'logger': {
+                    'log_every': 1,
+                },
+                'checkpointer': {
+                    'checkpoint_every': 10,
+                    'checkpoints_dir': str(tmp_path / "checkpoints3")
+                },
+                'tensorboard': {
+                    'host': '0.0.0.0',
+                    'port': 16034,
+                }
+            }
+        ]
     }
 
 
@@ -132,39 +151,46 @@ def sample_session_config2(tmp_path):
 def training_engine():
     return TrainingEngine({})
 
-def test_configurator(sample_session_config, tmp_path):
+def test_configurator(sample_config, tmp_path):
+    sample_session_config = sample_config['sessions'][0]
+
     # create a temp config yaml
     file_path = str(tmp_path / 'config.yaml')
     with open(file_path, 'w') as f:
-        yaml.safe_dump(sample_session_config, f)
+        yaml.safe_dump(sample_config, f)
 
     sys.argv = ["", f"{file_path}"]
     configurator = Configurator()
 
-    session_config = configurator.get_session_config()
-    logger_config = configurator.get_resource_config("logger")
+    session_config = configurator.get_session_config(0)
+    logger_config = configurator.get_resource_config(0, "logger")
 
     assert session_config == sample_session_config
     assert logger_config == sample_session_config['logger']
 
-def test_configurator_override(sample_session_config, tmp_path):
+def test_configurator_override(sample_config, tmp_path):
     # create a temp config yaml
     file_path = str(tmp_path / 'config.yaml')
     with open(file_path, 'w') as f:
-        yaml.safe_dump(sample_session_config, f)
+        yaml.safe_dump(sample_config, f)
 
-    sys.argv = ["", f"{file_path}", "--override", "checkpointer.checkpoint_every=5"]
+    sys.argv = ["", f"{file_path}", "--override", "sessions[0].checkpointer.checkpoint_every=5", "sessions.1.checkpointer.checkpoint_every=20"]
     configurator = Configurator()
 
-    session_config = configurator.get_session_config()
-    checkpointer_config = configurator.get_resource_config("checkpointer")
+    checkpointer_config_0 = configurator.get_resource_config(0, "checkpointer")
+    checkpointer_config_1 = configurator.get_resource_config(1, "checkpointer")
 
-    assert checkpointer_config != sample_session_config['checkpointer']
-    assert checkpointer_config['checkpoint_every'] == 5
+    assert checkpointer_config_0 != sample_config['sessions'][0]['checkpointer']
+    assert checkpointer_config_0['checkpoint_every'] == 5
+
+    assert checkpointer_config_1 != sample_config['sessions'][1]['checkpointer']
+    assert checkpointer_config_1['checkpoint_every'] == 20
 
 
 
-def test_logger(sample_session_config, training_engine):
+def test_logger(sample_config, training_engine):
+    sample_session_config = sample_config['sessions'][0]
+
     session = TrainingSession(sample_session_config)
     session.add_step(SampleStep())
     session.register_hook(Logger(sample_session_config['logger']))
@@ -180,7 +206,9 @@ def test_logger(sample_session_config, training_engine):
         for i, line in enumerate(f.readlines()):
             assert line == f'Iteration {i+1}/{sample_session_config["max_iterations"]}\n'
 
-def test_checkpointer(sample_session_config, training_engine):
+def test_checkpointer(sample_config, training_engine):
+    sample_session_config = sample_config['sessions'][0]
+
     session = TrainingSession(sample_session_config)
     session.add_step(SampleStep())
     session.register_hook(Checkpointer(sample_session_config['checkpointer']))
@@ -210,7 +238,9 @@ def test_checkpointer(sample_session_config, training_engine):
     assert reloaded_session_2._hooks[0].call_wrapper_every == session._hooks[0].call_wrapper_every
 
 
-def test_tensorboard(sample_session_config, training_engine):
+def test_tensorboard(sample_config, training_engine):
+    sample_session_config = sample_config['sessions'][0]
+
     session = TrainingSession(sample_session_config)
     session.register_resource(Tensorboard(sample_session_config['tensorboard']))
 
@@ -219,18 +249,19 @@ def test_tensorboard(sample_session_config, training_engine):
         training_engine._run_session(0)
 
 
-def test_thread_execution(sample_session_config, sample_session_config2, training_engine):
-    session1 = TrainingSession(sample_session_config)
-    session1.add_step(SampleStep())
-    session1.register_hook(Logger(sample_session_config['logger']))
-    session1.register_hook(Checkpointer(sample_session_config['checkpointer']))
+def test_thread_execution(sample_config, training_engine, tmp_path):
 
-    session2 = TrainingSession(sample_session_config2)
-    session2.add_step(SampleStep())
-    session2.register_hook(Logger(sample_session_config['logger']))
-    session2.register_hook(Checkpointer(sample_session_config['checkpointer']))
+    # create a temp config yaml
+    file_path = str(tmp_path / 'config.yaml')
+    with open(file_path, 'w') as f:
+        yaml.safe_dump(sample_config, f)
+
+    sys.argv = ["", f"{file_path}"]
+    configurator = Configurator()
+
+    sessions = configurator.create_sessions()
 
     with training_engine:
-        training_engine.register_session(session1)
-        training_engine.register_session(session2)
+        for session in sessions:
+            training_engine.register_session(session)
         training_engine.run_all()

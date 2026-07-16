@@ -169,7 +169,7 @@ class TrainingSession(Stateful):
                 key: {
                     'name': resource.name,
                     'state': resource.get_state(),
-                } for key, resource in self._resources
+                } for key, resource in self._resources.items()
             },
             'steps_state': [
                 {

@@ -70,10 +70,12 @@ class Logger(LifecycleHook):
         self._log_file = sys.stdout
 
     def setup(self, session: TrainingSession) -> Any:
-        try:
-            self._log_file = open(self._config['log_file'], 'w')
-        except FileNotFoundError as e:
-            pass
+        if self._log_file is not sys.stdout:
+            try:
+                self._log_file = open(self._config['log_file'], 'w')
+            except FileNotFoundError:
+                print(f"Unable to open log file for writing to {self._config['log_file']}")
+                pass
 
     def teardown(self) -> None:
         if self._log_file is not sys.stdout:
