@@ -89,7 +89,7 @@ class AdditionalResource(Resource, Stateful):
         self.events.append("setup")
         self.session_dirs.append(session.session_config.session_dir)
 
-    def teardown(self):
+    def teardown(self, session):
         self.teardown_calls += 1
         self.events.append("teardown")
 
@@ -120,7 +120,7 @@ class AdditionalHook(LifecycleHook, Stateful):
     def setup(self, session: TrainingSession):
         self.events.append("setup")
 
-    def teardown(self):
+    def teardown(self, session):
         self.events.append("teardown")
 
     def pre_iteration_callback(self, session: TrainingSession) -> None:
@@ -301,7 +301,7 @@ def test_registration_validation_and_lookup(minimal_session_config):
         def setup(self, session: TrainingSession):
             pass
 
-        def teardown(self):
+        def teardown(self, session):
             pass
 
         def pre_iteration_callback(self, session: TrainingSession) -> None:
@@ -314,7 +314,7 @@ def test_registration_validation_and_lookup(minimal_session_config):
         def setup(self, session: TrainingSession):
             pass
 
-        def teardown(self):
+        def teardown(self, session):
             pass
 
         def get_state(self):

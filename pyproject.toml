@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "training-framework"
-version = "0.3.2"
+version = "0.3.3"
 authors = [
   { name="Abhishek Bisht", email="abhishekbisht1429@gmail.com" },
 ]

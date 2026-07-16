@@ -16,7 +16,7 @@ class SessionContextWriterHook(SessionHook):
         self._context["shared_key"] = "shared-value"
         self._context.setdefault("events", []).append("writer_setup")
 
-    def teardown(self):
+    def teardown(self, session):
         self.seen_in_teardown.append(self._context["shared_key"])
         self._context.setdefault("events", []).append("writer_teardown")
 
@@ -34,7 +34,7 @@ class SessionContextReaderHook(SessionHook):
         self.seen_values.append(self._context.get("shared_key"))
         self._context.setdefault("events", []).append("reader_setup")
 
-    def teardown(self):
+    def teardown(self, session):
         self._context.setdefault("events", []).append("reader_teardown")
 
 
@@ -72,7 +72,7 @@ class SessionContextSeedHook(SessionHook):
         session.session_context["shared_value"] = "hello"
         session.session_context["numbers"] = [1, 2, 3]
 
-    def teardown(self):
+    def teardown(self, session):
         pass
 
 def test_session_context_is_saved_restored_and_cleared(tmp_path):

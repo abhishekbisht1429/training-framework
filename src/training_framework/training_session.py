@@ -66,7 +66,7 @@ class SessionHook(Hook, ABC):
         pass
 
     @abstractmethod
-    def teardown(self):
+    def teardown(self, session: "TrainingSession"):
         pass
 
 class IterationHook(Hook, ABC):
@@ -95,7 +95,7 @@ class Resource(ABC, metaclass=CaptureInitMeta):
         pass
 
     @abstractmethod
-    def teardown(self):
+    def teardown(self, session: "TrainingSession"):
         pass
 
 
@@ -438,13 +438,13 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # 1. Clean up in reverse order of acquisition to respect dependencies
         for resource_key in reversed(self._resources):
             try:
-                self._resources[resource_key].teardown()
+                self._resources[resource_key].teardown(None)
             except Exception as e:
                 print(f"Error releasing resource '{resource_key}': {e}")
 
         # 2. Call session teardown hooks
         for session_hook in self._session_hooks:
-            session_hook.teardown()
+            session_hook.teardown(None)
 
         # 3. clear session context
         self._session_context.clear()

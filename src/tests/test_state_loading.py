@@ -62,7 +62,7 @@ class CheckpointResource(StatefulResource):
         self.setup_calls += 1
         self.last_seen_iteration = session.iteration
 
-    def teardown(self):
+    def teardown(self, session):
         self.teardown_calls += 1
 
     def get_state(self):
@@ -91,7 +91,7 @@ class CheckpointHook(SessionHook, Stateful):
         self.setup_calls += 1
         self.seen_session_dirs.append(session.session_config.session_dir)
 
-    def teardown(self):
+    def teardown(self, session):
         self.teardown_calls += 1
 
     def get_state(self):
@@ -117,7 +117,7 @@ class BaseInheritedResource(StatefulResource):
     def setup(self, session):
         self.setup_calls += 1
 
-    def teardown(self):
+    def teardown(self, session):
         self.teardown_calls += 1
 
     def get_state(self):

@@ -30,7 +30,7 @@ class Checkpointer(LifecycleHook, Stateful):
         os.makedirs(self._checkpoints_dir, exist_ok=True)
 
     @override
-    def teardown(self):
+    def teardown(self, session):
         pass
 
     @override
@@ -78,7 +78,7 @@ class Logger(LifecycleHook):
                 print(f"Unable to open log file for writing to {self._config['log_file']}")
                 pass
 
-    def teardown(self) -> None:
+    def teardown(self, session) -> None:
         if self._log_file is not sys.stdout:
             self._log_file.close()
 
@@ -133,7 +133,7 @@ class Tensorboard(Resource):
             print("Failed to start tensorboard process...")
             raise RuntimeError("Failed to start tensorboard process...")
 
-    def teardown(self):
+    def teardown(self, session):
         print("releasing resources...")
         self._tb_summary_writer.close()
         self._tb_process.terminate()
