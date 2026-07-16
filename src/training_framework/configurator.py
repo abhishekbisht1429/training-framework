@@ -27,7 +27,7 @@ class Configurator:
     def get_session_config(self, index):
         return self._session_configs[index]
 
-    def get_resource_config(self, session_index: int, key: str):
+    def get_sub_config(self, session_index: int, key: str):
         session_config = self._session_configs[session_index]
         if key not in session_config:
             raise KeyError(key)
@@ -35,7 +35,7 @@ class Configurator:
             raise ValueError("The value corresponding to the key '{}' is not a mapping".format(key))
         return deepcopy(session_config[key])
 
-    def create_sessions(self):
+    def create_sessions(self) -> List[TrainingSession]:
         sessions = []
         for config in self._session_configs:
             session = TrainingSession(config)

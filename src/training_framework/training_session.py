@@ -87,7 +87,7 @@ class LifecycleHook(SessionHook, IterationHook, ABC):
     """
     pass
 
-class Resource(Stateful, ABC, metaclass=CaptureInitMeta):
+class Resource(ABC, metaclass=CaptureInitMeta):
     name: str
 
     @abstractmethod
@@ -99,12 +99,27 @@ class Resource(Stateful, ABC, metaclass=CaptureInitMeta):
         pass
 
 
-class Step(Stateful, ABC, metaclass=CaptureInitMeta):
+class Step(ABC, metaclass=CaptureInitMeta):
     name: str
 
     @abstractmethod
     def run(self, session: "TrainingSession") -> None:
         pass
+
+class StatefulIterationHook(IterationHook, Stateful, ABC):
+    pass
+
+class StatefulSessionHook(SessionHook, Stateful, ABC):
+    pass
+
+class StatefulLifeCycleHook(LifecycleHook, Stateful, ABC):
+    pass
+
+class StatefulStep(Step, Stateful, ABC):
+    pass
+
+class StatefulResource(Resource, Stateful, ABC):
+    pass
 
 class SessionPhase(Enum):
     NEW = auto()

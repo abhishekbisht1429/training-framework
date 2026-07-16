@@ -494,17 +494,17 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
 
     configurator = Configurator()
     session_config = configurator.get_session_config(0)
-    resource_config = configurator.get_resource_config(0, "logger")
+    resource_config = configurator.get_sub_config(0, "logger")
 
     assert session_config["checkpointer"]["checkpoint_every"] == 11
-    assert configurator.get_resource_config(1, "logger")["log_every"] == 9
+    assert configurator.get_sub_config(1, "logger")["log_every"] == 9
     assert resource_config == sample_config["sessions"][0]["logger"]
 
     resource_config["nested"]["enabled"] = False
     assert sample_config["sessions"][0]["logger"]["nested"]["enabled"] is True
 
     with pytest.raises(KeyError):
-        configurator.get_resource_config(0, "missing")
+        configurator.get_sub_config(0, "missing")
 
     sample_config["sessions"][0]["logger"]["log_every"] = 99
     assert configurator.get_session_config(0)["logger"]["log_every"] == 1

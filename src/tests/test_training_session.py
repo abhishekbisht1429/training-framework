@@ -163,7 +163,7 @@ def test_configurator(sample_config, tmp_path):
     configurator = Configurator()
 
     session_config = configurator.get_session_config(0)
-    logger_config = configurator.get_resource_config(0, "logger")
+    logger_config = configurator.get_sub_config(0, "logger")
 
     assert session_config == sample_session_config
     assert logger_config == sample_session_config['logger']
@@ -177,8 +177,8 @@ def test_configurator_override(sample_config, tmp_path):
     sys.argv = ["", f"{file_path}", "--override", "sessions[0].checkpointer.checkpoint_every=5", "sessions.1.checkpointer.checkpoint_every=20"]
     configurator = Configurator()
 
-    checkpointer_config_0 = configurator.get_resource_config(0, "checkpointer")
-    checkpointer_config_1 = configurator.get_resource_config(1, "checkpointer")
+    checkpointer_config_0 = configurator.get_sub_config(0, "checkpointer")
+    checkpointer_config_1 = configurator.get_sub_config(1, "checkpointer")
 
     assert checkpointer_config_0 != sample_config['sessions'][0]['checkpointer']
     assert checkpointer_config_0['checkpoint_every'] == 5
