@@ -129,6 +129,56 @@ class SessionPhase(Enum):
     FINISHED = auto()
     INTERRUPTED = auto()
 
+#TODO: check for circular dependencies later
+
+def requires_step(step_name: str):
+    def wrapper(cls):
+        # A step can only be required by another step.
+        if not issubclass(cls, Step):
+            raise TypeError(
+                f"@requires_step can only be applied to Step subclasses. "
+                f"'{cls.__name__}' is not a Step."
+            )
+
+        if "required_steps" not in cls.__dict__:
+            cls.required_steps = []
+
+        cls.required_steps.append(step_name)
+        return cls
+
+    return wrapper
+
+
+def requires_hook(hook_name: str):
+    def wrapper(cls):
+        # A hook can only be required by a step or another hook.
+        if not issubclass(cls, (Step, Hook)):
+            raise TypeError(
+                f"@requires_hook can only be applied to Step or Hook subclasses. "
+                f"'{cls.__name__}' is neither."
+            )
+
+        if "required_hooks" not in cls.__dict__:
+            cls.required_hooks = []
+
+        cls.required_hooks.append(hook_name)
+        return cls
+
+    return wrapper
+
+def requires_resource(resource_name: str):
+    def wrapper(cls):
+        if not issubclass(cls, (Step, Hook, Resource)):
+            raise TypeError(
+                f"@requires_hook can only be applied to Step, Hook or Resource subclasses. "
+                f"'{cls.__name__}' is neither."
+            )
+
+        if not hasattr(cls, "required_resources"):
+            cls.required_resources = []
+        cls.required_resources.append(resource_name)
+        return cls
+    return wrapper
 
 class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
@@ -335,32 +385,137 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             raise KeyError(f"{key} not found in resources")
         return self._resources[key]
 
+    def _registered_names(self):
+        return {
+            "required_resources": {
+                resource.name
+                for resource in self._resources.values()
+                if hasattr(resource, "name")
+            },
+            "required_hooks": {
+                hook.name
+                for hook in self._hooks
+                if hasattr(hook, "name")
+            },
+            "required_steps": {
+                step.name
+                for step in self._steps
+                if hasattr(step, "name")
+            },
+        }
+
+    def _missing_prereqs(self, cls, required_attrs):
+        registered = self._registered_names()
+        missing = {}
+
+        for attr in required_attrs:
+            missing_names = [
+                name
+                for name in getattr(cls, attr, [])
+                if name not in registered[attr]
+            ]
+
+            if missing_names:
+                missing[attr] = missing_names
+
+        return missing
+
+    def _format_missing_prereqs(self, missing):
+        labels = {
+            "required_resources": "resources",
+            "required_hooks": "hooks",
+            "required_steps": "steps",
+        }
+
+        return ", ".join(
+            f"{labels[attr]}={names}"
+            for attr, names in missing.items()
+        )
+
     def register_resource(self, resource: Resource):
         if not isinstance(resource, Resource):
-            raise TypeError(f"The provided object '{type(resource).__name__}' is not an instance of {Resource.__name__}!")
+            raise TypeError(
+                f"The provided object '{type(resource).__name__}' "
+                f"is not an instance of {Resource.__name__}!"
+            )
+
         if not hasattr(resource, "name") or resource.name not in RESOURCE_REGISTRY:
-            raise ValueError(f"Resource '{type(resource).__name__}' not registered in RESOURCE_REGISTRY!")
+            raise ValueError(
+                f"Resource '{type(resource).__name__}' "
+                "not registered in RESOURCE_REGISTRY!"
+            )
+
+        # Resources may depend only on other resources.
+        missing = self._missing_prereqs(
+            resource.__class__,
+            ["required_resources"],
+        )
+
+        if missing:
+            raise RuntimeError(
+                f"Resource '{type(resource).__name__}' has unmet prerequisites: "
+                f"{self._format_missing_prereqs(missing)}"
+            )
 
         hex_id = f"0x{time.time_ns():x}"
-        resource_id = f"{ resource.__class__.__name__}_{hex_id}"
+        resource_id = f"{resource.__class__.__name__}_{hex_id}"
 
         self._resources[resource_id] = resource
-
         return resource_id
-
-    def add_step(self, step: Step):
-        if not isinstance(step, Step):
-            raise TypeError(f"The provided object '{type(step).__name__}' is not an instance of {Step.__name__}!")
-        if not hasattr(step, "name") or step.name not in STEP_REGISTRY:
-            raise ValueError(f"Step '{type(step).__name__}' not registered in STEP_REGISTRY!")
-        self._steps.append(step)
 
     def register_hook(self, hook: Hook):
         if not isinstance(hook, Hook):
-            raise TypeError(f"The provided object '{type(hook).__name__}' is not an instance of {Hook.__name__}!")
+            raise TypeError(
+                f"The provided object '{type(hook).__name__}' "
+                f"is not an instance of {Hook.__name__}!"
+            )
+
         if not hasattr(hook, "name") or hook.name not in HOOK_REGISTRY:
-            raise ValueError(f"Hook '{type(hook).__name__}' not registered in HOOK_REGISTRY!")
+            raise ValueError(
+                f"Hook '{type(hook).__name__}' "
+                "not registered in HOOK_REGISTRY!"
+            )
+
+        # Hooks may depend on resources and other hooks.
+        missing = self._missing_prereqs(
+            hook.__class__,
+            ["required_resources", "required_hooks"],
+        )
+
+        if missing:
+            raise RuntimeError(
+                f"Hook '{type(hook).__name__}' has unmet prerequisites: "
+                f"{self._format_missing_prereqs(missing)}"
+            )
+
         self._hooks.append(hook)
+
+    def add_step(self, step: Step):
+        if not isinstance(step, Step):
+            raise TypeError(
+                f"The provided object '{type(step).__name__}' "
+                f"is not an instance of {Step.__name__}!"
+            )
+
+        if not hasattr(step, "name") or step.name not in STEP_REGISTRY:
+            raise ValueError(
+                f"Step '{type(step).__name__}' "
+                "not registered in STEP_REGISTRY!"
+            )
+
+        # Steps may depend on resources, hooks, and other steps.
+        missing = self._missing_prereqs(
+            step.__class__,
+            ["required_resources", "required_hooks", "required_steps"],
+        )
+
+        if missing:
+            raise RuntimeError(
+                f"Step '{type(step).__name__}' has unmet prerequisites: "
+                f"{self._format_missing_prereqs(missing)}"
+            )
+
+        self._steps.append(step)
 
     def _check_and_get_device(self):
         if self._config['device'].startswith('cuda'):
