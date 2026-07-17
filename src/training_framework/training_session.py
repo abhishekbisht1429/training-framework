@@ -313,6 +313,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._session_context = state['session_context']
         self._init_transient_infra()
 
+        # TODO: maybe change the session phase to paused after restoration (by default it is set to new)
+
     @override
     def __setstate__(self, state):
         init_args = state['init_args']
@@ -375,7 +377,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._shared_state.clear()
 
     # ----------------------------------------------------------------------
-
+    # TODO: can we make a check that only those resources which are labeled as required can be accessed through the method below ?
     def get_resource(self, key: str):
         if key not in self._resources:
             raise KeyError(f"{key} not found in resources")
