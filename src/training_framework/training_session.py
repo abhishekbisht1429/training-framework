@@ -197,8 +197,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         # callbacks
         self._resources: dict[str, Resource] = {}
-        self._steps: List[Step] = []
-        self._hooks: List[Hook] = []
+        self._steps: dict[str, Step] = {}
+        self._hooks: dict[str, Hook] = {}
 
         # session essentials
         self._iteration = 0
@@ -234,27 +234,23 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             'np_rng_state': np.random.get_state(),
             'session_config': self._session_config,
             'resources_state': {
-                key: {
-                    'name': resource.name,
+                name: {
                     'state': resource.get_state() if isinstance(resource, Stateful) else None,
                     'init_args': resource._init_args
-                } for key, resource in self._resources.items()
+                } for name, resource in self._resources.items()
             },
-            'steps_state': [
-                {
-                    'name': step.name,
+            'steps_state': {
+                name: {
                     'state': step.get_state() if isinstance(step, Stateful) else None,
                     'init_args': step._init_args
-                } for step in self._steps
-            ],
-            'hooks_state': [
-                {
-                    'name': hook.name,
+                } for name, step in self._steps.items()
+            },
+            'hooks_state': {
+                name: {
                     'state': hook.get_state() if isinstance(hook, Stateful) else None,
                     'init_args': hook._init_args
-                }
-                for hook in self._hooks
-            ],
+                } for name, hook in self._hooks.items()
+            },
             'session_context': self._session_context,
             'init_args': self._init_args
         }
@@ -281,37 +277,37 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         # Rebuild resources
         self._resources: dict[str, Resource] = {}
-        for key, resource_info in state['resources_state'].items():
-            cls = RESOURCE_REGISTRY[resource_info['name']]
+        for name, resource_info in state['resources_state'].items():
+            cls = RESOURCE_REGISTRY[name]
             init_args = resource_info['init_args']
             obj = cls(*init_args['args'], **init_args['kwargs'])
             if issubclass(cls, Stateful):
                 resource_state = resource_info['state']
                 obj.set_state(resource_state)
-            self._resources[key] = obj
+            self._resources[name] = obj
 
 
         # Rebuild steps
-        self._steps: List[Step] = []
-        for step_info in state['steps_state']:
-            cls = STEP_REGISTRY[step_info['name']]
+        self._steps: dict[str, Step] = {}
+        for name, step_info in state['steps_state'].items():
+            cls = STEP_REGISTRY[name]
             init_args = step_info['init_args']
             obj = cls(*init_args['args'], **init_args['kwargs'])
             if issubclass(cls, Stateful):
                 step_state = step_info['state']
                 obj.set_state(step_state)
-            self._steps.append(obj)
+            self._steps[name] = obj
 
         # Rebuild hooks
-        self._hooks: List[Hook] = []
-        for hook_info in state['hooks_state']:
-            cls = HOOK_REGISTRY[hook_info['name']]
+        self._hooks: dict[str, "Hook"] = {}
+        for name, hook_info in state['hooks_state'].items():
+            cls = HOOK_REGISTRY[name]
             init_args = hook_info['init_args']
             obj = cls(*init_args['args'], **init_args['kwargs'])
             if issubclass(cls, Stateful):
                 hook_state = hook_info['state']
                 obj.set_state(hook_state)
-            self._hooks.append(obj)
+            self._hooks[name] = obj
 
         # Restore session context
         self._session_context = state['session_context']
@@ -350,15 +346,15 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @property
     def _stateful_hooks(self):
-        return [hook for hook in self._hooks if isinstance(hook, Stateful)]
+        return [hook for hook in self._hooks.values() if isinstance(hook, Stateful)]
 
     @property
     def _iteration_hooks(self):
-        return [hook for hook in self._hooks if isinstance(hook, IterationHook)]
+        return [hook for hook in self._hooks.values() if isinstance(hook, IterationHook)]
 
     @property
     def _session_hooks(self):
-        return [hook for hook in self._hooks if isinstance(hook, SessionHook)]
+        return [hook for hook in self._hooks.values() if isinstance(hook, SessionHook)]
 
     # ------------------------------------------------------------------------
 
@@ -394,12 +390,12 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             },
             "required_hooks": {
                 hook.name
-                for hook in self._hooks
+                for hook in self._hooks.values()
                 if hasattr(hook, "name")
             },
             "required_steps": {
                 step.name
-                for step in self._steps
+                for step in self._steps.values()
                 if hasattr(step, "name")
             },
         }
@@ -457,11 +453,15 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 f"{self._format_missing_prereqs(missing)}"
             )
 
-        hex_id = f"0x{time.time_ns():x}"
-        resource_id = f"{resource.__class__.__name__}_{hex_id}"
+        # hex_id = f"0x{time.time_ns():x}"
+        # resource_id = f"{resource.__class__.__name__}_{hex_id}"
 
-        self._resources[resource_id] = resource
-        return resource_id
+        if resource.name in self._resources:
+            raise ValueError(f"Resource '{resource.name}' already registered!")
+
+        self._resources[resource.name] = resource
+
+        return resource.name
 
     def register_hook(self, hook: Hook):
         if not isinstance(hook, Hook):
@@ -488,7 +488,10 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 f"{self._format_missing_prereqs(missing)}"
             )
 
-        self._hooks.append(hook)
+        if hook.name in self._hooks:
+            raise ValueError(f"Hook '{hook.name}' already registered!")
+
+        self._hooks[hook.name] = hook
 
     def add_step(self, step: Step):
         if not isinstance(step, Step):
@@ -515,7 +518,10 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 f"{self._format_missing_prereqs(missing)}"
             )
 
-        self._steps.append(step)
+        if step.name in self._steps:
+            raise ValueError(f"Step '{step.name}' already registered!")
+
+        self._steps[step.name] = step
 
     def _check_and_get_device(self):
         if self._config['device'].startswith('cuda'):
@@ -560,7 +566,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 iter_hook.pre_iteration_callback(self)
 
         # 2. Run iteration components
-        for step in self._steps:
+        for step in self._steps.values():
             step.run(self)
 
         # 3. Run post iteration methods
@@ -593,13 +599,13 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # 1. Clean up in reverse order of acquisition to respect dependencies
         for resource_key in reversed(self._resources):
             try:
-                self._resources[resource_key].teardown(None)
+                self._resources[resource_key].teardown(self)
             except Exception as e:
                 print(f"Error releasing resource '{resource_key}': {e}")
 
         # 2. Call session teardown hooks
         for session_hook in self._session_hooks:
-            session_hook.teardown(None)
+            session_hook.teardown(self)
 
         # 3. clear session context
         self._session_context.clear()

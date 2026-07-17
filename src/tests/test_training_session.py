@@ -226,8 +226,8 @@ def test_checkpointer(sample_config, training_engine):
     assert len(reloaded_session_1._hooks) == 1
     assert len(reloaded_session_2._hooks) == 1
 
-    assert reloaded_session_1._hooks[0].call_every == session._hooks[0].call_every
-    assert reloaded_session_2._hooks[0].call_every == session._hooks[0].call_every
+    assert list(reloaded_session_1._hooks.values())[0].call_every == list(session._hooks.values())[0].call_every
+    assert list(reloaded_session_2._hooks.values())[0].call_every == list(session._hooks.values())[0].call_every
 
 
 def test_tensorboard(sample_config, training_engine, monkeypatch):

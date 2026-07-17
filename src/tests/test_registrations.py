@@ -236,7 +236,7 @@ def test_register_hook_requires_resource_and_hook_prerequisites(tmp_path):
         "reg_hook_required_hook",
     )
 
-    assert session._hooks == []
+    assert session._hooks == {}
 
     session.register_resource(RequiredResource())
 
@@ -246,12 +246,12 @@ def test_register_hook_requires_resource_and_hook_prerequisites(tmp_path):
     )
 
     # Failed registration still must not add the dependent hook.
-    assert session._hooks == []
+    assert session._hooks == {}
 
     session.register_hook(RequiredHook())
     session.register_hook(DependentHook())
 
-    assert [registered_hook.name for registered_hook in session._hooks] == [
+    assert [registered_hook.name for registered_hook in session._hooks.values()] == [
         "reg_hook_required_hook",
         "reg_dependent_hook",
     ]
@@ -290,7 +290,7 @@ def test_add_step_requires_resource_hook_and_step_prerequisites(tmp_path):
         "reg_step_required_step",
     )
 
-    assert session._steps == []
+    assert session._steps == {}
 
     session.register_resource(RequiredResource())
 
@@ -300,7 +300,7 @@ def test_add_step_requires_resource_hook_and_step_prerequisites(tmp_path):
         "reg_step_required_step",
     )
 
-    assert session._steps == []
+    assert session._steps == {}
 
     session.register_hook(RequiredHook())
 
@@ -309,12 +309,12 @@ def test_add_step_requires_resource_hook_and_step_prerequisites(tmp_path):
         "reg_step_required_step",
     )
 
-    assert session._steps == []
+    assert session._steps == {}
 
     session.add_step(RequiredStep())
     session.add_step(DependentStep())
 
-    assert [registered_step.name for registered_step in session._steps] == [
+    assert [registered_step.name for registered_step in session._steps.values()] == [
         "reg_step_required_step",
         "reg_dependent_step",
     ]
@@ -375,7 +375,7 @@ def test_prerequisite_name_must_exist_in_the_correct_component_category(
     # But it must satisfy a Hook dependency.
     hook_only_session.register_hook(HookRequiringHook())
 
-    assert [item.name for item in hook_only_session._hooks] == [
+    assert [item.name for item in hook_only_session._hooks.values()] == [
         shared_name,
         "hook_requiring_same_name_hook",
     ]
@@ -392,7 +392,7 @@ def test_prerequisite_name_must_exist_in_the_correct_component_category(
     # But it must satisfy a Resource dependency.
     resource_only_session.register_hook(HookRequiringResource())
 
-    assert resource_only_session._hooks[-1].name == (
+    assert list(resource_only_session._hooks.values())[-1].name == (
         "hook_requiring_same_name_resource"
     )
 
@@ -410,7 +410,74 @@ def test_prerequisite_name_must_exist_in_the_correct_component_category(
     no_step_session.add_step(SameNameStep())
     no_step_session.add_step(StepRequiringStep())
 
-    assert [item.name for item in no_step_session._steps] == [
+    assert [item.name for item in no_step_session._steps.values()] == [
         shared_name,
         "step_requiring_same_name_step",
     ]
+
+def test_session_rejects_duplicate_resource_name(tmp_path):
+    session = make_session(tmp_path)
+
+    @resource("unique_resource")
+    class UniqueResource(Resource):
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    session.register_resource(UniqueResource())
+
+    with pytest.raises(
+        ValueError,
+        match="unique_resource.*already registered",
+    ):
+        session.register_resource(UniqueResource())
+
+
+def test_session_rejects_duplicate_hook_name(tmp_path):
+    session = make_session(tmp_path)
+
+    @hook("unique_hook")
+    class UniqueHook(Hook):
+        pass
+
+    session.register_hook(UniqueHook())
+
+    with pytest.raises(
+        ValueError,
+        match="unique_hook.*already registered",
+    ):
+        session.register_hook(UniqueHook())
+
+
+def test_distinct_registered_subclasses_can_coexist(tmp_path):
+    session = make_session(tmp_path)
+
+    class BaseLoggerResource(Resource):
+        def __init__(self, destination):
+            self.destination = destination
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    @resource("training_logger")
+    class TrainingLogger(BaseLoggerResource):
+        pass
+
+    @resource("error_logger")
+    class ErrorLogger(BaseLoggerResource):
+        pass
+
+    training_id = session.register_resource(
+        TrainingLogger("training.log")
+    )
+    error_id = session.register_resource(
+        ErrorLogger("errors.log")
+    )
+
+    assert session.get_resource(training_id).name == "training_logger"
+    assert session.get_resource(error_id).name == "error_logger"

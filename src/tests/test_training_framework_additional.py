@@ -107,6 +107,14 @@ class AdditionalResource(Resource, Stateful):
         self.events = list(state["events"])
         self.session_dirs = list(state["session_dirs"])
 
+@resource("additional_resource_a")
+class AdditionalResourceA(AdditionalResource):
+    pass
+
+
+@resource("additional_resource_b")
+class AdditionalResourceB(AdditionalResource):
+    pass
 
 @hook("test_additional_hook")
 class AdditionalHook(LifecycleHook, Stateful):
@@ -148,6 +156,15 @@ class AdditionalHook(LifecycleHook, Stateful):
         self.post_iterations = list(state["post_iterations"])
         self.shared_snapshots = [dict(item) for item in state["shared_snapshots"]]
 
+
+@hook("additional_hook_a")
+class AdditionalHookA(AdditionalHook):
+    pass
+
+
+@hook("additional_hook_b")
+class AdditionalHookB(AdditionalHook):
+    pass
 
 @pytest.fixture
 def base_session_config(tmp_path):
@@ -340,7 +357,7 @@ def test_registration_validation_and_lookup(minimal_session_config):
     session.register_hook(hook_obj)
     resource_id = session.register_resource(resource_obj)
 
-    assert resource_id.startswith("AdditionalResource_")
+    assert resource_id == "test_additional_resource"
     assert session.get_resource(resource_id) is resource_obj
     with pytest.raises(KeyError):
         session.get_resource("missing-resource")
@@ -351,67 +368,154 @@ def test_registration_validation_and_lookup(minimal_session_config):
 
 def test_context_lifecycle_and_iteration_order(base_session_config):
     session = TrainingSession(base_session_config)
-    resource_a = AdditionalResource()
-    resource_b = AdditionalResource()
-    hook_a = AdditionalHook(call_every=1)
-    hook_b = AdditionalHook(call_every=2)
+
+    # Each resource and hook has a distinct registered name.
+    resource_a = AdditionalResourceA()
+    resource_b = AdditionalResourceB()
+    hook_a = AdditionalHookA(call_every=1)
+    hook_b = AdditionalHookB(call_every=2)
+
     step_a = AdditionalStep()
     step_b = ToyModelStep()
 
-    session.register_resource(resource_a)
-    session.register_resource(resource_b)
+    resource_a_id = session.register_resource(resource_a)
+    resource_b_id = session.register_resource(resource_b)
+
     session.register_hook(hook_a)
     session.register_hook(hook_b)
+
     session.add_step(step_a)
     session.add_step(step_b)
 
+    # Verify the session contains two distinct logical resources/hooks,
+    # rather than duplicate instances of one registered component.
+    assert resource_a.name == "additional_resource_a"
+    assert resource_b.name == "additional_resource_b"
+    assert resource_a_id != resource_b_id
+
+    assert [hook.name for hook in session._hooks.values()] == [
+        "additional_hook_a",
+        "additional_hook_b",
+    ]
+
     with session:
         assert session._phase is SessionPhase.READY
+
         assert resource_a.setup_calls == 1
         assert resource_b.setup_calls == 1
+        assert resource_a.events == ["setup"]
+        assert resource_b.events == ["setup"]
+
         assert hook_a.events == ["setup"]
         assert hook_b.events == ["setup"]
 
         first = next(session)
+
         assert first == 1
         assert session.iteration == 1
+
+        # Iteration-scoped shared state must be cleared after next() returns.
         assert session._shared_state == {}
 
         second = next(session)
+
         assert second == 2
         assert session.iteration == 2
-
+        assert session._shared_state == {}
 
     assert session._phase is SessionPhase.PAUSED
+
     assert resource_a.events == ["setup", "teardown"]
     assert resource_b.events == ["setup", "teardown"]
+    assert resource_a.setup_calls == 1
+    assert resource_b.setup_calls == 1
     assert resource_a.teardown_calls == 1
     assert resource_b.teardown_calls == 1
 
     with session:
         assert session.iteration == 2
         assert session._phase is SessionPhase.READY
+
         assert resource_a.setup_calls == 2
         assert resource_b.setup_calls == 2
-        assert hook_a.events == ["setup", "pre:1", "post:1", "pre:2", "post:2", "teardown", "setup"]
-        assert hook_b.events == ["setup", "pre:1", "post:1", "pre:2", "post:2", "teardown", "setup"]
+
+        assert hook_a.events == [
+            "setup",
+            "pre:1",
+            "post:1",
+            "pre:2",
+            "post:2",
+            "teardown",
+            "setup",
+        ]
+        assert hook_b.events == [
+            "setup",
+            "pre:1",
+            "post:1",
+            "pre:2",
+            "post:2",
+            "teardown",
+            "setup",
+        ]
 
         third = next(session)
+
         assert third == 3
         assert session.iteration == 3
+        assert session._shared_state == {}
 
-    # NOTE: For first and last iterations all hooks are called regardless of the value of call_every
-    assert hook_a.events == ["setup", "pre:1", "post:1", "pre:2", "post:2", "teardown", "setup", "pre:3", "post:3", "teardown"]
-    assert hook_b.events == ["setup", "pre:1", "post:1", "pre:2", "post:2", "teardown", "setup", "pre:3", "post:3", "teardown"]
+    assert resource_a.events == [
+        "setup",
+        "teardown",
+        "setup",
+        "teardown",
+    ]
+    assert resource_b.events == [
+        "setup",
+        "teardown",
+        "setup",
+        "teardown",
+    ]
+    assert resource_a.setup_calls == 2
+    assert resource_b.setup_calls == 2
+    assert resource_a.teardown_calls == 2
+    assert resource_b.teardown_calls == 2
+
+    # The first and final iterations call every hook regardless of
+    # call_every. Hook B is also called on iteration 2 because call_every=2.
+    expected_hook_events = [
+        "setup",
+        "pre:1",
+        "post:1",
+        "pre:2",
+        "post:2",
+        "teardown",
+        "setup",
+        "pre:3",
+        "post:3",
+        "teardown",
+    ]
+
+    assert hook_a.events == expected_hook_events
+    assert hook_b.events == expected_hook_events
+
     assert hook_a.pre_iterations == [1, 2, 3]
     assert hook_a.post_iterations == [1, 2, 3]
     assert hook_b.pre_iterations == [1, 2, 3]
     assert hook_b.post_iterations == [1, 2, 3]
 
-    assert hook_a.shared_snapshots[0]["step_called"] is True
-    assert hook_a.shared_snapshots[0]["step_index"] == 1
-    assert hook_a.shared_snapshots[1]["step_called"] is True
-    assert hook_a.shared_snapshots[1]["step_index"] == 2
+    # Values shared by the steps were visible to the hooks before the
+    # iteration-scoped state was cleared.
+    for hook in (hook_a, hook_b):
+        assert [snapshot["step_index"] for snapshot in hook.shared_snapshots] == [
+            1,
+            2,
+            3,
+        ]
+        assert all(
+            snapshot["step_called"] is True
+            for snapshot in hook.shared_snapshots
+        )
 
 def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session_config):
     session = TrainingSession(base_session_config)
@@ -438,8 +542,8 @@ def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session
     assert len(restored._hooks) == 1
 
     restored_resource = next(iter(restored._resources.values()))
-    restored_step = restored._steps[0]
-    restored_hook = restored._hooks[0]
+    restored_step = list(restored._steps.values())[0]
+    restored_hook = list(restored._hooks.values())[0]
 
     assert isinstance(restored_resource, AdditionalResource)
     assert isinstance(restored_step, AdditionalStep)
@@ -543,13 +647,13 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     assert len(sessions) == 2
     assert len(sessions[0]._hooks) == 2
     assert len(sessions[0]._resources) == 1
-    assert any(isinstance(h, Logger) for h in sessions[0]._hooks)
-    assert any(isinstance(h, Checkpointer) for h in sessions[0]._hooks)
+    assert any(isinstance(h, Logger) for h in sessions[0]._hooks.values())
+    assert any(isinstance(h, Checkpointer) for h in sessions[0]._hooks.values())
     assert any(isinstance(r, Tensorboard) for r in sessions[0]._resources.values())
 
     assert len(sessions[1]._hooks) == 1
     assert len(sessions[1]._resources) == 0
-    assert any(isinstance(h, Checkpointer) for h in sessions[1]._hooks)
+    assert any(isinstance(h, Checkpointer) for h in sessions[1]._hooks.values())
 
 
 def test_training_engine_context_and_registration(engine, minimal_session_config):

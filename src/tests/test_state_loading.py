@@ -166,8 +166,8 @@ def test_checkpoint_pickle_round_trip_restores_resources_hooks_and_state(tmp_pat
     assert restored.session_config.max_iterations == 3
 
     restored_resource = restored.get_resource(resource_id)
-    restored_hook = restored._hooks[0]
-    restored_step = restored._steps[0]
+    restored_hook = list(restored._hooks.values())[0]
+    restored_step = list(restored._steps.values())[0]
 
     assert restored_resource.prefix == "alpha"
     assert restored_resource.multiplier == 9
