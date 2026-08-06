@@ -105,7 +105,7 @@ class Tensorboard(Resource):
 
     def __init__(self, config: dict):
         self._config = config
-        self._tb_process = None
+        self._tb_process: subprocess.Popen | None = None
         self._tb_summary_writer = None
 
     @property
@@ -139,19 +139,35 @@ class Tensorboard(Resource):
         self._tb_process.terminate()
         print("resources released...")
 
-        self._tb_process = None
         self._tb_summary_writer = None
+
+        if self._tb_process is not None:
+            self._tb_process.terminate()
 
 
 @hook("ddp")
 class DDPHook(SessionHook):
 
     def __init__(self, config: dict, rank: int):
-        self._config = config
+        self._world_size = config['world_size']
+        self._backend = config['backend']
         self._rank = rank
 
     def setup(self, session: TrainingSession) -> Any:
-        pass
+        # Address and port where Rank 0 is hosted (must be reachable by all processes)
+        os.environ["MASTER_ADDR"] = "localhost"  # Or master node IP for multi-node
+        os.environ["MASTER_PORT"] = "12355"  # Any free port
+
+        # Explicitly set the CUDA device for this process (1 process per GPU strategy)
+        if self._backend == "nccl" and torch.cuda.is_available():
+            torch.cuda.set_device(self._rank)
+
+        # Initialize the default process group
+        torch.distributed.init_process_group(
+            backend=self._backend,
+            rank=self._rank,
+            world_size=self._world_size
+        )
 
     def teardown(self, session):
-        pass
+        torch.distributed.destroy_process_group()

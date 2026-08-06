@@ -697,41 +697,6 @@ def test_parallel_engine_registers_full_configs_and_starts_selected_process(
     assert processes[1].started is True
 
 
-
-# def test_configurator_configs_can_be_registered_and_started(
-#     sample_config: dict[str, Any],
-#     tmp_path: Path,
-#     monkeypatch: pytest.MonkeyPatch,
-# ) -> None:
-#     config_path = tmp_path / "config.yaml"
-#     config_path.write_text(yaml.safe_dump(sample_config), encoding="utf-8")
-#     monkeypatch.setattr(sys, "argv", ["", str(config_path)])
-#     queues, processes = _install_multiprocessing_fakes(monkeypatch)
-#
-#     configurator = Configurator()
-#     session_configs = [
-#         configurator.get_base_config(index)
-#         for index in range(len(sample_config["sessions"]))
-#     ]
-#     training_engine = engine_module.TrainingEngine({})
-#
-#     with training_engine:
-#         session_ids = [
-#             training_engine.register_session(config)
-#             for config in session_configs
-#         ]
-#         for session_id in session_ids:
-#             training_engine.start_session(session_id)
-#
-#         assert len(training_engine._session_processes) == len(session_configs)
-#         assert len(training_engine._signal_queues) == len(session_configs)
-#         assert all(process.started for process in processes)
-#
-#     assert [queue.put_calls for queue in queues] == [[1], [1], [1]]
-#     # assert all(process.join_timeouts == [2.0] for process in processes)
-#     assert all(not process.terminated for process in processes)
-
-
 # @pytest.mark.xfail(
 #     strict=False,
 #     reason=(
