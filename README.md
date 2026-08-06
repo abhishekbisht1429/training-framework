@@ -205,7 +205,7 @@ engine.register_session(session)
 
 # TrainingEngine.run_all() must be called inside the engine context.
 with engine:
-    engine.run_all(wait=True)
+    engine.start_all(wait=True)
 ```
 
 Alternatively, a session can be driven directly instead of registering it with an engine:
@@ -714,7 +714,7 @@ for session in sessions:
     engine.register_session(session)
 
 with engine:
-    engine.run_all()
+    engine.start_all()
 ```
 
 Run the program:
@@ -752,7 +752,7 @@ engine.register_session(session_a)
 engine.register_session(session_b)
 
 with engine:
-    engine.run_all(wait=True)
+    engine.start_all(wait=True)
 ```
 
 `wait=True` starts every registered session and joins all worker threads before returning from `run_all()`.
@@ -761,7 +761,7 @@ For non-blocking startup:
 
 ```python
 with engine:
-    engine.run_all(wait=False)
+    engine.start_all(wait=False)
     # The worker threads are active here.
     do_other_work()
 

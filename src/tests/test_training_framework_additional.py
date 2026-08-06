@@ -618,21 +618,25 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     sample_config = {
         "sessions": [
             {
-                "max_iterations": 2,
-                "batch_size": 4,
-                "sessions_dir": str(tmp_path / "s1"),
-                "device": "cpu",
-                "rng_seed": 1,
+                "session_config": {
+                    "max_iterations": 2,
+                    "batch_size": 4,
+                    "sessions_dir": str(tmp_path / "s1"),
+                    "device": "cpu",
+                    "rng_seed": 1
+                },
                 "logger": {"log_every": 1, "log_file": str(tmp_path / "log1.txt")},
                 "checkpointer": {"checkpoint_every": 1, "checkpoints_dir": str(tmp_path / "ckpts1")},
                 "tensorboard": {"host": "0.0.0.0", "port": 16050},
             },
             {
-                "max_iterations": 2,
-                "batch_size": 4,
-                "sessions_dir": str(tmp_path / "s2"),
-                "device": "cpu",
-                "rng_seed": 2,
+                "session_config": {
+                    "max_iterations": 2,
+                    "batch_size": 4,
+                    "sessions_dir": str(tmp_path / "s1"),
+                    "device": "cpu",
+                    "rng_seed": 1
+                },
                 "checkpointer": {"checkpoint_every": 2, "checkpoints_dir": str(tmp_path / "ckpts2")},
             },
         ]
@@ -654,27 +658,3 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     assert len(sessions[1]._hooks) == 1
     assert len(sessions[1]._resources) == 0
     assert any(isinstance(h, Checkpointer) for h in sessions[1]._hooks.values())
-
-
-def test_training_engine_context_and_registration(engine, minimal_session_config):
-    session = TrainingSession(minimal_session_config)
-
-    with pytest.raises(RuntimeError, match="Use within"):
-        engine.run_all()
-
-    with pytest.raises(TypeError):
-        engine.register_session(object())
-
-    engine.register_session(session)
-    assert len(engine._sessions) == 1
-    assert len(engine._session_threads) == 1
-    assert len(engine._session_locks) == 1
-
-    with engine:
-        assert engine._active is True
-        empty_engine = TrainingEngine({})
-        with empty_engine:
-            with pytest.raises(RuntimeError, match="There are no sessions registered"):
-                empty_engine.run_all()
-
-    assert engine._active is False

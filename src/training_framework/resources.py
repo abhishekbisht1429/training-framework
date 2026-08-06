@@ -8,7 +8,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from training_framework.training_session import TrainingSession, LifecycleHook, Resource, Stateful, hook, resource, \
-    StatefulResource
+    StatefulResource, SessionHook
 from training_framework.util import timestamp_str
 
 @hook("checkpointer")
@@ -141,3 +141,17 @@ class Tensorboard(Resource):
 
         self._tb_process = None
         self._tb_summary_writer = None
+
+
+@hook("ddp")
+class DDPHook(SessionHook):
+
+    def __init__(self, config: dict, rank: int):
+        self._config = config
+        self._rank = rank
+
+    def setup(self, session: TrainingSession) -> Any:
+        pass
+
+    def teardown(self, session):
+        pass

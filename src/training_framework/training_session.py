@@ -2,6 +2,7 @@ import os
 import random
 import time
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
@@ -9,6 +10,7 @@ from typing import List, Any, override
 
 import numpy as np
 import torch
+from requests import Session
 
 from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta
 
@@ -251,7 +253,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                     'init_args': hook._init_args
                 } for name, hook in self._hooks.items()
             },
-            'session_context': self._session_context,
+            'session_context': deepcopy(self._session_context),
             'init_args': self._init_args
         }
 
@@ -264,16 +266,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._iteration = state['iteration']
         self._session_config = state['session_config']
 
-        # 2. Restore Global RNG (Random Number Generator) States
-        torch.set_rng_state(state['torch_rng_state'])
-        random.setstate(state['python_rng_state'])
-        np.random.set_state(state['np_rng_state'])
-
         # Guard CUDA restoration in case code is loaded on a CPU-only machine
         if torch.cuda.is_available() and 'cuda_rng_state' in state:
             torch.cuda.set_rng_state_all(state['cuda_rng_state'])
 
-        # 3. Dynamically Reconstruct Polymorphic Nested Collections
+        # Dynamically Reconstruct Polymorphic Nested Collections
 
         # Rebuild resources
         self._resources: dict[str, Resource] = {}
@@ -313,6 +310,10 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._session_context = state['session_context']
         self._init_transient_infra()
 
+        # Restore Global RNG (Random Number Generator) States
+        torch.set_rng_state(state['torch_rng_state'])
+        random.setstate(state['python_rng_state'])
+        np.random.set_state(state['np_rng_state'])
         # TODO: maybe change the session phase to paused after restoration (by default it is set to new)
 
     @override
@@ -552,31 +553,39 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def __next__(self):
         self._check_ready()
 
-        if self._iteration == self.session_config.max_iterations:
-            self._phase = SessionPhase.FINISHED
-            raise StopIteration
+        iteration_complete = False
+        try:
+            self._iteration += 1
+            self._phase = SessionPhase.RUNNING
 
-        self._phase = SessionPhase.RUNNING
-        self._iteration += 1
+            if self._iteration > self.session_config.max_iterations:
+                self._phase = SessionPhase.FINISHED
+                raise StopIteration
 
-        # Execution order or callbacks A, B, C
-        # A_pre -> B_pre -> C_pre -> A -> B -> C -> C_post -> B_post -> A_post
+            # Execution order or callbacks A, B, C
+            # A_pre -> B_pre -> C_pre -> A -> B -> C -> C_post -> B_post -> A_post
 
-        # 1. Run pre iteration methods
-        for iter_hook in self._iteration_hooks:
-            if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
-                iter_hook.pre_iteration_callback(self)
+            # 1. Run pre iteration methods
+            for iter_hook in self._iteration_hooks:
+                if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
+                    iter_hook.pre_iteration_callback(self)
 
-        # 2. Run iteration components
-        for step in self._steps.values():
-            step.run(self)
+            # 2. Run iteration components
+            for step in self._steps.values():
+                step.run(self)
 
-        # 3. Run post iteration methods
-        for iter_hook in reversed(self._iteration_hooks):
-            if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
-                iter_hook.post_iteration_callback(self)
+            # 3. Run post iteration methods
+            for iter_hook in reversed(self._iteration_hooks):
+                if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
+                    iter_hook.post_iteration_callback(self)
 
-        self._clear_iteration_state()
+            iteration_complete = True
+        finally:
+            self._clear_iteration_state()
+
+            # rollback in case of failure
+            if not iteration_complete:
+                self._iteration -= 1
 
         return self._iteration
 
@@ -606,8 +615,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 print(f"Error releasing resource '{resource_key}': {e}")
 
         # 2. Call session teardown hooks
-        for session_hook in self._session_hooks:
-            session_hook.teardown(self)
+        for session_hook in reversed(self._session_hooks):
+            try:
+                session_hook.teardown(self)
+            except Exception as e:
+                print(f"Error running teardown '{session_hook.name}': {e}")
 
         # 3. clear session context
         self._session_context.clear()
@@ -619,4 +631,3 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             self._phase = SessionPhase.PAUSED
 
         return False
-

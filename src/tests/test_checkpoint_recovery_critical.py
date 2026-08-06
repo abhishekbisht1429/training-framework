@@ -493,13 +493,6 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
     assert restored.session_context == {}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "TrainingSession.get_state() currently returns session_context by reference; "
-        "the snapshot changes when the live context is mutated or cleared."
-    ),
-)
 def test_get_state_returns_a_detached_session_context_snapshot(tmp_path):
     """A state snapshot should represent values at get_state() call time."""
 
@@ -518,14 +511,14 @@ def test_get_state_returns_a_detached_session_context_snapshot(tmp_path):
     assert state["session_context"] == {"nested": {"values": [1]}}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "TrainingSession.set_state() restores global RNG state before rebuilding "
-        "components, so a component constructor that consumes randomness advances "
-        "the restored stream."
-    ),
-)
+# @pytest.mark.xfail(
+#     strict=True,
+#     reason=(
+#         "TrainingSession.set_state() restores global RNG state before rebuilding "
+#         "components, so a component constructor that consumes randomness advances "
+#         "the restored stream."
+#     ),
+# )
 def test_component_constructors_do_not_advance_restored_rng_streams(tmp_path):
     """Component reconstruction must not perturb checkpointed global RNG state."""
 
