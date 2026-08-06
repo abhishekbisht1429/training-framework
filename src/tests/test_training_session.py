@@ -99,7 +99,7 @@ class SampleStep(Step):
 def _make_session_config(tmp_path: Path, index: int) -> dict[str, Any]:
     suffix = "" if index == 0 else str(index + 1)
     return {
-        "session_config": {
+        "base_config": {
             "max_iterations": 12,
             "batch_size": 4,
             "sessions_dir": str(tmp_path / f"sessions{suffix}"),
@@ -141,7 +141,7 @@ def _config_with_components(
 ) -> dict[str, Any]:
     """Return an isolated full config containing only selected components."""
 
-    keys = ("session_config", *component_names)
+    keys = ("base_config", *component_names)
     return {key: deepcopy(session_config[key]) for key in keys}
 
 
@@ -153,7 +153,7 @@ def _run_session_to_completion(
     """Build and run a finite session without spawning a child process."""
 
     session = engine_module.create_session_from_config(config, rank=rank)
-    max_iterations = int(config["session_config"]["max_iterations"])
+    max_iterations = int(config["base_config"]["max_iterations"])
 
     with session:
         for _ in range(max_iterations + 1):
@@ -191,8 +191,8 @@ def test_configurator_returns_full_session_config(
 
     configurator = Configurator()
 
-    assert configurator.get_session_config(0) == sample_config["sessions"][0]
-    assert configurator.get_sub_config(0, "logger") == (
+    assert configurator.get_base_config(0) == sample_config["sessions"][0]
+    assert configurator.get_component_config(0, "logger") == (
         sample_config["sessions"][0]["logger"]
     )
 
@@ -217,8 +217,8 @@ def test_configurator_override_updates_nested_component_configs(
     )
 
     configurator = Configurator()
-    checkpointer_config_0 = configurator.get_sub_config(0, "checkpointer")
-    checkpointer_config_1 = configurator.get_sub_config(1, "checkpointer")
+    checkpointer_config_0 = configurator.get_component_config(0, "checkpointer")
+    checkpointer_config_1 = configurator.get_component_config(1, "checkpointer")
 
     assert checkpointer_config_0["checkpoint_every"] == 5
     assert checkpointer_config_1["checkpoint_every"] == 20
@@ -284,7 +284,7 @@ def test_create_session_from_config_registers_all_component_types(
 ) -> None:
     _install_recording_session_factory(monkeypatch)
     config = {
-        "session_config": {"max_iterations": 3},
+        "base_config": {"max_iterations": 3},
         "train_step": {"value": "step"},
         "metrics_hook": {"value": "hook"},
         "cache_resource": {"value": "resource"},
@@ -294,7 +294,7 @@ def test_create_session_from_config_registers_all_component_types(
     session = engine_module.create_session_from_config(config)
 
     assert isinstance(session, RecordingSession)
-    assert session.session_config is config["session_config"]
+    assert session.session_config is config["base_config"]
     assert [component.config for component in session.steps] == [
         config["train_step"]
     ]
@@ -328,7 +328,7 @@ def test_create_session_from_config_secondary_rank_keeps_only_parallel_component
     monkeypatch.setattr(factory_module, "RESOURCE_REGISTRY", {})
 
     config = {
-        "session_config": {"max_iterations": 3},
+        "base_config": {"max_iterations": 3},
         "parallel_step": {"parallel": True, "value": "parallel"},
         "main_process_step": {"parallel": False, "value": "rank-zero-only"},
         "implicit_main_process_hook": {"value": "rank-zero-by-default"},
@@ -350,7 +350,7 @@ def test_create_session_from_config_rejects_unknown_component(
 ) -> None:
     _install_recording_session_factory(monkeypatch)
     config = {
-        "session_config": {"max_iterations": 1},
+        "base_config": {"max_iterations": 1},
         "not_registered": {},
     }
 
@@ -376,7 +376,7 @@ def test_logger_is_created_from_config_and_writes_each_iteration(
 
     log_path = Path(config["logger"]["log_file"])
     lines = log_path.read_text(encoding="utf-8").splitlines()
-    max_iterations = config["session_config"]["max_iterations"]
+    max_iterations = config["base_config"]["max_iterations"]
 
     assert session._phase is SessionPhase.FINISHED
     assert len(lines) == max_iterations
@@ -479,7 +479,7 @@ def test_tensorboard_resource_is_created_and_cleaned_up_from_config(
     assert isinstance(tensorboard, Tensorboard)
     assert tensorboard.summary_writer is None
 
-    max_iterations = config["session_config"]["max_iterations"]
+    max_iterations = config["base_config"]["max_iterations"]
     with session:
         for _ in range(max_iterations + 1):
             try:
@@ -613,7 +613,7 @@ def test_proc_worker_builds_session_from_full_config_and_runs_until_signal(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = {
-        "session_config": {"max_iterations": 2},
+        "base_config": {"max_iterations": 2},
         "sample_step": {"batch_size": 4},
     }
     queue = ScriptedQueue(
@@ -646,7 +646,7 @@ def test_ddp_proc_worker_passes_rank_to_session_factory(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = {
-        "session_config": {"max_iterations": 1},
+        "base_config": {"max_iterations": 1},
         "ddp": {"n_proc": 2},
     }
     queue = ScriptedQueue(items=["stop"], empty_results=[True, False])
@@ -734,7 +734,7 @@ def test_configurator_configs_can_be_registered_and_started(
 
     configurator = Configurator()
     session_configs = [
-        configurator.get_session_config(index)
+        configurator.get_base_config(index)
         for index in range(len(sample_config["sessions"]))
     ]
     training_engine = engine_module.TrainingEngine({})
@@ -773,7 +773,7 @@ def test_proc_worker_starts_one_ddp_worker_for_each_nonzero_rank(
         lambda config: IteratorSession(),
     )
     config = {
-        "session_config": {"max_iterations": 1},
+        "base_config": {"max_iterations": 1},
         "ddp": {"n_proc": 4},
     }
 

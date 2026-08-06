@@ -736,8 +736,8 @@ python train.py config.yaml --override \
 ### Configurator API
 
 ```python
-configurator.get_session_config(index)
-configurator.get_sub_config(session_index, key)
+configurator.get_base_config(index)
+configurator.get_component_config(session_index, key)
 configurator.create_sessions()
 ```
 

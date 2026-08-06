@@ -234,7 +234,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             'python_rng_state': random.getstate(),
             'cuda_rng_state': torch.cuda.get_rng_state_all(),
             'np_rng_state': np.random.get_state(),
-            'session_config': self._session_config,
+            "base_config": self._session_config,
             'resources_state': {
                 name: {
                     'state': resource.get_state() if isinstance(resource, Stateful) else None,
@@ -264,7 +264,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # 1. Restore configuration and tracking variables
         self._config = state['config']
         self._iteration = state['iteration']
-        self._session_config = state['session_config']
+        self._session_config = state["base_config"]
 
         # Guard CUDA restoration in case code is loaded on a CPU-only machine
         if torch.cuda.is_available() and 'cuda_rng_state' in state:

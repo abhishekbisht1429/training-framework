@@ -16,7 +16,7 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from training_framework.configurator import Configurator
+from training_framework.configurator import Configurator, create_session_from_config
 from training_framework.dataloader import InfiniteSampler
 from training_framework.resources import Checkpointer, Logger, Tensorboard
 from training_framework.training_engine import TrainingEngine
@@ -597,28 +597,28 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
     monkeypatch.setattr(sys, "argv", ["pytest", config_path, "--override", "sessions[0].checkpointer.checkpoint_every=11", "sessions.1.logger.log_every=9"])
 
     configurator = Configurator()
-    session_config = configurator.get_session_config(0)
-    resource_config = configurator.get_sub_config(0, "logger")
+    session_config = configurator.get_base_config(0)
+    resource_config = configurator.get_component_config(0, "logger")
 
     assert session_config["checkpointer"]["checkpoint_every"] == 11
-    assert configurator.get_sub_config(1, "logger")["log_every"] == 9
+    assert configurator.get_component_config(1, "logger")["log_every"] == 9
     assert resource_config == sample_config["sessions"][0]["logger"]
 
     resource_config["nested"]["enabled"] = False
     assert sample_config["sessions"][0]["logger"]["nested"]["enabled"] is True
 
     with pytest.raises(KeyError):
-        configurator.get_sub_config(0, "missing")
+        configurator.get_component_config(0, "missing")
 
     sample_config["sessions"][0]["logger"]["log_every"] = 99
-    assert configurator.get_session_config(0)["logger"]["log_every"] == 1
+    assert configurator.get_base_config(0)["logger"]["log_every"] == 1
 
 
 def test_configurator_create_sessions_attaches_expected_components(tmp_path, monkeypatch):
     sample_config = {
         "sessions": [
             {
-                "session_config": {
+                "base_config": {
                     "max_iterations": 2,
                     "batch_size": 4,
                     "sessions_dir": str(tmp_path / "s1"),
@@ -630,7 +630,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
                 "tensorboard": {"host": "0.0.0.0", "port": 16050},
             },
             {
-                "session_config": {
+                "base_config": {
                     "max_iterations": 2,
                     "batch_size": 4,
                     "sessions_dir": str(tmp_path / "s1"),
@@ -646,7 +646,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     monkeypatch.setattr(sys, "argv", ["pytest", config_path])
 
     configurator = Configurator()
-    sessions = configurator.create_sessions()
+    sessions = [create_session_from_config(config) for config in configurator.session_configs]
 
     assert len(sessions) == 2
     assert len(sessions[0]._hooks) == 2

@@ -1,4 +1,5 @@
 import argparse
+import collections
 from copy import deepcopy
 from typing import Mapping, List, Any
 
@@ -9,12 +10,12 @@ from training_framework.resources import Logger, Checkpointer, Tensorboard, DDPH
 from training_framework.training_session import TrainingSession, HOOK_REGISTRY, STEP_REGISTRY, RESOURCE_REGISTRY
 
 def create_session_from_config(config, rank=0):
-    session = TrainingSession(config['session_config'])
+    session = TrainingSession(config["base_config"])
     for name in config.keys():
         # for parallel session skip registration of components which are not marked as parallel
         if rank > 0 and config[name].get('parallel', False) == False:
             continue
-        if name in ["ddp", "session_config"]:
+        if name in ["ddp", "base_config"]:
             continue
         if name in STEP_REGISTRY:
             step_config = config[name]
@@ -55,10 +56,10 @@ class Configurator:
         self._session_configs = OmegaConf.to_container(config)['sessions']
 
 
-    def get_session_config(self, index):
+    def get_base_config(self, index):
         return self._session_configs[index]
 
-    def get_sub_config(self, session_index: int, key: str):
+    def get_component_config(self, session_index: int, key: str):
         session_config = self._session_configs[session_index]
         if key not in session_config:
             raise KeyError(key)
@@ -66,10 +67,18 @@ class Configurator:
             raise ValueError("The value corresponding to the key '{}' is not a mapping".format(key))
         return deepcopy(session_config[key])
 
-    def create_sessions(self) -> List[TrainingSession]:
-        sessions = []
-        for config in self._session_configs:
-            sessions.append(create_session_from_config(config))
 
-        return sessions
+    def get_all_component_configs(self, session_index):
+        component_configs = {}
+        session_config = self._session_configs[session_index]
 
+        for key in session_config:
+            if key == "base_config":
+                continue
+            component_configs[key] = self.get_component_config(session_index, key)
+
+        return component_configs
+
+    @property
+    def session_configs(self):
+        return deepcopy(self._session_configs)
