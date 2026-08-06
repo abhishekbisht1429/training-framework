@@ -83,12 +83,6 @@ class TrainingEngine:
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
-        for queue in self._signal_queues:
-            queue.put(1)
-
         for process in self._session_processes:
-            process.join(timeout=2.0)
-            if process.is_alive():
-                print('terminating process forcefully')
-                process.terminate()
+            process.join()
 
