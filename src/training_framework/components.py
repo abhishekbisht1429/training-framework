@@ -146,7 +146,7 @@ class Tensorboard(Resource):
 
 
 @resource("ddp")
-class DDPResource(SessionHook):
+class DDPResource(Resource):
 
     def __init__(self, config: dict, rank: int):
         self._world_size = config['world_size']
