@@ -253,7 +253,7 @@ class RecordingComponent:
         self.config = config
 
 
-class RecordingDDPHook(RecordingComponent):
+class RecordingDDPResource(RecordingComponent):
     def __init__(self, config: dict[str, Any], *, rank: int) -> None:
         super().__init__(config)
         self.rank = rank
@@ -276,7 +276,7 @@ def _install_recording_session_factory(monkeypatch: pytest.MonkeyPatch) -> None:
         "RESOURCE_REGISTRY",
         {"cache_resource": RecordingComponent},
     )
-    monkeypatch.setattr(factory_module, "DDPHook", RecordingDDPHook)
+    monkeypatch.setattr(factory_module, "DDPResource", RecordingDDPResource)
 
 
 def test_create_session_from_config_registers_all_component_types(
@@ -299,13 +299,14 @@ def test_create_session_from_config_registers_all_component_types(
         config["train_step"]
     ]
     assert [component.config for component in session.resources] == [
-        config["cache_resource"]
+        config["cache_resource"],
+        config["ddp"]
     ]
-    assert len(session.hooks) == 2
+    assert len(session.hooks) == 1
     assert session.hooks[0].config is config["metrics_hook"]
-    assert isinstance(session.hooks[1], RecordingDDPHook)
-    assert session.hooks[1].config is config["ddp"]
-    assert session.hooks[1].rank == 0
+    assert isinstance(session.resources[1], RecordingDDPResource)
+    assert session.resources[1].config is config["ddp"]
+    assert session.resources[1].rank == 0
 
 
 def test_create_session_from_config_secondary_rank_keeps_only_parallel_components(
@@ -340,9 +341,9 @@ def test_create_session_from_config_secondary_rank_keeps_only_parallel_component
     assert [component.config for component in session.steps] == [
         config["parallel_step"]
     ]
-    assert len(session.hooks) == 1
-    assert isinstance(session.hooks[0], RecordingDDPHook)
-    assert session.hooks[0].rank == 2
+    assert len(session.resources) == 1
+    assert isinstance(session.resources[0], RecordingDDPResource)
+    assert session.resources[0].rank == 2
 
 
 def test_create_session_from_config_rejects_unknown_component(

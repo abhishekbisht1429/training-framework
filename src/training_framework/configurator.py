@@ -11,6 +11,9 @@ from training_framework.training_session import TrainingSession, HOOK_REGISTRY, 
 
 def create_session_from_config(config, rank=0):
     session = TrainingSession(config["base_config"])
+    if "ddp" in config:
+        ddp_resource = DDPResource(config['ddp'], rank=rank)
+        session.register_resource(ddp_resource)
     for name in config.keys():
         # for parallel session skip registration of components which are not marked as parallel
         if rank > 0 and config[name].get('parallel', False) == False:
@@ -34,10 +37,6 @@ def create_session_from_config(config, rank=0):
             session.register_resource(resource_obj)
         else:
             raise ValueError(f"No step, hook or resource registered with name '{name}'!")
-
-    if "ddp" in config:
-        ddp_hook = DDPResource(config['ddp'], rank=rank)
-        session.register_hook(ddp_hook)
     return session
 
 
