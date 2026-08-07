@@ -6,7 +6,7 @@ from typing import Mapping, List, Any
 from omegaconf import OmegaConf
 from tensorboard.program import TensorBoard
 
-from training_framework.resources import Logger, Checkpointer, Tensorboard, DDPHook
+from training_framework.components import Logger, Checkpointer, Tensorboard, DDPHook
 from training_framework.training_session import TrainingSession, HOOK_REGISTRY, STEP_REGISTRY, RESOURCE_REGISTRY
 
 def create_session_from_config(config, rank=0):

@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import torch
 
-from training_framework.resources import Checkpointer
+from training_framework.components import Checkpointer
 from training_framework.training_session import (
     LifecycleHook,
     Resource,

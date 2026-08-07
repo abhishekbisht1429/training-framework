@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from training_framework.configurator import Configurator, create_session_from_config
 from training_framework.dataloader import InfiniteSampler
-from training_framework.resources import Checkpointer, Logger, Tensorboard
+from training_framework.components import Checkpointer, Logger, Tensorboard
 from training_framework.training_engine import TrainingEngine
 from training_framework.training_session import (
     HOOK_REGISTRY,

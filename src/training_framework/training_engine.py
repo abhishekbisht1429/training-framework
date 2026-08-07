@@ -97,20 +97,20 @@ class TrainingEngine:
 
         if "ddp" in config:
             try:
-                n_proc = config["ddp"]["n_proc"]
+                world_size = config["ddp"]["world_size"]
             except (KeyError, TypeError) as exc:
                 raise ValueError(
-                    "DDP configuration must contain ddp.n_proc"
+                    "DDP configuration must contain ddp.world_size"
                 ) from exc
         else:
-            n_proc = 1
+            world_size = 1
 
         if (
-            not isinstance(n_proc, int)
-            or isinstance(n_proc, bool)
-            or n_proc < 1
+            not isinstance(world_size, int)
+            or isinstance(world_size, bool)
+            or world_size < 1
         ):
-            raise ValueError("ddp.n_proc must be a positive integer")
+            raise ValueError("ddp.world_size must be a positive integer")
 
         wrappers = [
             SessionProcessWrapper(
@@ -118,7 +118,7 @@ class TrainingEngine:
                 session_id=session_id,
                 rank=rank,
             )
-            for rank in range(n_proc)
+            for rank in range(world_size)
         ]
 
         self._session_processes.append(wrappers)

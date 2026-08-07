@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from training_framework.configurator import Configurator
 from training_framework.dataloader import InfiniteSampler
-from training_framework.resources import Checkpointer, Logger, Tensorboard
+from training_framework.components import Checkpointer, Logger, Tensorboard
 from training_framework.training_session import SessionPhase, Step, TrainingSession, step
 import training_framework.training_engine as engine_module
 
@@ -460,15 +460,15 @@ def test_tensorboard_resource_is_created_and_cleaned_up_from_config(
 
     dummy_process = DummyProcess()
     monkeypatch.setattr(
-        "training_framework.resources.subprocess.Popen",
+        "training_framework.components.subprocess.Popen",
         lambda *args, **kwargs: dummy_process,
     )
     monkeypatch.setattr(
-        "training_framework.resources.SummaryWriter",
+        "training_framework.components.SummaryWriter",
         DummySummaryWriter,
     )
     monkeypatch.setattr(
-        "training_framework.resources.time.sleep",
+        "training_framework.components.time.sleep",
         lambda *_args, **_kwargs: None,
     )
 

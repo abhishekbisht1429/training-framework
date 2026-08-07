@@ -576,7 +576,7 @@ restored_session = pickle.loads(payload)
 ### Built-in Checkpointer
 
 ```python
-from training_framework.resources import Checkpointer
+from training_framework.components import Checkpointer
 
 checkpointer = Checkpointer(
     {
@@ -606,7 +606,7 @@ The built-in checkpointer is an iteration hook, so it saves on the first iterati
 `Logger` is registered under the hook name `logger`.
 
 ```python
-from training_framework.resources import Logger
+from training_framework.components import Logger
 
 session.register_hook(
     Logger(
@@ -646,7 +646,7 @@ When `checkpoints_dir` is omitted, checkpoints are written under the session dir
 `Tensorboard` is registered under the resource name `tensorboard`.
 
 ```python
-from training_framework.resources import Tensorboard
+from training_framework.components import Tensorboard
 
 resource_id = session.register_resource(
     Tensorboard(

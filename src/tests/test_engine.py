@@ -292,16 +292,16 @@ def test_register_session_rejects_non_mapping(fake_mp, bad_config):
 def test_register_session_requires_ddp_n_proc(fake_mp, bad_config):
     engine = sut.TrainingEngine({})
 
-    with pytest.raises(ValueError, match=r"ddp\.n_proc"):
+    with pytest.raises(ValueError, match=r"ddp\.world_size"):
         engine.register_session(bad_config)
 
 
-@pytest.mark.parametrize("n_proc", [0, -1, 1.5, "2", True, None])
-def test_register_session_rejects_invalid_process_counts(fake_mp, n_proc):
+@pytest.mark.parametrize("world_size", [0, -1, 1.5, "2", True, None])
+def test_register_session_rejects_invalid_process_counts(fake_mp, world_size):
     engine = sut.TrainingEngine({})
 
     with pytest.raises(ValueError, match="positive integer"):
-        engine.register_session({"ddp": {"n_proc": n_proc}})
+        engine.register_session({"ddp": {"world_size": world_size}})
 
 
 def test_register_session_assigns_ids_ranks_and_default_process_count(fake_mp):
@@ -309,7 +309,7 @@ def test_register_session_assigns_ids_ranks_and_default_process_count(fake_mp):
 
     first_id = engine.register_session({"name": "single"})
     second_id = engine.register_session(
-        {"name": "distributed", "ddp": {"n_proc": 3}}
+        {"name": "distributed", "ddp": {"world_size": 3}}
     )
 
     assert (first_id, second_id) == (0, 1)
@@ -319,7 +319,7 @@ def test_register_session_assigns_ids_ranks_and_default_process_count(fake_mp):
     assert len(fake_mp.Process.instances) == 4
 
     configs = [w.process.args[0] for w in engine._session_processes[1]]
-    assert all(config == {"name": "distributed", "ddp": {"n_proc": 3}} for config in configs)
+    assert all(config == {"name": "distributed", "ddp": {"world_size": 3}} for config in configs)
     assert len({id(config) for config in configs}) == 3
 
 
@@ -328,7 +328,7 @@ def test_start_all_starts_every_registered_worker_and_normal_exit_closes_them(
 ):
     engine = sut.TrainingEngine({})
     engine.register_session({})
-    engine.register_session({"ddp": {"n_proc": 2}})
+    engine.register_session({"ddp": {"world_size": 2}})
 
     with engine:
         engine.start_all()
@@ -349,7 +349,7 @@ def test_start_session_cleans_up_workers_started_before_a_start_failure(fake_mp)
         ]
     )
     engine = sut.TrainingEngine({})
-    session_id = engine.register_session({"ddp": {"n_proc": 3}})
+    session_id = engine.register_session({"ddp": {"world_size": 3}})
     wrappers = engine._session_processes[session_id]
 
     with engine:
@@ -366,7 +366,7 @@ def test_start_session_cleans_up_workers_started_before_a_start_failure(fake_mp)
 
 def test_request_stop_all_only_signals_started_workers(fake_mp):
     engine = sut.TrainingEngine({})
-    engine.register_session({"ddp": {"n_proc": 2}})
+    engine.register_session({"ddp": {"world_size": 2}})
     first, second = engine._session_processes[0]
     first.start()
 
@@ -386,7 +386,7 @@ def test_join_or_terminate_uses_one_shared_grace_period(fake_mp, monkeypatch):
         ]
     )
     engine = sut.TrainingEngine({})
-    engine.register_session({"ddp": {"n_proc": 2}})
+    engine.register_session({"ddp": {"world_size": 2}})
     first, second = engine._session_processes[0]
     first.start()
     second.start()
@@ -443,7 +443,7 @@ def test_join_or_terminate_kills_process_that_survives_terminate(
 
 def test_raise_worker_failures_aggregates_session_rank_and_exitcode(fake_mp):
     engine = sut.TrainingEngine({})
-    engine.register_session({"ddp": {"n_proc": 2}})
+    engine.register_session({"ddp": {"world_size": 2}})
     engine.register_session({})
     wrappers = list(engine._iter_wrappers())
 
@@ -467,7 +467,7 @@ def test_raise_worker_failures_ignores_unstarted_running_and_successful_workers(
     fake_mp,
 ):
     engine = sut.TrainingEngine({})
-    engine.register_session({"ddp": {"n_proc": 3}})
+    engine.register_session({"ddp": {"world_size": 3}})
     successful, running, unstarted = engine._session_processes[0]
 
     successful.start()
@@ -481,7 +481,7 @@ def test_raise_worker_failures_ignores_unstarted_running_and_successful_workers(
 
 def test_close_resources_only_closes_started_dead_processes(fake_mp):
     engine = sut.TrainingEngine({})
-    engine.register_session({"ddp": {"n_proc": 3}})
+    engine.register_session({"ddp": {"world_size": 3}})
     dead, alive, unstarted = engine._session_processes[0]
 
     dead.start()
