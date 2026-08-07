@@ -145,13 +145,25 @@ class Tensorboard(Resource):
             self._tb_process.terminate()
 
 
-@hook("ddp")
-class DDPHook(SessionHook):
+@resource("ddp")
+class DDPResource(SessionHook):
 
     def __init__(self, config: dict, rank: int):
         self._world_size = config['world_size']
         self._backend = config['backend']
         self._rank = rank
+
+    @property
+    def backend(self):
+        return self._backend
+
+    @property
+    def world_size(self):
+        return self._world_size
+
+    @property
+    def rank(self):
+        return self._rank
 
     def setup(self, session: TrainingSession) -> Any:
         # Address and port where Rank 0 is hosted (must be reachable by all processes)
