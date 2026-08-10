@@ -183,14 +183,18 @@ def requires_resource(resource_name: str):
     def wrapper(cls):
         if not issubclass(cls, (Step, Hook, Resource)):
             raise TypeError(
-                f"@requires_hook can only be applied to Step, Hook or Resource subclasses. "
-                f"'{cls.__name__}' is neither."
+                "@requires_resource can only be applied to Step, Hook, "
+                f"or Resource subclasses. '{cls.__name__}' is neither."
             )
 
-        if not hasattr(cls, "required_resources"):
-            cls.required_resources = []
+        if "required_resources" not in cls.__dict__:
+            cls.required_resources = list(
+                getattr(cls, "required_resources", ())
+            )
+
         cls.required_resources.append(resource_name)
         return cls
+
     return wrapper
 
 def topological_sort_of_components():
