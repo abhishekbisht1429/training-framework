@@ -61,6 +61,10 @@ def fake_mp(monkeypatch):
 
             type(self).instances.append(self)
 
+        @property
+        def pid(self):
+            return 0
+
         def start(self) -> None:
             self.start_calls += 1
             type(self).log.append(("start", self.name))

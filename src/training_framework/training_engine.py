@@ -80,7 +80,7 @@ class SessionProcessWrapper:
 
 class TrainingEngine:
     def __init__(self, config: dict):
-        self._config = config
+        self._timeout_on_interrupt = config['timeout_on_interrupt'] if 'timeout_on_interrupt' in config else 5.0
         self._session_processes: list[list[SessionProcessWrapper]] = []
 
     def _iter_wrappers(self) -> Iterator[SessionProcessWrapper]:
@@ -152,10 +152,10 @@ class TrainingEngine:
                 wrapper.request_stop()
 
     def _join_or_terminate(
-        self,
-        wrappers: list[SessionProcessWrapper] | None = None,
-        *,
-        timeout: float,
+            self,
+            wrappers: list[SessionProcessWrapper] | None = None,
+            *,
+            timeout: float,
     ) -> None:
         selected = (
             wrappers
@@ -167,13 +167,37 @@ class TrainingEngine:
             ]
         )
 
+        print(
+            f"Waiting up to {timeout:.1f}s for "
+            f"{len(selected)} worker process(es) to exit gracefully.",
+            flush=True,
+        )
+
         deadline = time.monotonic() + timeout
 
         # Give all workers one shared graceful-shutdown period.
         for wrapper in selected:
             process = wrapper.process
             remaining = max(0.0, deadline - time.monotonic())
+
+            print(
+                f"Joining session={wrapper.session_id}, "
+                f"rank={wrapper.rank}, "
+                f"pid={process.pid}, "
+                f"remaining_timeout={remaining:.2f}s.",
+                flush=True,
+            )
+
             process.join(timeout=remaining)
+
+            print(
+                f"Join completed for session={wrapper.session_id}, "
+                f"rank={wrapper.rank}, "
+                f"pid={process.pid}, "
+                f"alive={process.is_alive()}, "
+                f"exitcode={process.exitcode}.",
+                flush=True,
+            )
 
         survivors = [
             wrapper
@@ -181,11 +205,31 @@ class TrainingEngine:
             if wrapper.process.is_alive()
         ]
 
+        print(
+            f"Graceful shutdown complete. "
+            f"{len(survivors)} worker process(es) still alive.",
+            flush=True,
+        )
+
         # Terminate all survivors before waiting again.
         for wrapper in survivors:
+            print(
+                f"Terminating session={wrapper.session_id}, "
+                f"rank={wrapper.rank}, "
+                f"pid={wrapper.process.pid}.",
+                flush=True,
+            )
+
             wrapper.process.terminate()
 
         for wrapper in survivors:
+            print(
+                f"Waiting for terminated session={wrapper.session_id}, "
+                f"rank={wrapper.rank}, "
+                f"pid={wrapper.process.pid}.",
+                flush=True,
+            )
+
             wrapper.process.join(timeout=1.0)
 
         stubborn = [
@@ -194,11 +238,42 @@ class TrainingEngine:
             if wrapper.process.is_alive()
         ]
 
+        print(
+            f"Termination phase complete. "
+            f"{len(stubborn)} worker process(es) still alive.",
+            flush=True,
+        )
+
         for wrapper in stubborn:
+            print(
+                f"Killing session={wrapper.session_id}, "
+                f"rank={wrapper.rank}, "
+                f"pid={wrapper.process.pid}.",
+                flush=True,
+            )
+
             wrapper.process.kill()
 
         for wrapper in stubborn:
+            print(
+                f"Waiting for killed session={wrapper.session_id}, "
+                f"rank={wrapper.rank}, "
+                f"pid={wrapper.process.pid}.",
+                flush=True,
+            )
+
             wrapper.process.join(timeout=1.0)
+
+            print(
+                f"Final state for session={wrapper.session_id}, "
+                f"rank={wrapper.rank}, "
+                f"pid={wrapper.process.pid}, "
+                f"alive={wrapper.process.is_alive()}, "
+                f"exitcode={wrapper.process.exitcode}.",
+                flush=True,
+            )
+
+        print("Worker shutdown sequence finished.", flush=True)
 
     def _raise_worker_failures(self) -> None:
         failures = []
@@ -252,7 +327,7 @@ class TrainingEngine:
                 except KeyboardInterrupt:
                     interrupted_during_join = True
                     self.request_stop_all()
-                    self._join_or_terminate(timeout=5.0)
+                    self._join_or_terminate(timeout=self._timeout_on_interrupt)
 
             if exc_type is None and not interrupted_during_join:
                 self._raise_worker_failures()
