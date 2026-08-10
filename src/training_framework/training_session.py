@@ -1,46 +1,34 @@
 import os
 import random
-import time
 from abc import ABC, abstractmethod
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
-from typing import List, Any, override
+from typing import Any, override, List
 
 import numpy as np
 import torch
-from requests import Session
-
 from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta
 
-
-# ==================== Hook Registry ================
-def make_registry(kind: str):
-    registry = {}
-
-    def register(name: str):
-        def wrapper(cls):
-            if name in registry:
-                raise ValueError(f"{kind} with name '{name}' already registered")
-            registry[name] = cls
-            cls.name = name
-            return cls
-        return wrapper
-
-    return registry, register
-
-
-HOOK_REGISTRY, hook = make_registry("Hook")
-RESOURCE_REGISTRY, resource = make_registry("Resource")
-STEP_REGISTRY, step = make_registry("Step")
-# ====================================================
+#TODO: check for circular dependencies later
 
 @dataclass(frozen=True)
 class SessionConfig:
     rng_seed: int
     session_dir: str
     max_iterations: int
+
+
+class SessionPhase(Enum):
+    NEW = auto()
+    READY = auto()
+    RUNNING = auto()
+    PAUSED = auto()
+    FINISHED = auto()
+    INTERRUPTED = auto()
+
 
 class Stateful(ABC):
     @abstractmethod
@@ -58,9 +46,11 @@ class Stateful(ABC):
     def __setstate__(self, state: Any) -> None:
         self.set_state(state)
 
+
 class Hook(ABC, metaclass=CaptureInitMeta):
     name: str
     pass
+
 
 class SessionHook(Hook, ABC):
     @abstractmethod
@@ -70,6 +60,7 @@ class SessionHook(Hook, ABC):
     @abstractmethod
     def teardown(self, session: "TrainingSession"):
         pass
+
 
 class IterationHook(Hook, ABC):
     call_every: int
@@ -81,6 +72,7 @@ class IterationHook(Hook, ABC):
     def post_iteration_callback(self, session: "TrainingSession") -> None:
         pass
 
+
 class LifecycleHook(SessionHook, IterationHook, ABC):
     """
     An instance of this class wraps two callbacks (pre and post) around training iteration.
@@ -88,6 +80,7 @@ class LifecycleHook(SessionHook, IterationHook, ABC):
     pre would be called before the iteration starts and post would be called after it is finished.
     """
     pass
+
 
 class Resource(ABC, metaclass=CaptureInitMeta):
     name: str
@@ -108,30 +101,48 @@ class Step(ABC, metaclass=CaptureInitMeta):
     def run(self, session: "TrainingSession") -> None:
         pass
 
+
 class StatefulIterationHook(IterationHook, Stateful, ABC):
     pass
+
 
 class StatefulSessionHook(SessionHook, Stateful, ABC):
     pass
 
+
 class StatefulLifeCycleHook(LifecycleHook, Stateful, ABC):
     pass
+
 
 class StatefulStep(Step, Stateful, ABC):
     pass
 
+
 class StatefulResource(Resource, Stateful, ABC):
     pass
 
-class SessionPhase(Enum):
-    NEW = auto()
-    READY = auto()
-    RUNNING = auto()
-    PAUSED = auto()
-    FINISHED = auto()
-    INTERRUPTED = auto()
+# ==================== Registry ================
+def make_registry(type):
+    registry = {}
 
-#TODO: check for circular dependencies later
+    def register(name: str):
+        def wrapper(cls):
+            if not issubclass(cls, type):
+                raise TypeError(f"{cls.__name__} must be subclass of {type.__name__}")
+            if name in registry:
+                raise ValueError(f"{type} with name '{name}' already registered")
+            registry[name] = cls
+            cls.name = name
+            cls.id = f"{type.__name__}.{cls.name}"
+            return cls
+        return wrapper
+
+    return registry, register
+
+HOOK_REGISTRY, hook = make_registry(Hook)
+RESOURCE_REGISTRY, resource = make_registry(Resource)
+STEP_REGISTRY, step = make_registry(Step)
+# ====================================================
 
 def requires_step(step_name: str):
     def wrapper(cls):
@@ -182,6 +193,61 @@ def requires_resource(resource_name: str):
         return cls
     return wrapper
 
+def topological_sort_of_components():
+    # NOTE: the requires_<component> decorator ensure the correct dependency order between
+    # the different types of components, so we are not checking for that here again
+    components = list(STEP_REGISTRY.values()) + list(HOOK_REGISTRY.values()) + list(RESOURCE_REGISTRY.values())
+
+    prerequisites_graph: dict[str, List[str]] = {component.id: [] for component in components}
+    for component in components:
+        for required_hook_name in getattr(component, 'required_hooks', []):
+            prerequisites_graph[component.id].append(HOOK_REGISTRY[required_hook_name].id)
+
+        for required_step_name in getattr(component, 'required_steps', []):
+            prerequisites_graph[component.id].append(STEP_REGISTRY[required_step_name].id)
+
+        for required_resource_name in getattr(component, 'required_resources', []):
+            prerequisites_graph[component.id].append(STEP_REGISTRY[required_resource_name].id)
+
+    # create dependents graph
+    dependents_graph: dict[str, List[str]] = {component_id: [] for component_id in prerequisites_graph.keys()}
+    for component_id, prerequisites in prerequisites_graph.items():
+        for prerequisite in prerequisites:
+            if prerequisite not in dependents_graph:
+                raise RuntimeError(f"'{prerequisite}' not registered!")
+            dependents_graph[prerequisite].append(component_id)
+
+    queue = deque()
+
+    # find prereq count
+    prereq_count = {}
+    for component_id, prereqs in prerequisites_graph.items():
+        prereq_count[component_id] = len(prereqs)
+        if prereq_count[component_id] == 0:
+            queue.append(component_id)
+
+    sorted_components = []
+
+    while len(queue) > 0:
+        front_node = queue.popleft()
+        sorted_components.append(front_node)
+
+        for dependent_id in dependents_graph[front_node]:
+            prereq_count[dependent_id] -= 1
+
+            if prereq_count[dependent_id] == 0:
+                queue.append(dependent_id)
+
+    if len(sorted_components) != len(prerequisites_graph):
+        raise RuntimeError("Cyclic dependency detected in the component graph!")
+
+
+    index_of_component: dict[str, int] = {}
+    for i, component_id in enumerate(sorted_components):
+        index_of_component[component_id] = i
+
+    return index_of_component
+
 class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def __init__(self, config: dict):
@@ -224,6 +290,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         # shared state for a single iteration
         self._shared_state: dict[str, Any] = {}
+
+        self._order_of_components = topological_sort_of_components()
 
     @override
     def get_state(self):
@@ -346,18 +414,29 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     # --------------------------------------------------------------------
 
     # ---------------------- Helper private attributes ----------------------
+    @property
+    def _sorted_hooks(self):
+        return sorted(list(self._hooks.values()), key=lambda hook: self._order_of_components[hook.id])
+
+    @property
+    def _sorted_resources(self):
+        return sorted(list(self._resources.values()), key=lambda resource: self._order_of_components[resource.id])
+
+    @property
+    def _sorted_steps(self):
+        return sorted(list(self._steps.values()), key=lambda step: self._order_of_components[step.id])
 
     @property
     def _stateful_hooks(self):
-        return [hook for hook in self._hooks.values() if isinstance(hook, Stateful)]
+        return [hook for hook in self._sorted_hooks if isinstance(hook, Stateful)]
 
     @property
     def _iteration_hooks(self):
-        return [hook for hook in self._hooks.values() if isinstance(hook, IterationHook)]
+        return [hook for hook in self._sorted_hooks if isinstance(hook, IterationHook)]
 
     @property
     def _session_hooks(self):
-        return [hook for hook in self._hooks.values() if isinstance(hook, SessionHook)]
+        return [hook for hook in self._sorted_hooks if isinstance(hook, SessionHook)]
 
     # ------------------------------------------------------------------------
 
@@ -527,23 +606,28 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._steps[step.name] = step
 
     def _check_and_get_device(self):
-        if self._config['device'].startswith('cuda'):
-            if torch.cuda.is_available():
-                return torch.device(self._config['device'])
-            else:
-                raise ValueError(f"device '{self._config['device']}' not available")
-        elif self._config['device'] == 'cpu':
+        if 'device' not in self._config:
             return torch.device('cpu')
+        if self._config['device'].startswith('cuda') and torch.cuda.is_available():
+            return torch.device(self._config['device'])
         else:
-            raise ValueError(f"Unknown device '{self._config['device']}'")
+            return torch.device('cpu')
 
-    def _check_ready(self):
+    def _raise_if_not_new(self):
+        if self._phase is not SessionPhase.NEW:
+            raise RuntimeError("Session should be in NEW phase!")
+
+    def _raise_if_new(self):
         if self._phase is SessionPhase.NEW:
             raise RuntimeError('Use within "with"!')
 
-    def _check_finished(self):
+    def _raise_if_finished(self):
         if self._phase is SessionPhase.FINISHED:
             raise RuntimeError('Attempting to run a finished session!')
+
+    def set_device(self, device: torch.device):
+        self._raise_if_not_new()
+        self._device = device
 
     @requires_context
     def __iter__(self):
@@ -551,7 +635,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @requires_context
     def __next__(self):
-        self._check_ready()
+        self._raise_if_new()
 
         iteration_complete = False
         try:
@@ -571,7 +655,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                     iter_hook.pre_iteration_callback(self)
 
             # 2. Run iteration components
-            for step in self._steps.values():
+            for step in self._sorted_steps:
                 step.run(self)
 
             # 3. Run post iteration methods
@@ -591,11 +675,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @context_entry
     def __enter__(self):
-        self._check_finished()
+        self._raise_if_finished()
 
         # 1. Setup Resources
-        for resource_key in self._resources:
-            self._resources[resource_key].setup(self)
+        for resource in self._sorted_resources:
+            resource.setup(self)
 
         # 2. Call Session Hooks
         for session_hook in self._session_hooks:
@@ -608,11 +692,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
         # 1. Clean up in reverse order of acquisition to respect dependencies
-        for resource_key in reversed(self._resources):
+        for resource in reversed(self._sorted_resources):
             try:
-                self._resources[resource_key].teardown(self)
+                resource.teardown(self)
             except Exception as e:
-                print(f"Error releasing resource '{resource_key}': {e}")
+                print(f"Error releasing resource '{resource.id}': {e}")
 
         # 2. Call session teardown hooks
         for session_hook in reversed(self._session_hooks):

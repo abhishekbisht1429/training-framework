@@ -1,2 +1,2 @@
 # ensure that components are registered
-from . import components
+from . import builtin_components

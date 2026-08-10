@@ -121,15 +121,10 @@ The following example creates a resource, a lifecycle hook, and a step; declares
 ```python
 from training_framework.training_engine import TrainingEngine
 from training_framework.training_session import (
-    LifecycleHook,
-    Resource,
-    Step,
     TrainingSession,
     hook,
-    requires_hook,
-    requires_resource,
     resource,
-    step,
+    step, LifecycleHook, Resource, Step, requires_hook, requires_resource,
 )
 
 
@@ -502,7 +497,7 @@ A component that must preserve mutable state across checkpoints should implement
 ```python
 from typing import Any
 
-from training_framework.training_session import StatefulStep, step
+from training_framework.training_session import step, StatefulStep
 
 
 @step("counter")
@@ -576,7 +571,7 @@ restored_session = pickle.loads(payload)
 ### Built-in Checkpointer
 
 ```python
-from training_framework.components import Checkpointer
+from training_framework.builtin_components import Checkpointer
 
 checkpointer = Checkpointer(
     {
@@ -606,7 +601,7 @@ The built-in checkpointer is an iteration hook, so it saves on the first iterati
 `Logger` is registered under the hook name `logger`.
 
 ```python
-from training_framework.components import Logger
+from training_framework.builtin_components import Logger
 
 session.register_hook(
     Logger(
@@ -646,7 +641,7 @@ When `checkpoints_dir` is omitted, checkpoints are written under the session dir
 `Tensorboard` is registered under the resource name `tensorboard`.
 
 ```python
-from training_framework.components import Tensorboard
+from training_framework.builtin_components import Tensorboard
 
 resource_id = session.register_resource(
     Tensorboard(

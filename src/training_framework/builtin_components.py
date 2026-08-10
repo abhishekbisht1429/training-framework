@@ -7,8 +7,9 @@ from typing import Any, override, List
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from training_framework.training_session import TrainingSession, LifecycleHook, Resource, Stateful, hook, resource, \
-    StatefulResource, SessionHook
+from training_framework.training_session import hook, resource
+from training_framework.training_session import TrainingSession, Stateful, LifecycleHook, Resource, \
+    StatefulResource
 from training_framework.util import timestamp_str
 
 @hook("checkpointer")
@@ -167,12 +168,13 @@ class DDPResource(Resource):
 
     def setup(self, session: TrainingSession) -> Any:
         # Address and port where Rank 0 is hosted (must be reachable by all processes)
-        os.environ["MASTER_ADDR"] = "localhost"  # Or master node IP for multi-node
-        os.environ["MASTER_PORT"] = "12355"  # Any free port
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12355"
 
         # Explicitly set the CUDA device for this process (1 process per GPU strategy)
         if self._backend == "nccl" and torch.cuda.is_available():
             torch.cuda.set_device(self._rank)
+            session.set_device(torch.device("cuda", self._rank))
 
         # Initialize the default process group
         torch.distributed.init_process_group(

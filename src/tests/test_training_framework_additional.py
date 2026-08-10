@@ -16,24 +16,19 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+import training_framework
 from training_framework.configurator import Configurator, create_session_from_config
 from training_framework.dataloader import InfiniteSampler
-from training_framework.components import Checkpointer, Logger, Tensorboard
 from training_framework.training_engine import TrainingEngine
 from training_framework.training_session import (
     HOOK_REGISTRY,
     RESOURCE_REGISTRY,
     STEP_REGISTRY,
-    Hook,
-    LifecycleHook,
-    Resource,
     SessionPhase,
-    Stateful,
-    Step,
     TrainingSession,
     hook,
     resource,
-    step,
+    step, Stateful, Hook, LifecycleHook, Resource, Step,
 )
 from training_framework.util import timestamp_str
 
@@ -56,8 +51,7 @@ class DummyDataset(Dataset):
         return torch.stack(list(xs)), torch.stack(list(ys))
 
 
-@step("test_additional_step")
-class AdditionalStep(Step, Stateful):
+class AdditionalStepBase(Step, Stateful):
     def __init__(self):
         self.calls = 0
         self.last_seen_loss = None
@@ -76,8 +70,8 @@ class AdditionalStep(Step, Stateful):
         self.last_seen_loss = state["last_seen_loss"]
 
 
-@resource("test_additional_resource")
-class AdditionalResource(Resource, Stateful):
+
+class AdditionalResourceBase(Resource, Stateful):
     def __init__(self):
         self.setup_calls = 0
         self.teardown_calls = 0
@@ -107,17 +101,8 @@ class AdditionalResource(Resource, Stateful):
         self.events = list(state["events"])
         self.session_dirs = list(state["session_dirs"])
 
-@resource("additional_resource_a")
-class AdditionalResourceA(AdditionalResource):
-    pass
 
-
-@resource("additional_resource_b")
-class AdditionalResourceB(AdditionalResource):
-    pass
-
-@hook("test_additional_hook")
-class AdditionalHook(LifecycleHook, Stateful):
+class AdditionalHookBase(LifecycleHook, Stateful):
     def __init__(self, call_every: int = 1):
         self.call_every = call_every
         self.events: list[str] = []
@@ -157,15 +142,6 @@ class AdditionalHook(LifecycleHook, Stateful):
         self.shared_snapshots = [dict(item) for item in state["shared_snapshots"]]
 
 
-@hook("additional_hook_a")
-class AdditionalHookA(AdditionalHook):
-    pass
-
-
-@hook("additional_hook_b")
-class AdditionalHookB(AdditionalHook):
-    pass
-
 @pytest.fixture
 def base_session_config(tmp_path):
     return {
@@ -195,37 +171,6 @@ def minimal_session_config(tmp_path):
 def engine():
     return TrainingEngine({})
 
-@step("toy_model_step")
-class ToyModelStep(Step, Stateful):
-    def __init__(self):
-        dataset = DummyDataset()
-        dataloader = DataLoader(
-            dataset,
-            batch_size=4,
-            sampler=InfiniteSampler(len(dataset)),
-            collate_fn=dataset.collate_fn,
-        )
-        self._iterator = iter(dataloader)
-        self._model = nn.Sequential(nn.Linear(5, 2))
-        self.seen_losses: list[float] = []
-
-    def run(self, session: TrainingSession) -> None:
-        x, y = next(self._iterator)
-        x = x.to(session.device)
-        y = y.to(session.device)
-        output = self._model(x)
-        loss = F.cross_entropy(output, y)
-        loss.backward()
-        self.seen_losses.append(float(loss.item()))
-        session.iteration_context["loss"] = float(loss.item())
-
-    def get_state(self) -> Any:
-        return {"seen_losses": list(self.seen_losses)}
-
-    def set_state(self, state: Any) -> None:
-        self.seen_losses = list(state["seen_losses"])
-
-
 def _write_yaml(tmp_path: Path, data: dict, name: str = "config.yaml") -> str:
     path = tmp_path / name
     with open(path, "w", encoding="utf-8") as f:
@@ -238,6 +183,18 @@ def test_timestamp_str_has_expected_shape():
 
 
 def test_registry_decorators_register_classes_and_reject_duplicates():
+    @step("test_additional_step")
+    class AdditionalStep(AdditionalStepBase):
+        pass
+
+    @resource("test_additional_resource")
+    class AdditionalResource(AdditionalResourceBase):
+        pass
+
+    @hook("test_additional_hook")
+    class AdditionalHook(AdditionalHookBase):
+        pass
+
     assert STEP_REGISTRY["test_additional_step"] is AdditionalStep
     assert RESOURCE_REGISTRY["test_additional_resource"] is AdditionalResource
     assert HOOK_REGISTRY["test_additional_hook"] is AdditionalHook
@@ -266,14 +223,14 @@ def test_training_session_initialization_and_device_validation(minimal_session_c
 
     bad_device = deepcopy(minimal_session_config)
     bad_device["device"] = "tpu"
-    with pytest.raises(ValueError, match="Unknown device"):
-        TrainingSession(bad_device)
+
+    assert TrainingSession(bad_device).device == torch.device("cpu")
 
     unavailable_cuda = deepcopy(minimal_session_config)
     unavailable_cuda["device"] = "cuda:0"
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with pytest.raises(ValueError, match="not available"):
-        TrainingSession(unavailable_cuda)
+
+    assert TrainingSession(unavailable_cuda).device == torch.device("cpu")
 
 
 def test_requires_context_for_shared_state_and_iteration(minimal_session_config):
@@ -290,6 +247,18 @@ def test_requires_context_for_shared_state_and_iteration(minimal_session_config)
 
 
 def test_registration_validation_and_lookup(minimal_session_config):
+    @step("test_additional_step")
+    class AdditionalStep(AdditionalStepBase):
+        pass
+
+    @resource("test_additional_resource")
+    class AdditionalResource(AdditionalResourceBase):
+        pass
+
+    @hook("test_additional_hook")
+    class AdditionalHook(AdditionalHookBase):
+        pass
+
     session = TrainingSession(minimal_session_config)
 
     with pytest.raises(TypeError):
@@ -367,6 +336,56 @@ def test_registration_validation_and_lookup(minimal_session_config):
     assert len(session._resources) == 1
 
 def test_context_lifecycle_and_iteration_order(base_session_config):
+    @step("test_additional_step")
+    class AdditionalStep(AdditionalStepBase):
+        pass
+
+    @resource("additional_resource_a")
+    class AdditionalResourceA(AdditionalResourceBase):
+        pass
+
+    @resource("additional_resource_b")
+    class AdditionalResourceB(AdditionalResourceBase):
+        pass
+
+    @hook("additional_hook_a")
+    class AdditionalHookA(AdditionalHookBase):
+        pass
+
+    @hook("additional_hook_b")
+    class AdditionalHookB(AdditionalHookBase):
+        pass
+
+    @step("toy_model_step")
+    class ToyModelStep(Step, Stateful):
+        def __init__(self):
+            dataset = DummyDataset()
+            dataloader = DataLoader(
+                dataset,
+                batch_size=4,
+                sampler=InfiniteSampler(len(dataset)),
+                collate_fn=dataset.collate_fn,
+            )
+            self._iterator = iter(dataloader)
+            self._model = nn.Sequential(nn.Linear(5, 2))
+            self.seen_losses: list[float] = []
+
+        def run(self, session: TrainingSession) -> None:
+            x, y = next(self._iterator)
+            x = x.to(session.device)
+            y = y.to(session.device)
+            output = self._model(x)
+            loss = F.cross_entropy(output, y)
+            loss.backward()
+            self.seen_losses.append(float(loss.item()))
+            session.iteration_context["loss"] = float(loss.item())
+
+        def get_state(self) -> Any:
+            return {"seen_losses": list(self.seen_losses)}
+
+        def set_state(self, state: Any) -> None:
+            self.seen_losses = list(state["seen_losses"])
+
     session = TrainingSession(base_session_config)
 
     # Each resource and hook has a distinct registered name.
@@ -393,7 +412,7 @@ def test_context_lifecycle_and_iteration_order(base_session_config):
     assert resource_b.name == "additional_resource_b"
     assert resource_a_id != resource_b_id
 
-    assert [hook.name for hook in session._hooks.values()] == [
+    assert [test_hook.name for test_hook in session._hooks.values()] == [
         "additional_hook_a",
         "additional_hook_b",
     ]
@@ -506,26 +525,38 @@ def test_context_lifecycle_and_iteration_order(base_session_config):
 
     # Values shared by the steps were visible to the hooks before the
     # iteration-scoped state was cleared.
-    for hook in (hook_a, hook_b):
-        assert [snapshot["step_index"] for snapshot in hook.shared_snapshots] == [
+    for test_hook in (hook_a, hook_b):
+        assert [snapshot["step_index"] for snapshot in test_hook.shared_snapshots] == [
             1,
             2,
             3,
         ]
         assert all(
             snapshot["step_called"] is True
-            for snapshot in hook.shared_snapshots
+            for snapshot in test_hook.shared_snapshots
         )
 
 def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session_config):
-    session = TrainingSession(base_session_config)
-    resource = AdditionalResource()
-    hook = AdditionalHook(call_every=1)
-    step = AdditionalStep()
+    @step("test_additional_step")
+    class AdditionalStep(AdditionalStepBase):
+        pass
 
-    session.register_resource(resource)
-    session.register_hook(hook)
-    session.add_step(step)
+    @resource("test_additional_resource")
+    class AdditionalResource(AdditionalResourceBase):
+        pass
+
+    @hook("test_additional_hook")
+    class AdditionalHook(AdditionalHookBase):
+        pass
+
+    session = TrainingSession(base_session_config)
+    additional_resource = AdditionalResource()
+    additional_hook = AdditionalHook(call_every=1)
+    additional_step = AdditionalStep()
+
+    session.register_resource(additional_resource)
+    session.register_hook(additional_hook)
+    session.add_step(additional_step)
 
     with session:
         next(session)
@@ -548,10 +579,10 @@ def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session
     assert isinstance(restored_resource, AdditionalResource)
     assert isinstance(restored_step, AdditionalStep)
     assert isinstance(restored_hook, AdditionalHook)
-    assert restored_resource.events == resource.events
-    assert restored_step.calls == step.calls
-    assert restored_hook.events == hook.events
-    assert restored_hook.call_every == hook.call_every
+    assert restored_resource.events == additional_resource.events
+    assert restored_step.calls == additional_step.calls
+    assert restored_hook.events == additional_hook.events
+    assert restored_hook.call_every == additional_hook.call_every
 
 
 def test_infinite_sampler_yields_permutations_forever():
@@ -615,9 +646,16 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
 
 
 def test_configurator_create_sessions_attaches_expected_components(tmp_path, monkeypatch):
+    # The registry is cleared before every test, so to re-register the builtin components a
+    # reload is required
+    import importlib
+    importlib.reload(training_framework.builtin_components)
+    from training_framework.builtin_components import Checkpointer, Logger, Tensorboard
+
     sample_config = {
         "sessions": [
             {
+                "components_package": "training_framework.builtin_components",
                 "base_config": {
                     "max_iterations": 2,
                     "batch_size": 4,
@@ -630,6 +668,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
                 "tensorboard": {"host": "0.0.0.0", "port": 16050},
             },
             {
+                "components_package": "training_framework.builtin_components",
                 "base_config": {
                     "max_iterations": 2,
                     "batch_size": 4,

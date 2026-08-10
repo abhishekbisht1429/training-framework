@@ -6,15 +6,10 @@ import pytest
 import torch
 
 from training_framework.training_session import (
-    Resource,
-    SessionHook,
-    Stateful,
-    Step,
     TrainingSession,
     hook,
     resource,
-    step, StatefulResource,
-)
+    step, Stateful, SessionHook, Resource, Step, StatefulResource, )
 
 
 def make_config(tmp_path, max_iterations=2, seed=123):
@@ -24,87 +19,6 @@ def make_config(tmp_path, max_iterations=2, seed=123):
         "max_iterations": max_iterations,
         "device": "cpu",
     }
-
-
-@step("checkpoint_rng_step")
-class CheckpointRngStep(Step, Stateful):
-    def __init__(self, label, scale=1):
-        self.label = label
-        self.scale = scale
-        self.samples = []
-
-    def run(self, session):
-        sample = (
-            random.randint(0, 10**6),
-            int(np.random.randint(0, 10**6)),
-            int(torch.randint(0, 10**6, (1,)).item()),
-        )
-        self.samples.append(sample)
-        session.iteration_context[f"{self.label}_sample"] = sample
-
-    def get_state(self):
-        return {"samples": list(self.samples)}
-
-    def set_state(self, state):
-        self.samples = list(state["samples"])
-
-
-@resource("checkpoint_resource")
-class CheckpointResource(StatefulResource):
-    def __init__(self, prefix, multiplier=2):
-        self.prefix = prefix
-        self.multiplier = multiplier
-        self.setup_calls = 0
-        self.teardown_calls = 0
-        self.last_seen_iteration = None
-
-    def setup(self, session):
-        self.setup_calls += 1
-        self.last_seen_iteration = session.iteration
-
-    def teardown(self, session):
-        self.teardown_calls += 1
-
-    def get_state(self):
-        return {
-            "setup_calls": self.setup_calls,
-            "teardown_calls": self.teardown_calls,
-            "last_seen_iteration": self.last_seen_iteration,
-        }
-
-    def set_state(self, state):
-        self.setup_calls = state["setup_calls"]
-        self.teardown_calls = state["teardown_calls"]
-        self.last_seen_iteration = state["last_seen_iteration"]
-
-
-@hook("checkpoint_hook")
-class CheckpointHook(SessionHook, Stateful):
-    def __init__(self, token, level=1):
-        self.token = token
-        self.level = level
-        self.setup_calls = 0
-        self.teardown_calls = 0
-        self.seen_session_dirs = []
-
-    def setup(self, session):
-        self.setup_calls += 1
-        self.seen_session_dirs.append(session.session_config.session_dir)
-
-    def teardown(self, session):
-        self.teardown_calls += 1
-
-    def get_state(self):
-        return {
-            "setup_calls": self.setup_calls,
-            "teardown_calls": self.teardown_calls,
-            "seen_session_dirs": list(self.seen_session_dirs),
-        }
-
-    def set_state(self, state):
-        self.setup_calls = state["setup_calls"]
-        self.teardown_calls = state["teardown_calls"]
-        self.seen_session_dirs = list(state["seen_session_dirs"])
 
 
 class BaseInheritedResource(StatefulResource):
@@ -131,12 +45,86 @@ class BaseInheritedResource(StatefulResource):
         self.teardown_calls = state["teardown_calls"]
 
 
-@resource("inherited_checkpoint_resource")
-class InheritedCheckpointResource(BaseInheritedResource):
-    pass
-
-
 def test_checkpoint_pickle_round_trip_restores_resources_hooks_and_state(tmp_path):
+    @step("checkpoint_rng_step")
+    class CheckpointRngStep(Step, Stateful):
+        def __init__(self, label, scale=1):
+            self.label = label
+            self.scale = scale
+            self.samples = []
+
+        def run(self, session):
+            sample = (
+                random.randint(0, 10 ** 6),
+                int(np.random.randint(0, 10 ** 6)),
+                int(torch.randint(0, 10 ** 6, (1,)).item()),
+            )
+            self.samples.append(sample)
+            session.iteration_context[f"{self.label}_sample"] = sample
+
+        def get_state(self):
+            return {"samples": list(self.samples)}
+
+        def set_state(self, state):
+            self.samples = list(state["samples"])
+
+    @resource("checkpoint_resource")
+    class CheckpointResource(StatefulResource):
+        def __init__(self, prefix, multiplier=2):
+            self.prefix = prefix
+            self.multiplier = multiplier
+            self.setup_calls = 0
+            self.teardown_calls = 0
+            self.last_seen_iteration = None
+
+        def setup(self, session):
+            self.setup_calls += 1
+            self.last_seen_iteration = session.iteration
+
+        def teardown(self, session):
+            self.teardown_calls += 1
+
+        def get_state(self):
+            return {
+                "setup_calls": self.setup_calls,
+                "teardown_calls": self.teardown_calls,
+                "last_seen_iteration": self.last_seen_iteration,
+            }
+
+        def set_state(self, state):
+            self.setup_calls = state["setup_calls"]
+            self.teardown_calls = state["teardown_calls"]
+            self.last_seen_iteration = state["last_seen_iteration"]
+
+    @hook("checkpoint_hook")
+    class CheckpointHook(SessionHook, Stateful):
+        def __init__(self, token, level=1):
+            self.token = token
+            self.level = level
+            self.setup_calls = 0
+            self.teardown_calls = 0
+            self.seen_session_dirs = []
+
+        def setup(self, session):
+            self.setup_calls += 1
+            self.seen_session_dirs.append(session.session_config.session_dir)
+
+        def teardown(self, session):
+            self.teardown_calls += 1
+
+        def get_state(self):
+            return {
+                "setup_calls": self.setup_calls,
+                "teardown_calls": self.teardown_calls,
+                "seen_session_dirs": list(self.seen_session_dirs),
+            }
+
+        def set_state(self, state):
+            self.setup_calls = state["setup_calls"]
+            self.teardown_calls = state["teardown_calls"]
+            self.seen_session_dirs = list(state["seen_session_dirs"])
+
+
     session = TrainingSession(make_config(tmp_path / "full", max_iterations=3, seed=42))
 
     resource_obj = CheckpointResource("alpha", multiplier=9)
@@ -187,6 +175,11 @@ def test_checkpoint_pickle_round_trip_restores_resources_hooks_and_state(tmp_pat
 
 
 def test_checkpoint_restores_inherited_constructor_args(tmp_path):
+    @resource("inherited_checkpoint_resource")
+    class InheritedCheckpointResource(BaseInheritedResource):
+        pass
+
+
     session = TrainingSession(make_config(tmp_path / "inherited", max_iterations=1, seed=99))
     resource_obj = InheritedCheckpointResource("delta", factor=13)
     resource_id = session.register_resource(resource_obj)

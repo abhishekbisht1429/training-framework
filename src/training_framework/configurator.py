@@ -1,24 +1,48 @@
 import argparse
 import collections
+import sys
 from copy import deepcopy
 from typing import Mapping, List, Any
 
 from omegaconf import OmegaConf
 from tensorboard.program import TensorBoard
 
-from training_framework.components import Logger, Checkpointer, Tensorboard, DDPResource
-from training_framework.training_session import TrainingSession, HOOK_REGISTRY, STEP_REGISTRY, RESOURCE_REGISTRY
+from training_framework.builtin_components import Logger, Checkpointer, Tensorboard, DDPResource
+from training_framework.training_session import TrainingSession
+from training_framework.training_session import HOOK_REGISTRY, STEP_REGISTRY, RESOURCE_REGISTRY
+
+import importlib
+import pkgutil
+
+
+def import_all_modules(package_name: str) -> None:
+    package = importlib.import_module(package_name)
+
+    if not hasattr(package, "__path__"):
+        return
+
+    prefix = package.__name__ + "."
+
+    for module_info in pkgutil.walk_packages(
+        package.__path__,
+        prefix=prefix,
+    ):
+        importlib.import_module(module_info.name)
 
 def create_session_from_config(config, rank=0):
+    # import all component modules
+    import_all_modules(config['components_package'])
+
+    # create session
     session = TrainingSession(config["base_config"])
     if "ddp" in config:
         ddp_resource = DDPResource(config['ddp'], rank=rank)
         session.register_resource(ddp_resource)
     for name in config.keys():
+        if name in ["ddp", "base_config", "components_package"]:
+            continue
         # for parallel session skip registration of components which are not marked as parallel
         if rank > 0 and config[name].get('parallel', False) == False:
-            continue
-        if name in ["ddp", "base_config"]:
             continue
         if name in STEP_REGISTRY:
             step_config = config[name]

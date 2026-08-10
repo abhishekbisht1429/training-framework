@@ -15,23 +15,17 @@ import numpy as np
 import pytest
 import torch
 
-from training_framework.components import Checkpointer
+from training_framework.builtin_components import Checkpointer
 from training_framework.training_session import (
-    LifecycleHook,
-    Resource,
-    SessionHook,
     SessionPhase,
-    Stateful,
-    Step,
     TrainingSession,
     hook,
     resource,
-    step,
+    step, Stateful, SessionHook, LifecycleHook, Resource, Step,
 )
 
 
-@step("critical_checkpoint_accumulator_step")
-class CriticalCheckpointAccumulatorStep(Step, Stateful):
+class CriticalCheckpointAccumulatorStepBase(Step, Stateful):
     """A deterministic stateful step suitable for exact resume comparisons."""
 
     def __init__(self, start: int = 0, increment: int = 1):
@@ -58,189 +52,6 @@ class CriticalCheckpointAccumulatorStep(Step, Stateful):
         self.history = list(state["history"])
 
 
-@step("critical_checkpoint_rng_step")
-class CriticalCheckpointRngStep(Step, Stateful):
-    """Records values from every RNG whose state TrainingSession saves."""
-
-    def __init__(self):
-        # Deliberately avoid random work in __init__.  A separate regression
-        # test below covers constructors that do consume random numbers.
-        self.samples: list[tuple[int, int, int]] = []
-
-    def run(self, session: TrainingSession) -> None:
-        sample = (
-            random.randint(0, 10**9),
-            int(np.random.randint(0, 10**9)),
-            int(torch.randint(0, 10**9, (1,)).item()),
-        )
-        self.samples.append(sample)
-        session.iteration_context["rng_sample"] = sample
-
-    def get_state(self) -> Any:
-        return {"samples": list(self.samples)}
-
-    def set_state(self, state: Any) -> None:
-        self.samples = [tuple(sample) for sample in state["samples"]]
-
-
-
-
-@step("critical_checkpoint_optimizer_step")
-class CriticalCheckpointOptimizerStep(Step, Stateful):
-    """A tiny deterministic optimization step with momentum state."""
-
-    def __init__(
-        self,
-        initial_value: float = 0.25,
-        learning_rate: float = 0.05,
-        momentum: float = 0.9,
-    ):
-        self.initial_value = initial_value
-        self.learning_rate = learning_rate
-        self.momentum = momentum
-        self.weight = torch.nn.Parameter(
-            torch.tensor(initial_value, dtype=torch.float64)
-        )
-        self.optimizer = torch.optim.SGD(
-            [self.weight],
-            lr=learning_rate,
-            momentum=momentum,
-        )
-        self.weight_history: list[float] = []
-
-    def run(self, session: TrainingSession) -> None:
-        target = torch.tensor(float(session.iteration), dtype=torch.float64)
-        loss = (self.weight - target).square()
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        current_weight = float(self.weight.detach().item())
-        self.weight_history.append(current_weight)
-        session.iteration_context["optimized_weight"] = current_weight
-
-    def get_state(self) -> Any:
-        return {
-            "weight": self.weight.detach().clone(),
-            "optimizer": self.optimizer.state_dict(),
-            "weight_history": list(self.weight_history),
-        }
-
-    def set_state(self, state: Any) -> None:
-        with torch.no_grad():
-            self.weight.copy_(state["weight"])
-        self.optimizer.load_state_dict(state["optimizer"])
-        self.weight_history = list(state["weight_history"])
-
-
-@step("critical_checkpoint_random_init_step")
-class CriticalCheckpointRandomInitStep(Step, Stateful):
-    """Consumes global RNG state in its constructor to exercise restore order."""
-
-    def __init__(self):
-        self.constructor_sample = (
-            random.randint(0, 10**9),
-            int(np.random.randint(0, 10**9)),
-            int(torch.randint(0, 10**9, (1,)).item()),
-        )
-        self.samples: list[tuple[int, int, int]] = []
-
-    def run(self, session: TrainingSession) -> None:
-        sample = (
-            random.randint(0, 10**9),
-            int(np.random.randint(0, 10**9)),
-            int(torch.randint(0, 10**9, (1,)).item()),
-        )
-        self.samples.append(sample)
-        session.iteration_context["rng_sample"] = sample
-
-    def get_state(self) -> Any:
-        return {
-            "constructor_sample": self.constructor_sample,
-            "samples": list(self.samples),
-        }
-
-    def set_state(self, state: Any) -> None:
-        self.constructor_sample = tuple(state["constructor_sample"])
-        self.samples = [tuple(sample) for sample in state["samples"]]
-
-
-@resource("critical_checkpoint_stateful_resource")
-class CriticalCheckpointStatefulResource(Resource, Stateful):
-    def __init__(self, token: str, multiplier: int = 1):
-        self.token = token
-        self.multiplier = multiplier
-        self.setup_calls = 0
-        self.teardown_calls = 0
-
-    def setup(self, session: TrainingSession):
-        self.setup_calls += 1
-        session.session_context["resource_token"] = self.token
-
-    def teardown(self, session: TrainingSession):
-        self.teardown_calls += 1
-
-    def get_state(self) -> Any:
-        return {
-            "setup_calls": self.setup_calls,
-            "teardown_calls": self.teardown_calls,
-        }
-
-    def set_state(self, state: Any) -> None:
-        self.setup_calls = state["setup_calls"]
-        self.teardown_calls = state["teardown_calls"]
-
-
-@hook("critical_checkpoint_stateful_hook")
-class CriticalCheckpointStatefulHook(LifecycleHook, Stateful):
-    def __init__(self, label: str, call_every: int = 1):
-        self.label = label
-        self.call_every = call_every
-        self.setup_calls = 0
-        self.teardown_calls = 0
-        self.observed_values: list[int] = []
-
-    def setup(self, session: TrainingSession):
-        self.setup_calls += 1
-
-    def teardown(self, session: TrainingSession):
-        self.teardown_calls += 1
-
-    def pre_iteration_callback(self, session: TrainingSession) -> None:
-        pass
-
-    def post_iteration_callback(self, session: TrainingSession) -> None:
-        self.observed_values.append(session.iteration_context["accumulator"])
-
-    def get_state(self) -> Any:
-        return {
-            "setup_calls": self.setup_calls,
-            "teardown_calls": self.teardown_calls,
-            "observed_values": list(self.observed_values),
-        }
-
-    def set_state(self, state: Any) -> None:
-        self.setup_calls = state["setup_calls"]
-        self.teardown_calls = state["teardown_calls"]
-        self.observed_values = list(state["observed_values"])
-
-
-@hook("critical_checkpoint_stateless_hook")
-class CriticalCheckpointStatelessHook(SessionHook):
-    """Its constructor configuration is restored, but runtime events are not."""
-
-    def __init__(self, label: str):
-        self.label = label
-        self.runtime_events: list[str] = []
-
-    def setup(self, session: TrainingSession):
-        self.runtime_events.append("setup")
-
-    def teardown(self, session: TrainingSession):
-        self.runtime_events.append("teardown")
-
-
 def make_config(
     directory: Path,
     *,
@@ -265,6 +76,30 @@ def run_to_completion(session: TrainingSession) -> list[int]:
 
 def test_pickle_resume_matches_uninterrupted_run_and_preserves_rng_streams(tmp_path):
     """A resumed run must produce exactly the same RNG samples as a full run."""
+
+    @step("critical_checkpoint_rng_step")
+    class CriticalCheckpointRngStep(Step, Stateful):
+        """Records values from every RNG whose state TrainingSession saves."""
+
+        def __init__(self):
+            # Deliberately avoid random work in __init__.  A separate regression
+            # test below covers constructors that do consume random numbers.
+            self.samples: list[tuple[int, int, int]] = []
+
+        def run(self, session: TrainingSession) -> None:
+            sample = (
+                random.randint(0, 10 ** 9),
+                int(np.random.randint(0, 10 ** 9)),
+                int(torch.randint(0, 10 ** 9, (1,)).item()),
+            )
+            self.samples.append(sample)
+            session.iteration_context["rng_sample"] = sample
+
+        def get_state(self) -> Any:
+            return {"samples": list(self.samples)}
+
+        def set_state(self, state: Any) -> None:
+            self.samples = [tuple(sample) for sample in state["samples"]]
 
     baseline = TrainingSession(
         make_config(tmp_path / "baseline", max_iterations=6, seed=314159)
@@ -303,6 +138,54 @@ def test_pickle_resume_matches_uninterrupted_run_and_preserves_rng_streams(tmp_p
 
 def test_checkpoint_resume_preserves_model_and_optimizer_state(tmp_path):
     """Momentum and tensor state must match an uninterrupted optimization run."""
+
+    @step("critical_checkpoint_optimizer_step")
+    class CriticalCheckpointOptimizerStep(Step, Stateful):
+        """A tiny deterministic optimization step with momentum state."""
+
+        def __init__(
+                self,
+                initial_value: float = 0.25,
+                learning_rate: float = 0.05,
+                momentum: float = 0.9,
+        ):
+            self.initial_value = initial_value
+            self.learning_rate = learning_rate
+            self.momentum = momentum
+            self.weight = torch.nn.Parameter(
+                torch.tensor(initial_value, dtype=torch.float64)
+            )
+            self.optimizer = torch.optim.SGD(
+                [self.weight],
+                lr=learning_rate,
+                momentum=momentum,
+            )
+            self.weight_history: list[float] = []
+
+        def run(self, session: TrainingSession) -> None:
+            target = torch.tensor(float(session.iteration), dtype=torch.float64)
+            loss = (self.weight - target).square()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            current_weight = float(self.weight.detach().item())
+            self.weight_history.append(current_weight)
+            session.iteration_context["optimized_weight"] = current_weight
+
+        def get_state(self) -> Any:
+            return {
+                "weight": self.weight.detach().clone(),
+                "optimizer": self.optimizer.state_dict(),
+                "weight_history": list(self.weight_history),
+            }
+
+        def set_state(self, state: Any) -> None:
+            with torch.no_grad():
+                self.weight.copy_(state["weight"])
+            self.optimizer.load_state_dict(state["optimizer"])
+            self.weight_history = list(state["weight_history"])
 
     baseline = TrainingSession(
         make_config(tmp_path / "optimizer-baseline", max_iterations=6, seed=44)
@@ -366,12 +249,20 @@ def test_checkpoint_resume_preserves_model_and_optimizer_state(tmp_path):
 def test_builtin_checkpointer_loads_mid_run_checkpoint_and_resumes_exactly(tmp_path):
     """Exercise the real Checkpointer save/load path, not only pickle directly."""
 
+    @hook("checkpointer")
+    class CheckpointerTest(Checkpointer):
+        pass
+
+    @step("critical_checkpoint_accumulator_step")
+    class CriticalCheckpointAccumulatorStep(CriticalCheckpointAccumulatorStepBase):
+        pass
+
     checkpoints_dir = tmp_path / "checkpoints"
     session = TrainingSession(
         make_config(tmp_path / "session", max_iterations=5, seed=77)
     )
     step_obj = CriticalCheckpointAccumulatorStep(start=10, increment=3)
-    checkpointer = Checkpointer(
+    checkpointer = CheckpointerTest(
         {
             "checkpoint_every": 2,
             "checkpoints_dir": str(checkpoints_dir),
@@ -390,7 +281,7 @@ def test_builtin_checkpointer_loads_mid_run_checkpoint_and_resumes_exactly(tmp_p
     loaded_by_iteration = {
         loaded.iteration: loaded
         for loaded in (
-            Checkpointer.load_checkpoint(path, map_location="cpu")
+            CheckpointerTest.load_checkpoint(path, map_location="cpu")
             for path in checkpoint_paths
         )
     }
@@ -417,6 +308,82 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
     tmp_path,
 ):
     """Verify mixed component reconstruction from one actual session payload."""
+
+    @hook("critical_checkpoint_stateless_hook")
+    class CriticalCheckpointStatelessHook(SessionHook):
+        """Its constructor configuration is restored, but runtime events are not."""
+
+        def __init__(self, label: str):
+            self.label = label
+            self.runtime_events: list[str] = []
+
+        def setup(self, session: TrainingSession):
+            self.runtime_events.append("setup")
+
+        def teardown(self, session: TrainingSession):
+            self.runtime_events.append("teardown")
+
+    @hook("critical_checkpoint_stateful_hook")
+    class CriticalCheckpointStatefulHook(LifecycleHook, Stateful):
+        def __init__(self, label: str, call_every: int = 1):
+            self.label = label
+            self.call_every = call_every
+            self.setup_calls = 0
+            self.teardown_calls = 0
+            self.observed_values: list[int] = []
+
+        def setup(self, session: TrainingSession):
+            self.setup_calls += 1
+
+        def teardown(self, session: TrainingSession):
+            self.teardown_calls += 1
+
+        def pre_iteration_callback(self, session: TrainingSession) -> None:
+            pass
+
+        def post_iteration_callback(self, session: TrainingSession) -> None:
+            self.observed_values.append(session.iteration_context["accumulator"])
+
+        def get_state(self) -> Any:
+            return {
+                "setup_calls": self.setup_calls,
+                "teardown_calls": self.teardown_calls,
+                "observed_values": list(self.observed_values),
+            }
+
+        def set_state(self, state: Any) -> None:
+            self.setup_calls = state["setup_calls"]
+            self.teardown_calls = state["teardown_calls"]
+            self.observed_values = list(state["observed_values"])
+
+    @resource("critical_checkpoint_stateful_resource")
+    class CriticalCheckpointStatefulResource(Resource, Stateful):
+        def __init__(self, token: str, multiplier: int = 1):
+            self.token = token
+            self.multiplier = multiplier
+            self.setup_calls = 0
+            self.teardown_calls = 0
+
+        def setup(self, session: TrainingSession):
+            self.setup_calls += 1
+            session.session_context["resource_token"] = self.token
+
+        def teardown(self, session: TrainingSession):
+            self.teardown_calls += 1
+
+        def get_state(self) -> Any:
+            return {
+                "setup_calls": self.setup_calls,
+                "teardown_calls": self.teardown_calls,
+            }
+
+        def set_state(self, state: Any) -> None:
+            self.setup_calls = state["setup_calls"]
+            self.teardown_calls = state["teardown_calls"]
+
+    @step("critical_checkpoint_accumulator_step")
+    class CriticalCheckpointAccumulatorStep(CriticalCheckpointAccumulatorStepBase):
+        pass
 
     session = TrainingSession(
         make_config(tmp_path / "mixed", max_iterations=3, seed=101)
@@ -521,6 +488,37 @@ def test_get_state_returns_a_detached_session_context_snapshot(tmp_path):
 # )
 def test_component_constructors_do_not_advance_restored_rng_streams(tmp_path):
     """Component reconstruction must not perturb checkpointed global RNG state."""
+
+    @step("critical_checkpoint_random_init_step")
+    class CriticalCheckpointRandomInitStep(Step, Stateful):
+        """Consumes global RNG state in its constructor to exercise restore order."""
+
+        def __init__(self):
+            self.constructor_sample = (
+                random.randint(0, 10 ** 9),
+                int(np.random.randint(0, 10 ** 9)),
+                int(torch.randint(0, 10 ** 9, (1,)).item()),
+            )
+            self.samples: list[tuple[int, int, int]] = []
+
+        def run(self, session: TrainingSession) -> None:
+            sample = (
+                random.randint(0, 10 ** 9),
+                int(np.random.randint(0, 10 ** 9)),
+                int(torch.randint(0, 10 ** 9, (1,)).item()),
+            )
+            self.samples.append(sample)
+            session.iteration_context["rng_sample"] = sample
+
+        def get_state(self) -> Any:
+            return {
+                "constructor_sample": self.constructor_sample,
+                "samples": list(self.samples),
+            }
+
+        def set_state(self, state: Any) -> None:
+            self.constructor_sample = tuple(state["constructor_sample"])
+            self.samples = [tuple(sample) for sample in state["samples"]]
 
     baseline = TrainingSession(
         make_config(tmp_path / "rng-baseline", max_iterations=5, seed=999)

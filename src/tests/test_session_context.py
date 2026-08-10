@@ -1,44 +1,41 @@
-from training_framework.training_session import TrainingSession, SessionHook, hook
+from training_framework.training_session import TrainingSession, hook, SessionHook
 import pickle
 
 
-
-@hook("session_context_writer_hook")
-class SessionContextWriterHook(SessionHook):
-    def __init__(self):
-        self.context_ids = []
-        self.seen_in_teardown = []
-        self._context = None
-
-    def setup(self, session):
-        self._context = session.session_context
-        self.context_ids.append(id(self._context))
-        self._context["shared_key"] = "shared-value"
-        self._context.setdefault("events", []).append("writer_setup")
-
-    def teardown(self, session):
-        self.seen_in_teardown.append(self._context["shared_key"])
-        self._context.setdefault("events", []).append("writer_teardown")
-
-
-@hook("session_context_reader_hook")
-class SessionContextReaderHook(SessionHook):
-    def __init__(self):
-        self.context_ids = []
-        self.seen_values = []
-        self._context = None
-
-    def setup(self, session):
-        self._context = session.session_context
-        self.context_ids.append(id(self._context))
-        self.seen_values.append(self._context.get("shared_key"))
-        self._context.setdefault("events", []).append("reader_setup")
-
-    def teardown(self, session):
-        self._context.setdefault("events", []).append("reader_teardown")
-
-
 def test_session_context_is_shared_between_hooks(tmp_path):
+    @hook("session_context_writer_hook")
+    class SessionContextWriterHook(SessionHook):
+        def __init__(self):
+            self.context_ids = []
+            self.seen_in_teardown = []
+            self._context = None
+
+        def setup(self, session):
+            self._context = session.session_context
+            self.context_ids.append(id(self._context))
+            self._context["shared_key"] = "shared-value"
+            self._context.setdefault("events", []).append("writer_setup")
+
+        def teardown(self, session):
+            self.seen_in_teardown.append(self._context["shared_key"])
+            self._context.setdefault("events", []).append("writer_teardown")
+
+    @hook("session_context_reader_hook")
+    class SessionContextReaderHook(SessionHook):
+        def __init__(self):
+            self.context_ids = []
+            self.seen_values = []
+            self._context = None
+
+        def setup(self, session):
+            self._context = session.session_context
+            self.context_ids.append(id(self._context))
+            self.seen_values.append(self._context.get("shared_key"))
+            self._context.setdefault("events", []).append("reader_setup")
+
+        def teardown(self, session):
+            self._context.setdefault("events", []).append("reader_teardown")
+
     config = {
         "rng_seed": 123,
         "sessions_dir": str(tmp_path),
@@ -65,17 +62,16 @@ def test_session_context_is_shared_between_hooks(tmp_path):
 
     assert writer.seen_in_teardown == ["shared-value"]
 
-
-@hook("session_context_seed_hook")
-class SessionContextSeedHook(SessionHook):
-    def setup(self, session):
-        session.session_context["shared_value"] = "hello"
-        session.session_context["numbers"] = [1, 2, 3]
-
-    def teardown(self, session):
-        pass
-
 def test_session_context_is_saved_restored_and_cleared(tmp_path):
+    @hook("session_context_seed_hook")
+    class SessionContextSeedHook(SessionHook):
+        def setup(self, session):
+            session.session_context["shared_value"] = "hello"
+            session.session_context["numbers"] = [1, 2, 3]
+
+        def teardown(self, session):
+            pass
+
     config = {
         "rng_seed": 123,
         "sessions_dir": str(tmp_path),

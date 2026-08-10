@@ -13,14 +13,11 @@ from typing import Any
 import pytest
 
 from training_framework.training_session import (
-    LifecycleHook,
-    Resource,
     SessionPhase,
-    Step,
     TrainingSession,
     hook,
     resource,
-    step,
+    step, LifecycleHook, Resource, Step,
 )
 
 
@@ -70,16 +67,6 @@ class TraceResourceBase(Resource):
             )
 
 
-@resource("critical_lifecycle_resource_a")
-class CriticalLifecycleResourceA(TraceResourceBase):
-    pass
-
-
-@resource("critical_lifecycle_resource_b")
-class CriticalLifecycleResourceB(TraceResourceBase):
-    pass
-
-
 class TraceHookBase(LifecycleHook):
     def __init__(
         self,
@@ -126,21 +113,6 @@ class TraceHookBase(LifecycleHook):
         self.post_payloads.append(session.iteration_context["payload"])
 
 
-@hook("critical_lifecycle_hook_a")
-class CriticalLifecycleHookA(TraceHookBase):
-    pass
-
-
-@hook("critical_lifecycle_hook_b")
-class CriticalLifecycleHookB(TraceHookBase):
-    pass
-
-
-@hook("critical_lifecycle_failing_teardown_hook")
-class CriticalLifecycleFailingTeardownHook(TraceHookBase):
-    pass
-
-
 class TraceStepBase(Step):
     def __init__(
         self,
@@ -171,21 +143,6 @@ class TraceStepBase(Step):
             raise LifecycleStepError(f"step {self.label} failed")
 
 
-@step("critical_lifecycle_step_a")
-class CriticalLifecycleStepA(TraceStepBase):
-    pass
-
-
-@step("critical_lifecycle_step_b")
-class CriticalLifecycleStepB(TraceStepBase):
-    pass
-
-
-@step("critical_lifecycle_failing_step")
-class CriticalLifecycleFailingStep(TraceStepBase):
-    pass
-
-
 def make_config(
     directory: Path,
     *,
@@ -201,6 +158,31 @@ def make_config(
 
 
 def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path):
+
+    @resource("critical_lifecycle_resource_a")
+    class CriticalLifecycleResourceA(TraceResourceBase):
+        pass
+
+    @resource("critical_lifecycle_resource_b")
+    class CriticalLifecycleResourceB(TraceResourceBase):
+        pass
+
+    @hook("critical_lifecycle_hook_a")
+    class CriticalLifecycleHookA(TraceHookBase):
+        pass
+
+    @hook("critical_lifecycle_hook_b")
+    class CriticalLifecycleHookB(TraceHookBase):
+        pass
+
+    @step("critical_lifecycle_step_a")
+    class CriticalLifecycleStepA(TraceStepBase):
+        pass
+
+    @step("critical_lifecycle_step_b")
+    class CriticalLifecycleStepB(TraceStepBase):
+        pass
+
     trace: list[str] = []
     session = TrainingSession(
         make_config(tmp_path / "ordered", max_iterations=5)
@@ -292,16 +274,28 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
 
 
 def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
+    @resource("critical_lifecycle_resource_a")
+    class CriticalLifecycleResourceA(TraceResourceBase):
+        pass
+
+    @hook("critical_lifecycle_hook_a")
+    class CriticalLifecycleHookA(TraceHookBase):
+        pass
+
+    @step("critical_lifecycle_step_a")
+    class CriticalLifecycleStepA(TraceStepBase):
+        pass
+
     trace: list[str] = []
     session = TrainingSession(
         make_config(tmp_path / "pause-resume", max_iterations=4)
     )
 
-    resource = CriticalLifecycleResourceA("A", trace)
+    resource_a = CriticalLifecycleResourceA("A", trace)
     hook_obj = CriticalLifecycleHookA("A", trace, call_every=1)
     step_obj = CriticalLifecycleStepA("A", trace)
 
-    session.register_resource(resource)
+    session.register_resource(resource_a)
     session.register_hook(hook_obj)
     session.add_step(step_obj)
 
@@ -313,8 +307,8 @@ def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
     assert session.iteration == 2
     assert session._phase is SessionPhase.PAUSED
     assert session.session_context == {}
-    assert resource.setup_calls == 1
-    assert resource.teardown_calls == 1
+    assert resource_a.setup_calls == 1
+    assert resource_a.teardown_calls == 1
     assert hook_obj.setup_calls == 1
     assert hook_obj.teardown_calls == 1
 
@@ -328,8 +322,8 @@ def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
     assert session.iteration == 4
     assert session._phase is SessionPhase.FINISHED
     assert session.session_context == {}
-    assert resource.setup_calls == 2
-    assert resource.teardown_calls == 2
+    assert resource_a.setup_calls == 2
+    assert resource_a.teardown_calls == 2
     assert hook_obj.setup_calls == 2
     assert hook_obj.teardown_calls == 2
     assert step_obj.calls == 4
@@ -344,6 +338,23 @@ def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
 
 
 def test_body_exception_propagates_after_normal_cleanup(tmp_path):
+
+    @resource("critical_lifecycle_resource_a")
+    class CriticalLifecycleResourceA(TraceResourceBase):
+        pass
+
+    @resource("critical_lifecycle_resource_b")
+    class CriticalLifecycleResourceB(TraceResourceBase):
+        pass
+
+    @hook("critical_lifecycle_hook_a")
+    class CriticalLifecycleHookA(TraceHookBase):
+        pass
+
+    @hook("critical_lifecycle_hook_b")
+    class CriticalLifecycleHookB(TraceHookBase):
+        pass
+
     trace: list[str] = []
     session = TrainingSession(
         make_config(tmp_path / "body-error", max_iterations=1)
@@ -383,6 +394,19 @@ def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
     tmp_path,
     capsys,
 ):
+
+    @resource("critical_lifecycle_resource_a")
+    class CriticalLifecycleResourceA(TraceResourceBase):
+        pass
+
+    @resource("critical_lifecycle_resource_b")
+    class CriticalLifecycleResourceB(TraceResourceBase):
+        pass
+
+    @hook("critical_lifecycle_hook_a")
+    class CriticalLifecycleHookA(TraceHookBase):
+        pass
+
     trace: list[str] = []
     session = TrainingSession(
         make_config(tmp_path / "resource-teardown-error", max_iterations=1)
@@ -394,6 +418,7 @@ def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
         trace,
         fail_teardown=True,
     )
+
     hook_obj = CriticalLifecycleHookA("A", trace)
 
     session.register_resource(resource_a)
@@ -405,7 +430,7 @@ def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
 
     captured = capsys.readouterr()
 
-    assert "Error releasing resource 'critical_lifecycle_resource_b'" in captured.out
+    assert "Error releasing resource 'Resource.critical_lifecycle_resource_b'" in captured.out
     assert resource_b.teardown_calls == 1
     assert resource_a.teardown_calls == 1
     assert hook_obj.teardown_calls == 1
@@ -426,6 +451,15 @@ def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
     ),
 )
 def test_partial_setup_failure_rolls_back_initialized_resources(tmp_path):
+
+    @resource("critical_lifecycle_resource_a")
+    class CriticalLifecycleResourceA(TraceResourceBase):
+        pass
+
+    @resource("critical_lifecycle_resource_b")
+    class CriticalLifecycleResourceB(TraceResourceBase):
+        pass
+
     trace: list[str] = []
     session = TrainingSession(
         make_config(tmp_path / "setup-rollback", max_iterations=1)
@@ -450,16 +484,29 @@ def test_partial_setup_failure_rolls_back_initialized_resources(tmp_path):
 def test_step_failure_still_clears_iteration_context_and_runs_session_cleanup(
     tmp_path,
 ):
+
+    @resource("critical_lifecycle_resource_a")
+    class CriticalLifecycleResourceA(TraceResourceBase):
+        pass
+
+    @hook("critical_lifecycle_hook_a")
+    class CriticalLifecycleHookA(TraceHookBase):
+        pass
+
+    @step("critical_lifecycle_failing_step")
+    class CriticalLifecycleFailingStep(TraceStepBase):
+        pass
+
     trace: list[str] = []
     session = TrainingSession(
         make_config(tmp_path / "step-error", max_iterations=2)
     )
 
-    resource = CriticalLifecycleResourceA("A", trace)
+    resource_a = CriticalLifecycleResourceA("A", trace)
     hook_obj = CriticalLifecycleHookA("A", trace)
     failing_step = CriticalLifecycleFailingStep("failure", trace, fail=True)
 
-    session.register_resource(resource)
+    session.register_resource(resource_a)
     session.register_hook(hook_obj)
     session.add_step(failing_step)
 
@@ -467,7 +514,7 @@ def test_step_failure_still_clears_iteration_context_and_runs_session_cleanup(
         with session:
             next(session)
 
-    assert resource.teardown_calls == 1
+    assert resource_a.teardown_calls == 1
     assert hook_obj.teardown_calls == 1
     assert session.session_context == {}
     assert session._shared_state == {}
@@ -475,28 +522,35 @@ def test_step_failure_still_clears_iteration_context_and_runs_session_cleanup(
     assert getattr(session, "_active", False) is False
 
 
-# @pytest.mark.xfail(
-#     strict=True,
-#     reason=(
-#         "A session-hook teardown exception currently stops later hook teardowns "
-#         "and prevents session_context clearing and phase finalization."
-#     ),
-# )
 def test_hook_teardown_failure_does_not_skip_later_cleanup(tmp_path):
+
+    @resource("critical_lifecycle_resource_a")
+    class CriticalLifecycleResourceA(TraceResourceBase):
+        pass
+
+    @hook("critical_lifecycle_failing_teardown_hook")
+    class CriticalLifecycleFailingTeardownHook(TraceHookBase):
+        pass
+
+    @hook("critical_lifecycle_hook_b")
+    class CriticalLifecycleHookB(TraceHookBase):
+        pass
+
     trace: list[str] = []
     session = TrainingSession(
         make_config(tmp_path / "hook-teardown-error", max_iterations=1)
     )
 
-    resource = CriticalLifecycleResourceA("A", trace)
+    resource_a = CriticalLifecycleResourceA("A", trace)
     failing_hook = CriticalLifecycleFailingTeardownHook(
         "failing",
         trace,
         fail_teardown=True,
     )
+
     later_hook = CriticalLifecycleHookB("later", trace)
 
-    session.register_resource(resource)
+    session.register_resource(resource_a)
     session.register_hook(failing_hook)
     session.register_hook(later_hook)
 
@@ -504,7 +558,7 @@ def test_hook_teardown_failure_does_not_skip_later_cleanup(tmp_path):
     with session:
         session.session_context["temporary"] = "value"
 
-    assert resource.teardown_calls == 1
+    assert resource_a.teardown_calls == 1
     assert failing_hook.teardown_calls == 1
     assert later_hook.teardown_calls == 1
     assert session.session_context == {}

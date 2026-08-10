@@ -1,16 +1,11 @@
 import pytest
 
 from training_framework.training_session import (
-    Hook,
-    Resource,
-    Step,
     TrainingSession,
     hook,
-    requires_hook,
-    requires_resource,
-    requires_step,
     resource,
-    step,
+    step, STEP_REGISTRY, HOOK_REGISTRY, RESOURCE_REGISTRY, Hook, Resource, Step, requires_step, requires_hook,
+    requires_resource,
 )
 
 
@@ -53,12 +48,12 @@ def assert_unmet_prerequisites(action, *expected_names):
     for name in expected_names:
         assert name in message
 
-
 # ============================================================
 # Decorator rule enforcement
 # ============================================================
 
 def test_resource_can_require_resource_only():
+
     @requires_resource("resource_dependency")
     class ValidResource(NoOpResource):
         pass
@@ -481,3 +476,42 @@ def test_distinct_registered_subclasses_can_coexist(tmp_path):
 
     assert session.get_resource(training_id).name == "training_logger"
     assert session.get_resource(error_id).name == "error_logger"
+
+
+def test_decorators_accept_only_corresponding_classes():
+
+    with pytest.raises(TypeError, match=".*must be subclass of.*"):
+        @resource("invalid_resource")
+        class TestHook(Hook):
+            pass
+
+    with pytest.raises(TypeError, match=".*must be subclass of.*"):
+        @hook("invalid_hook")
+        class TestResource(Resource):
+            def setup(self, session):
+                pass
+            def teardown(self, session):
+                pass
+
+    with pytest.raises(TypeError, match=".*must be subclass of.*"):
+        @hook("invalid_step")
+        class TestStep(Step):
+            def run(self, session: TrainingSession):
+                pass
+
+
+    @hook("valid_hook")
+    class TestHook(Hook):
+        pass
+
+    @resource("valid_resource")
+    class TestResource(Resource):
+        def setup(self, session):
+            pass
+        def teardown(self, session):
+            pass
+
+    @step("valid_step")
+    class TestStep(Step):
+        def run(self, session: TrainingSession):
+            pass

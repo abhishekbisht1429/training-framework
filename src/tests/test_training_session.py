@@ -22,16 +22,12 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+import training_framework
 from training_framework.configurator import Configurator
 from training_framework.dataloader import InfiniteSampler
-from training_framework.components import Checkpointer, Logger, Tensorboard
-from training_framework.training_session import SessionPhase, Step, TrainingSession, step
-import training_framework.training_engine as engine_module
+from training_framework.builtin_components import Checkpointer, Logger, Tensorboard
+from training_framework.training_session import SessionPhase, TrainingSession, step, Step
 
-
-factory_module = importlib.import_module(
-    engine_module.create_session_from_config.__module__
-)
 
 
 class DummyClassificationDataset(Dataset):
@@ -70,8 +66,7 @@ class DummyClassificationDataset(Dataset):
         return torch.stack(features), torch.stack(labels)
 
 
-@step("sample_step")
-class SampleStep(Step):
+class SampleStepBase(Step):
     """Step instantiated by ``create_session_from_config(step_config)``."""
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -99,6 +94,7 @@ class SampleStep(Step):
 def _make_session_config(tmp_path: Path, index: int) -> dict[str, Any]:
     suffix = "" if index == 0 else str(index + 1)
     return {
+        "components_package": "training_framework.builtin_components",
         "base_config": {
             "max_iterations": 12,
             "batch_size": 4,
@@ -141,7 +137,7 @@ def _config_with_components(
 ) -> dict[str, Any]:
     """Return an isolated full config containing only selected components."""
 
-    keys = ("base_config", *component_names)
+    keys = ("components_package", "base_config", *component_names)
     return {key: deepcopy(session_config[key]) for key in keys}
 
 
@@ -151,6 +147,7 @@ def _run_session_to_completion(
     rank: int = 0,
 ) -> TrainingSession:
     """Build and run a finite session without spawning a child process."""
+    import training_framework.training_engine as engine_module
 
     session = engine_module.create_session_from_config(config, rank=rank)
     max_iterations = int(config["base_config"]["max_iterations"])
@@ -260,6 +257,12 @@ class RecordingDDPResource(RecordingComponent):
 
 
 def _install_recording_session_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    import training_framework.training_engine as engine_module
+
+    factory_module = importlib.import_module(
+        engine_module.create_session_from_config.__module__
+    )
+
     monkeypatch.setattr(factory_module, "TrainingSession", RecordingSession)
     monkeypatch.setattr(
         factory_module,
@@ -282,8 +285,11 @@ def _install_recording_session_factory(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_create_session_from_config_registers_all_component_types(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import training_framework.training_engine as engine_module
+
     _install_recording_session_factory(monkeypatch)
     config = {
+        "components_package": "training_framework.builtin_components",
         "base_config": {"max_iterations": 3},
         "train_step": {"value": "step"},
         "metrics_hook": {"value": "hook"},
@@ -299,19 +305,26 @@ def test_create_session_from_config_registers_all_component_types(
         config["train_step"]
     ]
     assert [component.config for component in session.resources] == [
-        config["cache_resource"],
-        config["ddp"]
+        config["ddp"],
+        config["cache_resource"]
     ]
     assert len(session.hooks) == 1
     assert session.hooks[0].config is config["metrics_hook"]
-    assert isinstance(session.resources[1], RecordingDDPResource)
-    assert session.resources[1].config is config["ddp"]
-    assert session.resources[1].rank == 0
+    # DDP is the first resource to be registered
+    assert isinstance(session.resources[0], RecordingDDPResource)
+    assert session.resources[0].config is config["ddp"]
+    assert session.resources[0].rank == 0
 
 
 def test_create_session_from_config_secondary_rank_keeps_only_parallel_components(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import training_framework.training_engine as engine_module
+
+    factory_module = importlib.import_module(
+        engine_module.create_session_from_config.__module__
+    )
+
     _install_recording_session_factory(monkeypatch)
     monkeypatch.setattr(
         factory_module,
@@ -329,6 +342,7 @@ def test_create_session_from_config_secondary_rank_keeps_only_parallel_component
     monkeypatch.setattr(factory_module, "RESOURCE_REGISTRY", {})
 
     config = {
+        "components_package": "training_framework.builtin_components",
         "base_config": {"max_iterations": 3},
         "parallel_step": {"parallel": True, "value": "parallel"},
         "main_process_step": {"parallel": False, "value": "rank-zero-only"},
@@ -349,8 +363,11 @@ def test_create_session_from_config_secondary_rank_keeps_only_parallel_component
 def test_create_session_from_config_rejects_unknown_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import training_framework.training_engine as engine_module
+
     _install_recording_session_factory(monkeypatch)
     config = {
+        "components_package": "training_framework.builtin_components",
         "base_config": {"max_iterations": 1},
         "not_registered": {},
     }
@@ -370,6 +387,13 @@ def test_create_session_from_config_rejects_unknown_component(
 def test_logger_is_created_from_config_and_writes_each_iteration(
     sample_config: dict[str, Any],
 ) -> None:
+    import importlib
+    importlib.reload(training_framework.builtin_components)
+
+    @step("sample_step")
+    class SampleStep(SampleStepBase):
+        pass
+
     full_config = sample_config["sessions"][0]
     config = _config_with_components(full_config, "sample_step", "logger")
 
@@ -390,6 +414,13 @@ def test_logger_is_created_from_config_and_writes_each_iteration(
 def test_checkpointer_is_created_from_config_and_restores_sessions(
     sample_config: dict[str, Any],
 ) -> None:
+    import importlib
+    importlib.reload(training_framework.builtin_components)
+
+    @step("sample_step")
+    class SampleStep(SampleStepBase):
+        pass
+
     full_config = sample_config["sessions"][0]
     config = _config_with_components(full_config, "sample_step", "checkpointer")
 
@@ -424,6 +455,16 @@ def test_tensorboard_resource_is_created_and_cleaned_up_from_config(
     sample_config: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from training_framework.configurator import create_session_from_config
+    import importlib
+    importlib.reload(training_framework.builtin_components)
+    importlib.reload(training_framework.configurator)
+    from training_framework.builtin_components import Tensorboard
+
+    @step("sample_step")
+    class SampleStep(SampleStepBase):
+        pass
+
     full_config = sample_config["sessions"][0]
     config = _config_with_components(full_config, "sample_step", "tensorboard")
 
@@ -461,19 +502,19 @@ def test_tensorboard_resource_is_created_and_cleaned_up_from_config(
 
     dummy_process = DummyProcess()
     monkeypatch.setattr(
-        "training_framework.components.subprocess.Popen",
+        "training_framework.builtin_components.subprocess.Popen",
         lambda *args, **kwargs: dummy_process,
     )
     monkeypatch.setattr(
-        "training_framework.components.SummaryWriter",
+        "training_framework.builtin_components.SummaryWriter",
         DummySummaryWriter,
     )
     monkeypatch.setattr(
-        "training_framework.components.time.sleep",
+        "training_framework.builtin_components.time.sleep",
         lambda *_args, **_kwargs: None,
     )
 
-    session = engine_module.create_session_from_config(config)
+    session = create_session_from_config(config)
     resources = _registered_values(session._resources)
     assert len(resources) == 1
     tensorboard = resources[0]
