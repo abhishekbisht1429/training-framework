@@ -201,20 +201,24 @@ def topological_sort_of_components():
     prerequisites_graph: dict[str, List[str]] = {component.id: [] for component in components}
     for component in components:
         for required_hook_name in getattr(component, 'required_hooks', []):
+            if required_hook_name not in HOOK_REGISTRY:
+                raise RuntimeError(f"unmet prerequisite! '{required_hook_name}' not registered.")
             prerequisites_graph[component.id].append(HOOK_REGISTRY[required_hook_name].id)
 
         for required_step_name in getattr(component, 'required_steps', []):
+            if required_step_name not in STEP_REGISTRY:
+                raise RuntimeError(f"unmet prerequisite! '{required_step_name}' not registered.")
             prerequisites_graph[component.id].append(STEP_REGISTRY[required_step_name].id)
 
         for required_resource_name in getattr(component, 'required_resources', []):
-            prerequisites_graph[component.id].append(STEP_REGISTRY[required_resource_name].id)
+            if required_resource_name not in RESOURCE_REGISTRY:
+                raise RuntimeError(f"unmet prerequisite! '{required_resource_name}' not registered.")
+            prerequisites_graph[component.id].append(RESOURCE_REGISTRY[required_resource_name].id)
 
     # create dependents graph
     dependents_graph: dict[str, List[str]] = {component_id: [] for component_id in prerequisites_graph.keys()}
     for component_id, prerequisites in prerequisites_graph.items():
         for prerequisite in prerequisites:
-            if prerequisite not in dependents_graph:
-                raise RuntimeError(f"'{prerequisite}' not registered!")
             dependents_graph[prerequisite].append(component_id)
 
     queue = deque()
@@ -442,16 +446,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     # ---------------------- Shared Context Management -----------------------
 
-    # @requires_context
-    # def share_value(self, key: str, value: Any):
-    #     self._shared_state[key] = value
-    #
-    # @requires_context
-    # def get_shared_value(self, key: str) -> Any:
-    #     if key not in self._shared_state:
-    #         raise KeyError(f"{key} not found in shared state")
-    #     return self._shared_state[key]
-
     @requires_context
     def _clear_iteration_state(self):
         self._shared_state.clear()
@@ -463,52 +457,52 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             raise KeyError(f"{key} not found in resources")
         return self._resources[key]
 
-    def _registered_names(self):
-        return {
-            "required_resources": {
-                resource.name
-                for resource in self._resources.values()
-                if hasattr(resource, "name")
-            },
-            "required_hooks": {
-                hook.name
-                for hook in self._hooks.values()
-                if hasattr(hook, "name")
-            },
-            "required_steps": {
-                step.name
-                for step in self._steps.values()
-                if hasattr(step, "name")
-            },
-        }
-
-    def _missing_prereqs(self, cls, required_attrs):
-        registered = self._registered_names()
-        missing = {}
-
-        for attr in required_attrs:
-            missing_names = [
-                name
-                for name in getattr(cls, attr, [])
-                if name not in registered[attr]
-            ]
-
-            if missing_names:
-                missing[attr] = missing_names
-
-        return missing
-
-    def _format_missing_prereqs(self, missing):
-        labels = {
-            "required_resources": "resources",
-            "required_hooks": "hooks",
-            "required_steps": "steps",
-        }
-
-        return ", ".join(
-            f"{labels[attr]}={names}"
-            for attr, names in missing.items()
-        )
+    # def _registered_names(self):
+    #     return {
+    #         "required_resources": {
+    #             resource.name
+    #             for resource in self._resources.values()
+    #             if hasattr(resource, "name")
+    #         },
+    #         "required_hooks": {
+    #             hook.name
+    #             for hook in self._hooks.values()
+    #             if hasattr(hook, "name")
+    #         },
+    #         "required_steps": {
+    #             step.name
+    #             for step in self._steps.values()
+    #             if hasattr(step, "name")
+    #         },
+    #     }
+    #
+    # def _missing_prereqs(self, cls, required_attrs):
+    #     registered = self._registered_names()
+    #     missing = {}
+    #
+    #     for attr in required_attrs:
+    #         missing_names = [
+    #             name
+    #             for name in getattr(cls, attr, [])
+    #             if name not in registered[attr]
+    #         ]
+    #
+    #         if missing_names:
+    #             missing[attr] = missing_names
+    #
+    #     return missing
+    #
+    # def _format_missing_prereqs(self, missing):
+    #     labels = {
+    #         "required_resources": "resources",
+    #         "required_hooks": "hooks",
+    #         "required_steps": "steps",
+    #     }
+    #
+    #     return ", ".join(
+    #         f"{labels[attr]}={names}"
+    #         for attr, names in missing.items()
+    #     )
 
     def register_resource(self, resource: Resource):
         if not isinstance(resource, Resource):
@@ -522,21 +516,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 f"Resource '{type(resource).__name__}' "
                 "not registered in RESOURCE_REGISTRY!"
             )
-
-        # Resources may depend only on other resources.
-        missing = self._missing_prereqs(
-            resource.__class__,
-            ["required_resources"],
-        )
-
-        if missing:
-            raise RuntimeError(
-                f"Resource '{type(resource).__name__}' has unmet prerequisites: "
-                f"{self._format_missing_prereqs(missing)}"
-            )
-
-        # hex_id = f"0x{time.time_ns():x}"
-        # resource_id = f"{resource.__class__.__name__}_{hex_id}"
 
         if resource.name in self._resources:
             raise ValueError(f"Resource '{resource.name}' already registered!")
@@ -558,18 +537,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 "not registered in HOOK_REGISTRY!"
             )
 
-        # Hooks may depend on resources and other hooks.
-        missing = self._missing_prereqs(
-            hook.__class__,
-            ["required_resources", "required_hooks"],
-        )
-
-        if missing:
-            raise RuntimeError(
-                f"Hook '{type(hook).__name__}' has unmet prerequisites: "
-                f"{self._format_missing_prereqs(missing)}"
-            )
-
         if hook.name in self._hooks:
             raise ValueError(f"Hook '{hook.name}' already registered!")
 
@@ -586,18 +553,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             raise ValueError(
                 f"Step '{type(step).__name__}' "
                 "not registered in STEP_REGISTRY!"
-            )
-
-        # Steps may depend on resources, hooks, and other steps.
-        missing = self._missing_prereqs(
-            step.__class__,
-            ["required_resources", "required_hooks", "required_steps"],
-        )
-
-        if missing:
-            raise RuntimeError(
-                f"Step '{type(step).__name__}' has unmet prerequisites: "
-                f"{self._format_missing_prereqs(missing)}"
             )
 
         if step.name in self._steps:
