@@ -344,10 +344,10 @@ def test_create_session_from_config_secondary_rank_keeps_only_parallel_component
     config = {
         "components_package": "training_framework.builtin_components",
         "base_config": {"max_iterations": 3},
-        "parallel_step": {"parallel": True, "value": "parallel"},
-        "main_process_step": {"parallel": False, "value": "rank-zero-only"},
+        "parallel_step": {"value": "parallel"},
+        "main_process_step": {"value": "rank-zero-only"},
         "implicit_main_process_hook": {"value": "rank-zero-by-default"},
-        "ddp": {"n_proc": 4},
+        "ddp": {"n_proc": 4, "parallel_components": ["parallel_step"]},
     }
 
     session = engine_module.create_session_from_config(config, rank=2)

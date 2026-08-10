@@ -35,14 +35,18 @@ def create_session_from_config(config, rank=0):
 
     # create session
     session = TrainingSession(config["base_config"])
+    non_parallel_components = set(config.keys())
     if "ddp" in config:
         ddp_resource = DDPResource(config['ddp'], rank=rank)
+        if 'parallel_components' in config['ddp']:
+            for component in config['ddp']['parallel_components']:
+                non_parallel_components.remove(component)
         session.register_resource(ddp_resource)
     for name in config.keys():
         if name in ["ddp", "base_config", "components_package"]:
             continue
         # for parallel session skip registration of components which are not marked as parallel
-        if rank > 0 and config[name].get('parallel', False) == False:
+        if rank > 0 and name in non_parallel_components:
             continue
         if name in STEP_REGISTRY:
             step_config = config[name]
