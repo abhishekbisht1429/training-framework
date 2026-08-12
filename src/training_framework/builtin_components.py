@@ -151,10 +151,11 @@ class Tensorboard(Resource):
 class DDPResource(Resource):
 
     def __init__(self, config: dict, rank: int):
+        self._config = config
         self._world_size = config['world_size']
         self._backend = config['backend']
         self._rank = rank
-        self._parallel_components = config['parallel_components']
+        self._parallel_components = config['parallel_components'] if 'parallel_components' in config else []
 
     @property
     def backend(self):
@@ -171,6 +172,10 @@ class DDPResource(Resource):
     @property
     def parallel_components(self):
         return deepcopy(self._parallel_components)
+
+    @property
+    def config(self):
+        return deepcopy(self._config)
 
     def setup(self, session: TrainingSession) -> Any:
         # Address and port where Rank 0 is hosted (must be reachable by all processes)

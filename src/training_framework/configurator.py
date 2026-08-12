@@ -16,15 +16,23 @@ def create_session_from_checkpoint(checkpoint_path, session_update_params: dict|
         if "max_iterations" in session_update_params:
             session.update_max_iters(session_update_params["max_iterations"])
 
-    if session.has_hook("ddp") and rank > 0:
-        ddp_hook = session.get_hook("ddp")
-        parallel_components = set(ddp_hook.get_parallel_components())
+    if session.has_resource("ddp") and rank > 0:
+        old_ddp_resource: DDPResource = session.get_resource("ddp")
+        updated_ddp_resource = DDPResource(
+            config=old_ddp_resource.config,
+            rank=rank
+        )
+        parallel_components = set(updated_ddp_resource.parallel_components)
+
+        session.unregister_resource(old_ddp_resource.name)
+        session.register_resource(updated_ddp_resource)
+
         for hook in session.get_all_hooks():
             if hook.name not in parallel_components:
                 session.unregister_hook(hook.name)
         for resource in session.get_all_resources():
             if resource.name not in parallel_components:
-                session.unregister_resource(resource)
+                session.unregister_resource(resource.name)
         for step in session.get_all_steps():
             if step.name not in parallel_components:
                 session.remove_step(step.name)
@@ -74,7 +82,7 @@ class Configurator:
     def __init__(self):
         self._parser = argparse.ArgumentParser()
 
-        group = self._parser.add_mutually_exclusive_group()
+        group = self._parser.add_mutually_exclusive_group(required=True)
         group.add_argument("--config", help="Path to config file")
         group.add_argument("--extend-session", nargs=2, help="Path to session checkpoint to extend")
         group.add_argument("--resume-session", help="Path to checkpoint to resume the session from")
@@ -84,6 +92,10 @@ class Configurator:
 
         self._args = self._parser.parse_args()
 
+        self._session_configs = None
+        self._checkpoint_path = None
+        self._new_max_iters = None
+
         if self._args.config:
             config = OmegaConf.load(self._args.config)
             if self._args.override is not None:
@@ -91,7 +103,8 @@ class Configurator:
                 config.merge_with_dotlist(self._args.override)
             self._session_configs = OmegaConf.to_container(config)['sessions']
         elif self._args.extend_session:
-            self._checkpoint_path, self._new_max_iters = self._args.extend_session
+            self._checkpoint_path = self._args.extend_session[0]
+            self._new_max_iters = int(self._args.extend_session[1])
         elif self._args.resume_session:
             self._checkpoint_path = self._args.resume_session
 

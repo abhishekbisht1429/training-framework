@@ -19,16 +19,18 @@ def session_process_worker(
     # The parent coordinates graceful interrupt handling.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    if "session_config" in worker_config:
+    if "session_config" in worker_config and "checkpoint_path" in worker_config:
+        raise ValueError("session_config and checkpoint_path are mutually exclusive")
+    elif "session_config" in worker_config:
         session = create_session_from_config(worker_config["session_config"], rank=rank)
     elif "checkpoint_path" in worker_config:
         session = create_session_from_checkpoint(
             worker_config["checkpoint_path"],
-            session_update_params=worker_config["session_update_params"],
+            session_update_params=worker_config["session_update_params"] if "session_update_params" in worker_config else None,
             rank=rank
         )
     else:
-        raise TypeError(f"Invalid worker config: {worker_config}! One of 'session_config' or 'checkpoint_path' must be provided.")
+        raise ValueError(f"Invalid worker config: {worker_config}! One of 'session_config' or 'checkpoint_path' must be provided.")
 
     with session:
         while not stop_event.is_set():
@@ -104,8 +106,8 @@ class TrainingEngine:
         # load checkpoint here to get ddp info
         session = Checkpointer.load_checkpoint(path=checkpoint_path)
 
-        if session.has_hook("ddp"):
-            world_size = session.get_hook("ddp").world_size
+        if session.has_resource("ddp"):
+            world_size = session.get_resource("ddp").world_size
         else:
             world_size = 1
 

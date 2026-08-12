@@ -465,13 +465,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             raise KeyError(f"{key} not found in resources!")
         return self._resources[key]
 
-    def has_hook(self, hook_name):
-        return hook_name in self._hooks
-
-    def get_hook(self, hook_name: str):
-        if hook_name not in self._hooks:
-            raise KeyError(f"{hook_name} not found in hooks!")
-        return self._hooks[hook_name]
+    def has_resource(self, resource_name):
+        return resource_name in self._resources
 
     def get_all_hooks(self):
         return list(self._hooks.values())
