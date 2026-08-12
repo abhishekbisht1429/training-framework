@@ -1,37 +1,39 @@
 import argparse
-import collections
-import sys
 from copy import deepcopy
-from typing import Mapping, List, Any
+from typing import Mapping
 
 from omegaconf import OmegaConf
-from tensorboard.program import TensorBoard
 
-from training_framework.builtin_components import Logger, Checkpointer, Tensorboard, DDPResource
+from training_framework.builtin_components import Checkpointer, DDPResource
 from training_framework.training_session import TrainingSession
 from training_framework.training_session import HOOK_REGISTRY, STEP_REGISTRY, RESOURCE_REGISTRY
 
-import importlib
-import pkgutil
 
+def create_session_from_checkpoint(checkpoint_path, session_update_params: dict|None=None, rank=0):
+    session = Checkpointer.load_checkpoint(path=checkpoint_path)
 
-def import_all_modules(package_name: str) -> None:
-    package = importlib.import_module(package_name)
+    if session_update_params is not None:
+        if "max_iterations" in session_update_params:
+            session.update_max_iters(session_update_params["max_iterations"])
 
-    if not hasattr(package, "__path__"):
-        return
+    if session.has_hook("ddp") and rank > 0:
+        ddp_hook = session.get_hook("ddp")
+        parallel_components = set(ddp_hook.get_parallel_components())
+        for hook in session.get_all_hooks():
+            if hook.name not in parallel_components:
+                session.unregister_hook(hook.name)
+        for resource in session.get_all_resources():
+            if resource.name not in parallel_components:
+                session.unregister_resource(resource)
+        for step in session.get_all_steps():
+            if step.name not in parallel_components:
+                session.remove_step(step.name)
 
-    prefix = package.__name__ + "."
-
-    for module_info in pkgutil.walk_packages(
-        package.__path__,
-        prefix=prefix,
-    ):
-        importlib.import_module(module_info.name)
+    return session
 
 def create_session_from_config(config, rank=0):
-    # import all component modules
-    import_all_modules(config['components_package'])
+    # # import all component modules
+    # import_all_modules(config['components_package'])
 
     # create session
     session = TrainingSession(config["base_config"])
@@ -71,22 +73,36 @@ def create_session_from_config(config, rank=0):
 class Configurator:
     def __init__(self):
         self._parser = argparse.ArgumentParser()
-        self._parser.add_argument('config', type=str)
+
+        group = self._parser.add_mutually_exclusive_group()
+        group.add_argument("--config", help="Path to config file")
+        group.add_argument("--extend-session", nargs=2, help="Path to session checkpoint to extend")
+        group.add_argument("--resume-session", help="Path to checkpoint to resume the session from")
+
         self._parser.add_argument('--override', type=str, nargs='*', default=None)
+        self._parser.add_argument('--process_timeout_on_join', type=float, default=5.0)
 
         self._args = self._parser.parse_args()
-        config = OmegaConf.load(self._args.config)
-        if self._args.override is not None:
-            # cli_config = OmegaConf.from_dotlist(self._args.override)
-            config.merge_with_dotlist(self._args.override)
 
-        self._session_configs = OmegaConf.to_container(config)['sessions']
-
+        if self._args.config:
+            config = OmegaConf.load(self._args.config)
+            if self._args.override is not None:
+                # cli_config = OmegaConf.from_dotlist(self._args.override)
+                config.merge_with_dotlist(self._args.override)
+            self._session_configs = OmegaConf.to_container(config)['sessions']
+        elif self._args.extend_session:
+            self._checkpoint_path, self._new_max_iters = self._args.extend_session
+        elif self._args.resume_session:
+            self._checkpoint_path = self._args.resume_session
 
     def get_base_config(self, index):
+        if not self._session_configs:
+            raise KeyError("Cannot use this function in the current mode!")
         return self._session_configs[index]
 
     def get_component_config(self, session_index: int, key: str):
+        if not self._session_configs:
+            raise KeyError("Cannot use this function in the current mode!")
         session_config = self._session_configs[session_index]
         if key not in session_config:
             raise KeyError(key)
@@ -96,6 +112,8 @@ class Configurator:
 
 
     def get_all_component_configs(self, session_index):
+        if not self._session_configs:
+            raise KeyError("Cannot use this function in the current mode!")
         component_configs = {}
         session_config = self._session_configs[session_index]
 
@@ -108,4 +126,20 @@ class Configurator:
 
     @property
     def session_configs(self):
+        if not self._session_configs:
+            raise KeyError("Cannot use this function in the current mode!")
         return deepcopy(self._session_configs)
+
+    def path_of_checkpoint_to_resume(self):
+        if not self._checkpoint_path:
+            raise KeyError("Cannot use this function in the current mode!")
+        return self._checkpoint_path
+
+    def new_max_iters(self):
+        if not self._new_max_iters:
+            raise KeyError("Cannot use this function in the current mode!")
+        return self._new_max_iters
+
+    @property
+    def process_timeout_on_join(self):
+        return self._args.process_timeout_on_join

@@ -63,6 +63,7 @@ def make_config(
         "sessions_dir": str(directory),
         "max_iterations": max_iterations,
         "device": "cpu",
+        "components_package": "training_framework.builtin_components"
     }
 
 

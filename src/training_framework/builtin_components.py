@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from typing import Any, override, List
 
 import torch
@@ -153,6 +154,7 @@ class DDPResource(Resource):
         self._world_size = config['world_size']
         self._backend = config['backend']
         self._rank = rank
+        self._parallel_components = config['parallel_components']
 
     @property
     def backend(self):
@@ -165,6 +167,10 @@ class DDPResource(Resource):
     @property
     def rank(self):
         return self._rank
+
+    @property
+    def parallel_components(self):
+        return deepcopy(self._parallel_components)
 
     def setup(self, session: TrainingSession) -> Any:
         # Address and port where Rank 0 is hosted (must be reachable by all processes)

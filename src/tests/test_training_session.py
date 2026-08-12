@@ -94,13 +94,13 @@ class SampleStepBase(Step):
 def _make_session_config(tmp_path: Path, index: int) -> dict[str, Any]:
     suffix = "" if index == 0 else str(index + 1)
     return {
-        "components_package": "training_framework.builtin_components",
         "base_config": {
             "max_iterations": 12,
             "batch_size": 4,
             "sessions_dir": str(tmp_path / f"sessions{suffix}"),
             "device": "cpu",
             "rng_seed": index,
+            "components_package": "training_framework.builtin_components",
         },
         "sample_step": {
             "batch_size": 4,
@@ -137,7 +137,7 @@ def _config_with_components(
 ) -> dict[str, Any]:
     """Return an isolated full config containing only selected components."""
 
-    keys = ("components_package", "base_config", *component_names)
+    keys = ("base_config", *component_names)
     return {key: deepcopy(session_config[key]) for key in keys}
 
 
@@ -184,7 +184,7 @@ def test_configurator_returns_full_session_config(
 ) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(sample_config), encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", ["", str(config_path)])
+    monkeypatch.setattr(sys, "argv", ["", "--config", str(config_path)])
 
     configurator = Configurator()
 
@@ -206,6 +206,7 @@ def test_configurator_override_updates_nested_component_configs(
         "argv",
         [
             "",
+            "--config",
             str(config_path),
             "--override",
             "sessions[0].checkpointer.checkpoint_every=5",
@@ -289,8 +290,7 @@ def test_create_session_from_config_registers_all_component_types(
 
     _install_recording_session_factory(monkeypatch)
     config = {
-        "components_package": "training_framework.builtin_components",
-        "base_config": {"max_iterations": 3},
+        "base_config": {"components_package": "training_framework.builtin_components", "max_iterations": 3},
         "train_step": {"value": "step"},
         "metrics_hook": {"value": "hook"},
         "cache_resource": {"value": "resource"},
@@ -342,8 +342,7 @@ def test_create_session_from_config_secondary_rank_keeps_only_parallel_component
     monkeypatch.setattr(factory_module, "RESOURCE_REGISTRY", {})
 
     config = {
-        "components_package": "training_framework.builtin_components",
-        "base_config": {"max_iterations": 3},
+        "base_config": {"components_package": "training_framework.builtin_components", "max_iterations": 3},
         "parallel_step": {"value": "parallel"},
         "main_process_step": {"value": "rank-zero-only"},
         "implicit_main_process_hook": {"value": "rank-zero-by-default"},
@@ -367,8 +366,7 @@ def test_create_session_from_config_rejects_unknown_component(
 
     _install_recording_session_factory(monkeypatch)
     config = {
-        "components_package": "training_framework.builtin_components",
-        "base_config": {"max_iterations": 1},
+        "base_config": {"components_package": "training_framework.builtin_components", "max_iterations": 1},
         "not_registered": {},
     }
 

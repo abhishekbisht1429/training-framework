@@ -119,9 +119,14 @@ def fake_mp(monkeypatch):
             self._alive = False
             self.exitcode = exitcode
 
+    class FakeConfigurator:
+        @property
+        def process_timeout_on_join(self):
+            return 5.0
     monkeypatch.setattr(sut, "Event", FakeEvent)
     monkeypatch.setattr(sut, "Process", FakeProcess)
-    return SimpleNamespace(Event=FakeEvent, Process=FakeProcess)
+    monkeypatch.setattr(sut, "Configurator", FakeConfigurator)
+    return SimpleNamespace(Event=FakeEvent, Process=FakeProcess, Configurator=FakeConfigurator)
 
 
 class IteratorSession:
@@ -168,11 +173,11 @@ def test_session_process_worker_runs_until_stop_iteration(monkeypatch, capsys):
 
     monkeypatch.setattr(sut, "create_session_from_config", factory)
 
-    config = {"model": "tiny"}
+    config = {"session_config": {"model": "tiny"}}
     sut.session_process_worker(config, session_id=8, rank=3, stop_event=stop_event)
 
     assert signal_calls == [(sut.signal.SIGINT, sut.signal.SIG_IGN)]
-    assert factory_calls == [(config, 3)]
+    assert factory_calls == [(config["session_config"], 3)]
     assert session.entered is True
     assert session.next_calls == 3  # Two values, then StopIteration.
     assert session.exit_args == (None, None, None)
@@ -202,7 +207,7 @@ def test_session_process_worker_observes_stop_event_between_steps(
         lambda config, *, rank: session,
     )
 
-    sut.session_process_worker({}, session_id=1, rank=0, stop_event=stop_event)
+    sut.session_process_worker({"session_config": {}}, session_id=1, rank=0, stop_event=stop_event)
 
     assert session.next_calls == 1
     assert capsys.readouterr().out == "Session 1[0] exiting.\n"
@@ -221,7 +226,7 @@ def test_session_process_worker_propagates_session_errors(monkeypatch, capsys):
 
     with pytest.raises(ValueError, match="bad training step"):
         sut.session_process_worker(
-            {},
+            {"session_config": {}},
             session_id=2,
             rank=0,
             stop_event=SimpleNamespace(is_set=lambda: False),
@@ -279,7 +284,7 @@ def test_wrapper_is_not_marked_started_when_process_start_fails(fake_mp):
 
 @pytest.mark.parametrize("bad_config", [None, [], 7, "not-a-mapping"])
 def test_register_session_rejects_non_mapping(fake_mp, bad_config):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
 
     with pytest.raises(TypeError, match="config must be a mapping"):
         engine.register_session(bad_config)
@@ -294,7 +299,7 @@ def test_register_session_rejects_non_mapping(fake_mp, bad_config):
     ],
 )
 def test_register_session_requires_ddp_n_proc(fake_mp, bad_config):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
 
     with pytest.raises(ValueError, match=r"ddp\.world_size"):
         engine.register_session(bad_config)
@@ -302,14 +307,14 @@ def test_register_session_requires_ddp_n_proc(fake_mp, bad_config):
 
 @pytest.mark.parametrize("world_size", [0, -1, 1.5, "2", True, None])
 def test_register_session_rejects_invalid_process_counts(fake_mp, world_size):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
 
     with pytest.raises(ValueError, match="positive integer"):
         engine.register_session({"ddp": {"world_size": world_size}})
 
 
 def test_register_session_assigns_ids_ranks_and_default_process_count(fake_mp):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
 
     first_id = engine.register_session({"name": "single"})
     second_id = engine.register_session(
@@ -323,14 +328,14 @@ def test_register_session_assigns_ids_ranks_and_default_process_count(fake_mp):
     assert len(fake_mp.Process.instances) == 4
 
     configs = [w.process.args[0] for w in engine._session_processes[1]]
-    assert all(config == {"name": "distributed", "ddp": {"world_size": 3}} for config in configs)
+    assert all(config == {"session_config": {"name": "distributed", "ddp": {"world_size": 3}}} for config in configs)
     assert len({id(config) for config in configs}) == 3
 
 
 def test_start_all_starts_every_registered_worker_and_normal_exit_closes_them(
     fake_mp,
 ):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     engine.register_session({})
     engine.register_session({"ddp": {"world_size": 2}})
 
@@ -352,7 +357,7 @@ def test_start_session_cleans_up_workers_started_before_a_start_failure(fake_mp)
             {},
         ]
     )
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     session_id = engine.register_session({"ddp": {"world_size": 3}})
     wrappers = engine._session_processes[session_id]
 
@@ -369,7 +374,7 @@ def test_start_session_cleans_up_workers_started_before_a_start_failure(fake_mp)
 
 
 def test_request_stop_all_only_signals_started_workers(fake_mp):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     engine.register_session({"ddp": {"world_size": 2}})
     first, second = engine._session_processes[0]
     first.start()
@@ -389,7 +394,7 @@ def test_join_or_terminate_uses_one_shared_grace_period(fake_mp, monkeypatch):
             {"survive_graceful": True},
         ]
     )
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     engine.register_session({"ddp": {"world_size": 2}})
     first, second = engine._session_processes[0]
     first.start()
@@ -430,7 +435,7 @@ def test_join_or_terminate_kills_process_that_survives_terminate(
             "survive_kill": False,
         }
     )
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     engine.register_session({})
     wrapper = engine._session_processes[0][0]
     wrapper.start()
@@ -446,7 +451,7 @@ def test_join_or_terminate_kills_process_that_survives_terminate(
 
 
 def test_raise_worker_failures_aggregates_session_rank_and_exitcode(fake_mp):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     engine.register_session({"ddp": {"world_size": 2}})
     engine.register_session({})
     wrappers = list(engine._iter_wrappers())
@@ -470,7 +475,7 @@ def test_raise_worker_failures_aggregates_session_rank_and_exitcode(fake_mp):
 def test_raise_worker_failures_ignores_unstarted_running_and_successful_workers(
     fake_mp,
 ):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     engine.register_session({"ddp": {"world_size": 3}})
     successful, running, unstarted = engine._session_processes[0]
 
@@ -484,7 +489,7 @@ def test_raise_worker_failures_ignores_unstarted_running_and_successful_workers(
 
 
 def test_close_resources_only_closes_started_dead_processes(fake_mp):
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     engine.register_session({"ddp": {"world_size": 3}})
     dead, alive, unstarted = engine._session_processes[0]
 
@@ -505,7 +510,7 @@ def test_normal_context_exit_reports_worker_failure_and_still_closes_process(
     fake_mp,
 ):
     fake_mp.Process.plans.append({"unbounded_exitcode": 23})
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     session_id = engine.register_session({})
     process = engine._session_processes[session_id][0].process
 
@@ -519,7 +524,7 @@ def test_normal_context_exit_reports_worker_failure_and_still_closes_process(
 
 def test_context_body_exception_is_preserved_after_children_are_stopped(fake_mp):
     fake_mp.Process.plans.append({"graceful_exitcode": 17})
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     session_id = engine.register_session({})
     wrapper = engine._session_processes[session_id][0]
 
@@ -536,7 +541,7 @@ def test_context_body_exception_is_preserved_after_children_are_stopped(fake_mp)
 
 def test_keyboard_interrupt_while_waiting_stops_children_and_is_reraised(fake_mp):
     fake_mp.Process.plans.append({"interrupt_on_unbounded_join": True})
-    engine = sut.TrainingEngine({})
+    engine = sut.TrainingEngine(fake_mp.Configurator())
     session_id = engine.register_session({})
     wrapper = engine._session_processes[session_id][0]
 

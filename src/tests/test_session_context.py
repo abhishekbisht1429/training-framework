@@ -41,6 +41,7 @@ def test_session_context_is_shared_between_hooks(tmp_path):
         "sessions_dir": str(tmp_path),
         "max_iterations": 1,
         "device": "cpu",
+        "components_package": "training_framework.builtin_components",
     }
 
     session = TrainingSession(config)
@@ -77,6 +78,7 @@ def test_session_context_is_saved_restored_and_cleared(tmp_path):
         "sessions_dir": str(tmp_path),
         "max_iterations": 1,
         "device": "cpu",
+        "components_package": "training_framework.builtin_components",
     }
 
     session = TrainingSession(config)

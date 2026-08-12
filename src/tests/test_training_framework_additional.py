@@ -146,13 +146,10 @@ class AdditionalHookBase(LifecycleHook, Stateful):
 def base_session_config(tmp_path):
     return {
         "max_iterations": 3,
-        "batch_size": 4,
         "sessions_dir": str(tmp_path / "sessions"),
         "device": "cpu",
         "rng_seed": 7,
-        "logger": {"log_every": 1, "log_file": str(tmp_path / "log.txt")},
-        "checkpointer": {"checkpoint_every": 2, "checkpoints_dir": str(tmp_path / "checkpoints")},
-        "tensorboard": {"host": "0.0.0.0", "port": 16032},
+        "components_package": "training_framework.builtin_components",
     }
 
 
@@ -164,6 +161,7 @@ def minimal_session_config(tmp_path):
         "sessions_dir": str(tmp_path / "sessions"),
         "device": "cpu",
         "rng_seed": 11,
+        "components_package": "training_framework.builtin_components",
     }
 
 
@@ -625,7 +623,7 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
     }
 
     config_path = _write_yaml(tmp_path, sample_config)
-    monkeypatch.setattr(sys, "argv", ["pytest", config_path, "--override", "sessions[0].checkpointer.checkpoint_every=11", "sessions.1.logger.log_every=9"])
+    monkeypatch.setattr(sys, "argv", ["pytest", "--config", config_path, "--override", "sessions[0].checkpointer.checkpoint_every=11", "sessions.1.logger.log_every=9"])
 
     configurator = Configurator()
     session_config = configurator.get_base_config(0)
@@ -655,26 +653,26 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     sample_config = {
         "sessions": [
             {
-                "components_package": "training_framework.builtin_components",
                 "base_config": {
                     "max_iterations": 2,
                     "batch_size": 4,
                     "sessions_dir": str(tmp_path / "s1"),
                     "device": "cpu",
-                    "rng_seed": 1
+                    "rng_seed": 1,
+                    "components_package": "training_framework.builtin_components",
                 },
                 "logger": {"log_every": 1, "log_file": str(tmp_path / "log1.txt")},
                 "checkpointer": {"checkpoint_every": 1, "checkpoints_dir": str(tmp_path / "ckpts1")},
                 "tensorboard": {"host": "0.0.0.0", "port": 16050},
             },
             {
-                "components_package": "training_framework.builtin_components",
                 "base_config": {
                     "max_iterations": 2,
                     "batch_size": 4,
                     "sessions_dir": str(tmp_path / "s1"),
                     "device": "cpu",
-                    "rng_seed": 1
+                    "rng_seed": 1,
+                    "components_package": "training_framework.builtin_components",
                 },
                 "checkpointer": {"checkpoint_every": 2, "checkpoints_dir": str(tmp_path / "ckpts2")},
             },
@@ -682,7 +680,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     }
 
     config_path = _write_yaml(tmp_path, sample_config, "config_create_sessions.yaml")
-    monkeypatch.setattr(sys, "argv", ["pytest", config_path])
+    monkeypatch.setattr(sys, "argv", ["pytest", "--config", config_path])
 
     configurator = Configurator()
     sessions = [create_session_from_config(config) for config in configurator.session_configs]

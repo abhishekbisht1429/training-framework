@@ -10,7 +10,8 @@ from typing import Any, override, List
 
 import numpy as np
 import torch
-from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta
+from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta, import_all_modules
+
 
 #TODO: check for circular dependencies later
 
@@ -299,6 +300,9 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # shared state for a single iteration
         self._shared_state: dict[str, Any] = {}
 
+        # import all component modules
+        import_all_modules(self._config['components_package'])
+
         self._order_of_components = topological_sort_of_components()
 
     @override
@@ -458,55 +462,25 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     # TODO: can we make a check that only those resources which are labeled as required can be accessed through the method below ?
     def get_resource(self, key: str):
         if key not in self._resources:
-            raise KeyError(f"{key} not found in resources")
+            raise KeyError(f"{key} not found in resources!")
         return self._resources[key]
 
-    # def _registered_names(self):
-    #     return {
-    #         "required_resources": {
-    #             resource.name
-    #             for resource in self._resources.values()
-    #             if hasattr(resource, "name")
-    #         },
-    #         "required_hooks": {
-    #             hook.name
-    #             for hook in self._hooks.values()
-    #             if hasattr(hook, "name")
-    #         },
-    #         "required_steps": {
-    #             step.name
-    #             for step in self._steps.values()
-    #             if hasattr(step, "name")
-    #         },
-    #     }
-    #
-    # def _missing_prereqs(self, cls, required_attrs):
-    #     registered = self._registered_names()
-    #     missing = {}
-    #
-    #     for attr in required_attrs:
-    #         missing_names = [
-    #             name
-    #             for name in getattr(cls, attr, [])
-    #             if name not in registered[attr]
-    #         ]
-    #
-    #         if missing_names:
-    #             missing[attr] = missing_names
-    #
-    #     return missing
-    #
-    # def _format_missing_prereqs(self, missing):
-    #     labels = {
-    #         "required_resources": "resources",
-    #         "required_hooks": "hooks",
-    #         "required_steps": "steps",
-    #     }
-    #
-    #     return ", ".join(
-    #         f"{labels[attr]}={names}"
-    #         for attr, names in missing.items()
-    #     )
+    def has_hook(self, hook_name):
+        return hook_name in self._hooks
+
+    def get_hook(self, hook_name: str):
+        if hook_name not in self._hooks:
+            raise KeyError(f"{hook_name} not found in hooks!")
+        return self._hooks[hook_name]
+
+    def get_all_hooks(self):
+        return list(self._hooks.values())
+
+    def get_all_resources(self):
+        return list(self._resources.values())
+
+    def get_all_steps(self):
+        return list(self._steps.values())
 
     def register_resource(self, resource: Resource):
         if not isinstance(resource, Resource):
@@ -563,6 +537,27 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             raise ValueError(f"Step '{step.name}' already registered!")
 
         self._steps[step.name] = step
+
+    def remove_step(self, step_name):
+        if step_name not in STEP_REGISTRY:
+            raise ValueError(f"Step '{step_name}' not in STEP_REGISTRY!")
+        if step_name not in self._steps:
+            raise ValueError(f"Step '{step_name}' is not added to this session!")
+        del self._steps[step_name]
+
+    def unregister_hook(self, hook_name):
+        if hook_name not in HOOK_REGISTRY:
+            raise ValueError(f"Hook '{hook_name}' not in HOOK_REGISTRY!")
+        if hook_name not in self._hooks:
+            raise ValueError(f"Hook '{hook_name}' not registered with current session!")
+        del self._hooks[hook_name]
+
+    def unregister_resource(self, resource_name):
+        if resource_name not in RESOURCE_REGISTRY:
+            raise ValueError(f"Resource '{resource_name}' not in RESOURCE_REGISTRY!")
+        if resource_name not in self._resources:
+            raise ValueError(f"Resource '{resource_name}' not registered with current session!")
+        del self._resources[resource_name]
 
     def _check_and_get_device(self):
         if 'device' not in self._config:
@@ -674,3 +669,10 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             self._phase = SessionPhase.PAUSED
 
         return False
+
+    def update_max_iters(self, new_max_iters):
+        self._session_config = SessionConfig(
+            rng_seed=self.session_config.rng_seed,
+            session_dir=self.session_config.session_dir,
+            max_iterations=new_max_iters
+        )

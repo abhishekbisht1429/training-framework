@@ -1,23 +1,34 @@
 import collections
 import signal
 import time
+from copy import deepcopy
 from multiprocessing import Event, Process
 from typing import Iterator
 
-from training_framework.configurator import create_session_from_config
+from training_framework.builtin_components import Checkpointer
+from training_framework.configurator import create_session_from_config, create_session_from_checkpoint, Configurator
 from training_framework.util import context_entry, context_exit, requires_context
 
 
 def session_process_worker(
-    config: dict,
+    worker_config: collections.abc.Mapping,
     session_id: int,
     rank: int,
-    stop_event: Event,
+    stop_event,
 ) -> None:
     # The parent coordinates graceful interrupt handling.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    session = create_session_from_config(config, rank=rank)
+    if "session_config" in worker_config:
+        session = create_session_from_config(worker_config["session_config"], rank=rank)
+    elif "checkpoint_path" in worker_config:
+        session = create_session_from_checkpoint(
+            worker_config["checkpoint_path"],
+            session_update_params=worker_config["session_update_params"],
+            rank=rank
+        )
+    else:
+        raise TypeError(f"Invalid worker config: {worker_config}! One of 'session_config' or 'checkpoint_path' must be provided.")
 
     with session:
         while not stop_event.is_set():
@@ -30,8 +41,8 @@ def session_process_worker(
 
 
 class SessionProcessWrapper:
-    def __init__(self, config: dict, session_id: int, rank: int):
-        self._config = dict(config)
+    def __init__(self, worker_config: dict, session_id: int, rank: int):
+        self._worker_config = deepcopy(worker_config)
         self._session_id = session_id
         self._rank = rank
         self._stop_event = Event()
@@ -41,7 +52,7 @@ class SessionProcessWrapper:
             name=f"training-session-{session_id}-rank-{rank}",
             target=session_process_worker,
             args=(
-                self._config,
+                self._worker_config,
                 session_id,
                 rank,
                 self._stop_event,
@@ -79,13 +90,41 @@ class SessionProcessWrapper:
 
 
 class TrainingEngine:
-    def __init__(self, config: dict):
-        self._timeout_on_interrupt = config['timeout_on_interrupt'] if 'timeout_on_interrupt' in config else 5.0
+    def __init__(self, configurator):
+        self._timeout_on_interrupt = configurator.process_timeout_on_join
         self._session_processes: list[list[SessionProcessWrapper]] = []
 
     def _iter_wrappers(self) -> Iterator[SessionProcessWrapper]:
         for wrapper_list in self._session_processes:
             yield from wrapper_list
+
+    def load_session(self, checkpoint_path: str, session_update_params: dict | None=None):
+        session_id = len(self._session_processes)
+
+        # load checkpoint here to get ddp info
+        session = Checkpointer.load_checkpoint(path=checkpoint_path)
+
+        if session.has_hook("ddp"):
+            world_size = session.get_hook("ddp").world_size
+        else:
+            world_size = 1
+
+        worker_config = {
+            "checkpoint_path": checkpoint_path,
+            "session_update_params": session_update_params,
+        }
+        wrappers = [
+            SessionProcessWrapper(
+                worker_config=worker_config,
+                session_id=session_id,
+                rank=rank,
+            )
+            for rank in range(world_size)
+        ]
+
+        self._session_processes.append(wrappers)
+
+        return session_id
 
     def register_session(self, config: dict) -> int:
         if not isinstance(config, collections.abc.Mapping):
@@ -112,9 +151,10 @@ class TrainingEngine:
         ):
             raise ValueError("ddp.world_size must be a positive integer")
 
+        worker_config = { "session_config": config }
         wrappers = [
             SessionProcessWrapper(
-                config=dict(config),
+                worker_config=worker_config,
                 session_id=session_id,
                 rank=rank,
             )
@@ -138,7 +178,7 @@ class TrainingEngine:
             for wrapper in started:
                 wrapper.request_stop()
 
-            self._join_or_terminate(started, timeout=5.0)
+            self._join_or_terminate(started, timeout=self._timeout_on_interrupt)
             raise
 
     @requires_context
@@ -317,7 +357,7 @@ class TrainingEngine:
                 # Preserve and propagate the original context-body exception,
                 # but stop children first.
                 self.request_stop_all()
-                self._join_or_terminate(timeout=5.0)
+                self._join_or_terminate(timeout=self._timeout_on_interrupt)
             else:
                 try:
                     # Normal behavior: wait for finite training to finish.

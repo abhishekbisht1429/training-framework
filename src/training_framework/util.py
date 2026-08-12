@@ -1,5 +1,7 @@
 import functools
+import importlib
 import pickle
+import pkgutil
 import time
 from functools import wraps
 from abc import ABCMeta
@@ -69,3 +71,18 @@ class CaptureInitMeta(ABCMeta):
         wrapped_init._captures_init_args = True
         cls.__init__ = wrapped_init
         return cls
+
+
+def import_all_modules(package_name: str) -> None:
+    package = importlib.import_module(package_name)
+
+    if not hasattr(package, "__path__"):
+        return
+
+    prefix = package.__name__ + "."
+
+    for module_info in pkgutil.walk_packages(
+        package.__path__,
+        prefix=prefix,
+    ):
+        importlib.import_module(module_info.name)
