@@ -9,23 +9,24 @@ from training_framework.training_session import TrainingSession
 from training_framework.training_session import HOOK_REGISTRY, STEP_REGISTRY, RESOURCE_REGISTRY
 
 
-def create_session_from_checkpoint(checkpoint_path, session_update_params: dict|None=None, rank=0):
-    session = Checkpointer.load_checkpoint(path=checkpoint_path)
+def copy_and_modify_session_for_worker(session, rank, session_update_params: dict | None=None):
+    # session = Checkpointer.load_checkpoint(path=session)
+    session = deepcopy(session)
 
     if session_update_params is not None:
         if "max_iterations" in session_update_params:
             session.update_max_iters(session_update_params["max_iterations"])
 
     if session.has_resource("ddp") and rank > 0:
-        old_ddp_resource: DDPResource = session.get_resource("ddp")
-        updated_ddp_resource = DDPResource(
-            config=old_ddp_resource.config,
+        placeholder_ddp_resource: DDPResource = session.get_resource("ddp")
+        ddp_resource = DDPResource(
+            config=placeholder_ddp_resource.config,
             rank=rank
         )
-        parallel_components = set(updated_ddp_resource.parallel_components)
+        parallel_components = set(ddp_resource.parallel_components)
 
-        session.unregister_resource(old_ddp_resource.name)
-        session.register_resource(updated_ddp_resource)
+        session.unregister_resource(placeholder_ddp_resource.name)
+        session.register_resource(ddp_resource)
 
         for hook in session.get_all_hooks():
             if hook.name not in parallel_components:
@@ -39,25 +40,26 @@ def create_session_from_checkpoint(checkpoint_path, session_update_params: dict|
 
     return session
 
-def create_session_from_config(config, rank=0):
+def create_session_from_config(config):
     # # import all component modules
     # import_all_modules(config['components_package'])
 
     # create session
     session = TrainingSession(config["base_config"])
-    non_parallel_components = set(config.keys())
-    if "ddp" in config:
-        ddp_resource = DDPResource(config['ddp'], rank=rank)
-        if 'parallel_components' in config['ddp']:
-            for component in config['ddp']['parallel_components']:
-                non_parallel_components.remove(component)
-        session.register_resource(ddp_resource)
+    # non_parallel_components = set(config.keys())
+    # if "ddp" in config:
+    #     # placeholder ddp_resource - each worker will modify this resource accordingly
+    #     ddp_resource = DDPResource(config['ddp'], rank=-1)
+    #     # if 'parallel_components' in config['ddp']:
+    #     #     for component in config['ddp']['parallel_components']:
+    #     #         non_parallel_components.remove(component)
+    #     session.register_resource(ddp_resource)
     for name in config.keys():
-        if name in ["ddp", "base_config", "components_package"]:
+        if name in ["base_config"]:
             continue
-        # for parallel session skip registration of components which are not marked as parallel
-        if rank > 0 and name in non_parallel_components:
-            continue
+        # # for parallel session skip registration of components which are not marked as parallel
+        # if rank > 0 and name in non_parallel_components:
+        #     continue
         if name in STEP_REGISTRY:
             step_config = config[name]
             step_cls = STEP_REGISTRY[name]

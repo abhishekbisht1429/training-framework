@@ -150,7 +150,7 @@ class Tensorboard(Resource):
 @resource("ddp")
 class DDPResource(Resource):
 
-    def __init__(self, config: dict, rank: int):
+    def __init__(self, config: dict, rank: int=-1):
         self._config = config
         self._world_size = config['world_size']
         self._backend = config['backend']

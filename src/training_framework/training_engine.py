@@ -6,32 +6,37 @@ from multiprocessing import Event, Process
 from typing import Iterator
 
 from training_framework.builtin_components import Checkpointer
-from training_framework.configurator import create_session_from_config, create_session_from_checkpoint, Configurator
+from training_framework.configurator import create_session_from_config, copy_and_modify_session_for_worker, Configurator
+from training_framework.training_session import TrainingSession
 from training_framework.util import context_entry, context_exit, requires_context
 
 
 def session_process_worker(
-    worker_config: collections.abc.Mapping,
+    session,
     session_id: int,
     rank: int,
     stop_event,
+    **kwargs
 ) -> None:
     # The parent coordinates graceful interrupt handling.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    if "session_config" in worker_config and "checkpoint_path" in worker_config:
-        raise ValueError("session_config and checkpoint_path are mutually exclusive")
-    elif "session_config" in worker_config:
-        session = create_session_from_config(worker_config["session_config"], rank=rank)
-    elif "checkpoint_path" in worker_config:
-        session = create_session_from_checkpoint(
-            worker_config["checkpoint_path"],
-            session_update_params=worker_config["session_update_params"] if "session_update_params" in worker_config else None,
-            rank=rank
-        )
-    else:
-        raise ValueError(f"Invalid worker config: {worker_config}! One of 'session_config' or 'checkpoint_path' must be provided.")
+    # if "session_config" in worker_config and "checkpoint_path" in worker_config:
+    #     raise ValueError("session_config and checkpoint_path are mutually exclusive")
+    # elif "session_config" in worker_config:
+    #     session = create_session_from_config(worker_config["session_config"], rank=rank)
+    # elif "checkpoint_path" in worker_config:
+    #     session = create_session_from_checkpoint(
+    #         worker_config["checkpoint_path"],
+    #         session_update_params=worker_config["session_update_params"] if "session_update_params" in worker_config else None,
+    #         rank=rank
+    #     )
+    # else:
+    #     raise ValueError(f"Invalid worker config: {worker_config}! One of 'session_config' or 'checkpoint_path' must be provided.")
 
+    # important so that model doesn't share the tensors between processes
+    session_update_params = kwargs["session_update_params"] if "session_update_params" in kwargs else None
+    session = copy_and_modify_session_for_worker(session, rank, session_update_params=session_update_params)
     with session:
         while not stop_event.is_set():
             try:
@@ -43,8 +48,14 @@ def session_process_worker(
 
 
 class SessionProcessWrapper:
-    def __init__(self, worker_config: dict, session_id: int, rank: int):
-        self._worker_config = deepcopy(worker_config)
+    def __init__(self,
+                 session: TrainingSession,
+                 session_id: int,
+                 rank: int,
+                 **kwargs
+                 ):
+        # self._worker_config = deepcopy(worker_config)
+        self._session = session
         self._session_id = session_id
         self._rank = rank
         self._stop_event = Event()
@@ -54,10 +65,11 @@ class SessionProcessWrapper:
             name=f"training-session-{session_id}-rank-{rank}",
             target=session_process_worker,
             args=(
-                self._worker_config,
+                self._session,
                 session_id,
                 rank,
                 self._stop_event,
+                kwargs
             ),
         )
 
@@ -105,20 +117,16 @@ class TrainingEngine:
         session_id = len(self._session_processes)
 
         # load checkpoint here to get ddp info
-        session = Checkpointer.load_checkpoint(path=checkpoint_path)
+        session = Checkpointer.load_checkpoint(checkpoint_path)
 
         if session.has_resource("ddp"):
             world_size = session.get_resource("ddp").world_size
         else:
             world_size = 1
 
-        worker_config = {
-            "checkpoint_path": checkpoint_path,
-            "session_update_params": session_update_params,
-        }
         wrappers = [
             SessionProcessWrapper(
-                worker_config=worker_config,
+                session=session,
                 session_id=session_id,
                 rank=rank,
             )
@@ -154,10 +162,12 @@ class TrainingEngine:
         ):
             raise ValueError("ddp.world_size must be a positive integer")
 
-        worker_config = { "session_config": config }
+        # worker_config = { "session_config": config }
+        session = create_session_from_config(config)
         wrappers = [
             SessionProcessWrapper(
-                worker_config=worker_config,
+                session=session,
+                # worker_config=worker_config,
                 session_id=session_id,
                 rank=rank,
             )
