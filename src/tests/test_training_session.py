@@ -1,9 +1,9 @@
-"""Tests for config-driven training sessions and ``TrainingEngine``.
+"""Tests for config-driven session construction and built-in components.
 
-The current interface registers a complete session configuration with the
-engine.  ``create_session_from_config`` then constructs the ``TrainingSession``
-and its registered steps, hooks, resources, and optional DDP hook inside the
-worker process.
+At commit e4a2f7fe589ae80b2c43b4838b1c2682bab23bb2, the parent process builds a
+complete ``TrainingSession`` with ``create_session_from_config``.  Each worker
+then receives a deep-copied, rank-specific session produced by
+``copy_and_modify_session_for_worker``.
 """
 
 from __future__ import annotations
@@ -23,7 +23,10 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 import training_framework
-from training_framework.configurator import Configurator
+from training_framework.configurator import (
+    Configurator,
+)
+from training_framework.training_engine import load_session_for_worker
 from training_framework.dataloader import InfiniteSampler
 from training_framework.builtin_components import Checkpointer, Logger, Tensorboard
 from training_framework.training_session import SessionPhase, TrainingSession, step, Step
@@ -143,13 +146,11 @@ def _config_with_components(
 
 def _run_session_to_completion(
     config: dict[str, Any],
-    *,
-    rank: int = 0,
 ) -> TrainingSession:
-    """Build and run a finite session without spawning a child process."""
+    """Build and run the complete parent-side session without spawning."""
     import training_framework.training_engine as engine_module
 
-    session = engine_module.create_session_from_config(config, rank=rank)
+    session = engine_module.create_session_from_config(config)
     max_iterations = int(config["base_config"]["max_iterations"])
 
     with session:
@@ -239,22 +240,66 @@ class RecordingSession:
     def add_step(self, step_object: Any) -> None:
         self.steps.append(step_object)
 
+    def remove_step(self, name: str) -> None:
+        self.steps = [step for step in self.steps if step.name != name]
+
     def register_hook(self, hook_object: Any) -> None:
         self.hooks.append(hook_object)
+
+    def unregister_hook(self, name: str) -> None:
+        self.hooks = [hook for hook in self.hooks if hook.name != name]
 
     def register_resource(self, resource_object: Any) -> None:
         self.resources.append(resource_object)
 
+    def unregister_resource(self, name: str) -> None:
+        self.resources = [
+            resource for resource in self.resources if resource.name != name
+        ]
+
+    def has_resource(self, name: str) -> bool:
+        return any(resource.name == name for resource in self.resources)
+
+    def get_resource(self, name: str) -> Any:
+        return next(
+            resource for resource in self.resources if resource.name == name
+        )
+
+    def get_all_steps(self) -> list[Any]:
+        return list(self.steps)
+
+    def get_all_hooks(self) -> list[Any]:
+        return list(self.hooks)
+
+    def get_all_resources(self) -> list[Any]:
+        return list(self.resources)
+
 
 class RecordingComponent:
+    name = "component"
+
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
 
 
+def _recording_component(name: str) -> type[RecordingComponent]:
+    return type(
+        f"Recording_{name}",
+        (RecordingComponent,),
+        {"name": name},
+    )
+
+
 class RecordingDDPResource(RecordingComponent):
-    def __init__(self, config: dict[str, Any], *, rank: int) -> None:
+    name = "ddp"
+
+    def __init__(self, config: dict[str, Any], rank: int = -1) -> None:
         super().__init__(config)
         self.rank = rank
+
+    @property
+    def parallel_components(self) -> list[str]:
+        return list(self.config.get("parallel_components", []))
 
 
 def _install_recording_session_factory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -268,55 +313,66 @@ def _install_recording_session_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         factory_module,
         "STEP_REGISTRY",
-        {"train_step": RecordingComponent},
+        {"train_step": _recording_component("train_step")},
     )
     monkeypatch.setattr(
         factory_module,
         "HOOK_REGISTRY",
-        {"metrics_hook": RecordingComponent},
+        {"metrics_hook": _recording_component("metrics_hook")},
     )
     monkeypatch.setattr(
         factory_module,
         "RESOURCE_REGISTRY",
-        {"cache_resource": RecordingComponent},
+        {
+            "ddp": RecordingDDPResource,
+            "cache_resource": _recording_component("cache_resource"),
+        },
     )
     monkeypatch.setattr(factory_module, "DDPResource", RecordingDDPResource)
 
-
-def test_create_session_from_config_registers_all_component_types(
+def test_create_session_from_config_registers_complete_parent_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import training_framework.training_engine as engine_module
 
     _install_recording_session_factory(monkeypatch)
     config = {
-        "base_config": {"components_package": "training_framework.builtin_components", "max_iterations": 3},
+        "base_config": {
+            "components_package": "training_framework.builtin_components",
+            "max_iterations": 3,
+        },
         "train_step": {"value": "step"},
         "metrics_hook": {"value": "hook"},
         "cache_resource": {"value": "resource"},
-        "ddp": {"n_proc": 2},
+        "ddp": {
+            "world_size": 2,
+            "backend": "gloo",
+            "parallel_components": ["ddp", "train_step"],
+        },
     }
 
     session = engine_module.create_session_from_config(config)
 
     assert isinstance(session, RecordingSession)
     assert session.session_config is config["base_config"]
+    assert [component.name for component in session.steps] == ["train_step"]
     assert [component.config for component in session.steps] == [
         config["train_step"]
     ]
-    assert [component.config for component in session.resources] == [
-        config["ddp"],
-        config["cache_resource"]
-    ]
-    assert len(session.hooks) == 1
+    assert [component.name for component in session.hooks] == ["metrics_hook"]
     assert session.hooks[0].config is config["metrics_hook"]
-    # DDP is the first resource to be registered
-    assert isinstance(session.resources[0], RecordingDDPResource)
-    assert session.resources[0].config is config["ddp"]
-    assert session.resources[0].rank == 0
+    assert [component.name for component in session.resources] == [
+        "cache_resource",
+        "ddp",
+    ]
+
+    ddp = session.get_resource("ddp")
+    assert isinstance(ddp, RecordingDDPResource)
+    assert ddp.config is config["ddp"]
+    assert ddp.rank == -1
 
 
-def test_create_session_from_config_secondary_rank_keeps_only_parallel_components(
+def test_create_session_from_config_does_not_prune_parent_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import training_framework.training_engine as engine_module
@@ -324,39 +380,129 @@ def test_create_session_from_config_secondary_rank_keeps_only_parallel_component
     factory_module = importlib.import_module(
         engine_module.create_session_from_config.__module__
     )
-
-    _install_recording_session_factory(monkeypatch)
+    monkeypatch.setattr(factory_module, "TrainingSession", RecordingSession)
     monkeypatch.setattr(
         factory_module,
         "STEP_REGISTRY",
         {
-            "parallel_step": RecordingComponent,
-            "main_process_step": RecordingComponent,
+            "parallel_step": _recording_component("parallel_step"),
+            "main_process_step": _recording_component("main_process_step"),
         },
     )
     monkeypatch.setattr(
         factory_module,
         "HOOK_REGISTRY",
-        {"implicit_main_process_hook": RecordingComponent},
+        {
+            "implicit_main_process_hook": _recording_component(
+                "implicit_main_process_hook"
+            )
+        },
     )
-    monkeypatch.setattr(factory_module, "RESOURCE_REGISTRY", {})
+    monkeypatch.setattr(
+        factory_module,
+        "RESOURCE_REGISTRY",
+        {"ddp": RecordingDDPResource},
+    )
+    monkeypatch.setattr(factory_module, "DDPResource", RecordingDDPResource)
 
     config = {
-        "base_config": {"components_package": "training_framework.builtin_components", "max_iterations": 3},
+        "base_config": {
+            "components_package": "training_framework.builtin_components",
+            "max_iterations": 3,
+        },
         "parallel_step": {"value": "parallel"},
         "main_process_step": {"value": "rank-zero-only"},
         "implicit_main_process_hook": {"value": "rank-zero-by-default"},
-        "ddp": {"n_proc": 4, "parallel_components": ["parallel_step"]},
+        "ddp": {
+            "world_size": 4,
+            "backend": "gloo",
+            "parallel_components": ["ddp", "parallel_step"],
+        },
     }
 
-    session = engine_module.create_session_from_config(config, rank=2)
+    session = engine_module.create_session_from_config(config)
 
-    assert [component.config for component in session.steps] == [
-        config["parallel_step"]
+    assert [component.name for component in session.steps] == [
+        "parallel_step",
+        "main_process_step",
     ]
-    assert len(session.resources) == 1
-    assert isinstance(session.resources[0], RecordingDDPResource)
-    assert session.resources[0].rank == 2
+    assert [component.name for component in session.hooks] == [
+        "implicit_main_process_hook"
+    ]
+    assert session.get_resource("ddp").rank == -1
+
+
+def test_copy_and_modify_session_prunes_secondary_worker_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import training_framework.training_engine as engine_module
+
+    factory_module = importlib.import_module(
+        engine_module.create_session_from_config.__module__
+    )
+    monkeypatch.setattr(factory_module, "TrainingSession", RecordingSession)
+    monkeypatch.setattr(
+        factory_module,
+        "STEP_REGISTRY",
+        {
+            "parallel_step": _recording_component("parallel_step"),
+            "main_process_step": _recording_component("main_process_step"),
+        },
+    )
+    monkeypatch.setattr(
+        factory_module,
+        "HOOK_REGISTRY",
+        {
+            "implicit_main_process_hook": _recording_component(
+                "implicit_main_process_hook"
+            )
+        },
+    )
+    monkeypatch.setattr(
+        factory_module,
+        "RESOURCE_REGISTRY",
+        {"ddp": RecordingDDPResource},
+    )
+    monkeypatch.setattr(factory_module, "DDPResource", RecordingDDPResource)
+
+    config = {
+        "base_config": {
+            "components_package": "training_framework.builtin_components",
+            "max_iterations": 3,
+        },
+        "parallel_step": {"value": "parallel"},
+        "main_process_step": {"value": "rank-zero-only"},
+        "implicit_main_process_hook": {"value": "rank-zero-by-default"},
+        "ddp": {
+            "world_size": 4,
+            "backend": "gloo",
+            "parallel_components": ["ddp", "parallel_step"],
+        },
+    }
+
+    parent_session = engine_module.create_session_from_config(config)
+    worker_session = load_session_for_worker(
+        parent_session,
+        rank=2,
+    )
+
+    assert worker_session is not parent_session
+    assert [component.name for component in worker_session.steps] == [
+        "parallel_step"
+    ]
+    assert worker_session.hooks == []
+    assert [component.name for component in worker_session.resources] == ["ddp"]
+    assert worker_session.get_resource("ddp").rank == 2
+
+    # Worker preparation must not mutate the complete parent-side session.
+    assert [component.name for component in parent_session.steps] == [
+        "parallel_step",
+        "main_process_step",
+    ]
+    assert [component.name for component in parent_session.hooks] == [
+        "implicit_main_process_hook"
+    ]
+    assert parent_session.get_resource("ddp").rank == -1
 
 
 def test_create_session_from_config_rejects_unknown_component(
@@ -380,7 +526,6 @@ def test_create_session_from_config_rejects_unknown_component(
 # ---------------------------------------------------------------------------
 # Config-driven integration tests for built-in resources
 # ---------------------------------------------------------------------------
-
 
 def test_logger_is_created_from_config_and_writes_each_iteration(
     sample_config: dict[str, Any],
@@ -407,7 +552,6 @@ def test_logger_is_created_from_config_and_writes_each_iteration(
         f"Iteration {iteration}/{max_iterations}"
         for iteration in range(1, max_iterations + 1)
     ]
-
 
 def test_checkpointer_is_created_from_config_and_restores_sessions(
     sample_config: dict[str, Any],

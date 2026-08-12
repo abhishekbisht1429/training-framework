@@ -261,15 +261,16 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def __init__(self, config: dict):
         self._config = config
+        self._base_config = config["base_config"]
 
         session_dir = os.path.join(
-            self._config['sessions_dir'],
+            self._base_config['sessions_dir'],
             f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
         self._session_config = SessionConfig(
-            rng_seed=self._config['rng_seed'],
+            rng_seed=self._base_config['rng_seed'],
             session_dir=session_dir,
-            max_iterations=self._config['max_iterations'],
+            max_iterations=self._base_config['max_iterations'],
         )
 
         # callbacks
@@ -292,6 +293,30 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._phase = SessionPhase.NEW
 
+        self._register_components()
+
+    def _register_components(self):
+        for name in self._config.keys():
+            if name in ["base_config"]:
+                continue
+            if name in STEP_REGISTRY:
+                step_config = self._config[name]
+                step_cls = STEP_REGISTRY[name]
+                step_obj = step_cls(step_config)
+                self.add_step(step_obj)
+            elif name in HOOK_REGISTRY:
+                hook_config = self._config[name]
+                hook_cls = HOOK_REGISTRY[name]
+                hook_obj = hook_cls(hook_config)
+                self.register_hook(hook_obj)
+            elif name in RESOURCE_REGISTRY:
+                resource_config = self._config[name]
+                resource_cls = RESOURCE_REGISTRY[name]
+                resource_obj = resource_cls(resource_config)
+                self.register_resource(resource_obj)
+            else:
+                raise ValueError(f"No step, hook or resource registered with name '{name}'!")
+
     # will contain only those attributes which need to be recreated after state load
     def _init_transient_infra(self):
         # TODO: should we use default device if requested device is not available ?
@@ -301,14 +326,14 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._shared_state: dict[str, Any] = {}
 
         # import all component modules
-        import_all_modules(self._config['components_package'])
+        import_all_modules(self._base_config['components_package'])
 
-        self._order_of_components = topological_sort_of_components()
+        # self._order_of_components = topological_sort_of_components()
 
     @override
     def get_state(self):
         state = {
-            'config': self._config,
+            'config': self._base_config,
             'iteration': self._iteration,
             'torch_rng_state': torch.get_rng_state(),
             'python_rng_state': random.getstate(),
@@ -342,7 +367,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @override
     def set_state(self, state):
         # 1. Restore configuration and tracking variables
-        self._config = state['config']
+        self._base_config = state['config']
         self._iteration = state['iteration']
         self._session_config = state["base_config"]
 
@@ -402,6 +427,13 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self.__init__(*init_args['args'], **init_args['kwargs'])
         self.set_state(state)
 
+    @classmethod
+    def from_state(cls, session_state):
+        init_args = session_state['init_args']
+        obj = cls(*init_args['args'], **init_args['kwargs'])
+        obj.set_state(session_state)
+        return obj
+
     # --------------------------- Public properties----------------------
     @property
     def session_config(self) -> SessionConfig:
@@ -428,15 +460,18 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     # ---------------------- Helper private attributes ----------------------
     @property
     def _sorted_hooks(self):
-        return sorted(list(self._hooks.values()), key=lambda hook: self._order_of_components[hook.id])
+        order_of_components = topological_sort_of_components()
+        return sorted(list(self._hooks.values()), key=lambda hook: order_of_components[hook.id])
 
     @property
     def _sorted_resources(self):
-        return sorted(list(self._resources.values()), key=lambda resource: self._order_of_components[resource.id])
+        order_of_components = topological_sort_of_components()
+        return sorted(list(self._resources.values()), key=lambda resource: order_of_components[resource.id])
 
     @property
     def _sorted_steps(self):
-        return sorted(list(self._steps.values()), key=lambda step: self._order_of_components[step.id])
+        order_of_components = topological_sort_of_components()
+        return sorted(list(self._steps.values()), key=lambda step: order_of_components[step.id])
 
     @property
     def _stateful_hooks(self):
@@ -476,6 +511,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def get_all_steps(self):
         return list(self._steps.values())
+
+    # ================= component modifiers ======================
 
     def register_resource(self, resource: Resource):
         if not isinstance(resource, Resource):
@@ -554,11 +591,13 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             raise ValueError(f"Resource '{resource_name}' not registered with current session!")
         del self._resources[resource_name]
 
+    # ===========================================================
+
     def _check_and_get_device(self):
-        if 'device' not in self._config:
+        if 'device' not in self._base_config:
             return torch.device('cpu')
-        if self._config['device'].startswith('cuda') and torch.cuda.is_available():
-            return torch.device(self._config['device'])
+        if self._base_config['device'].startswith('cuda') and torch.cuda.is_available():
+            return torch.device(self._base_config['device'])
         else:
             return torch.device('cpu')
 

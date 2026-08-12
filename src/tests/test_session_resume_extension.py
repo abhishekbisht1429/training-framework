@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import training_framework.configurator as configurator_sut
 import training_framework.training_engine as engine_sut
-import training_framework.training_session as session_sut
-import training_framework.util as util_sut
-
-
-COMMIT = "c7f3b225150648daf8cddbabd8b0e8d4557b52c0"
+from training_framework import training_engine
+from training_framework.builtin_components import DDPResource
 
 
 def _parse_args(monkeypatch: pytest.MonkeyPatch, *args: str):
@@ -21,7 +18,7 @@ def _parse_args(monkeypatch: pytest.MonkeyPatch, *args: str):
     return configurator_sut.Configurator()
 
 
-class _IdleSession:
+class IdleSession:
     """Minimal context-managed iterator used by worker tests."""
 
     def __init__(self) -> None:
@@ -41,11 +38,13 @@ class _IdleSession:
 
 
 # ---------------------------------------------------------------------------
-# Configurator: config / resume / extension modes
+# Configurator modes
 # ---------------------------------------------------------------------------
 
 
-def test_configurator_resume_mode_exposes_checkpoint_and_timeout(monkeypatch):
+def test_configurator_resume_mode_exposes_checkpoint_mode_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     configurator = _parse_args(
         monkeypatch,
         "--resume-session",
@@ -54,14 +53,14 @@ def test_configurator_resume_mode_exposes_checkpoint_and_timeout(monkeypatch):
         "7.5",
     )
 
-    assert (
-        configurator.checkpoint_path
-        == "checkpoints/session.pkl"
-    )
+    assert configurator.mode == "resume"
+    assert configurator.checkpoint_path == "checkpoints/session.pkl"
     assert configurator.process_timeout_on_join == pytest.approx(7.5)
 
 
-def test_configurator_modes_are_mutually_exclusive(monkeypatch):
+def test_configurator_modes_are_mutually_exclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(SystemExit):
         _parse_args(
             monkeypatch,
@@ -71,12 +70,17 @@ def test_configurator_modes_are_mutually_exclusive(monkeypatch):
             "session.pkl",
         )
 
-def test_configurator_requires_exactly_one_mode(monkeypatch):
+
+def test_configurator_requires_exactly_one_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(SystemExit):
         _parse_args(monkeypatch)
 
 
-def test_configurator_extension_parses_max_iterations_as_integer(monkeypatch):
+def test_configurator_extension_parses_max_iterations_as_integer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     configurator = _parse_args(
         monkeypatch,
         "--extend-session",
@@ -84,12 +88,27 @@ def test_configurator_extension_parses_max_iterations_as_integer(monkeypatch):
         "250",
     )
 
+    assert configurator.mode == "extend"
     assert configurator.checkpoint_path == "session.pkl"
     assert configurator.new_max_iters == 250
     assert isinstance(configurator.new_max_iters, int)
 
 
-def test_resume_mode_rejects_config_accessors_with_key_error(monkeypatch):
+def test_configurator_extension_rejects_non_integer_iteration_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError):
+        _parse_args(
+            monkeypatch,
+            "--extend-session",
+            "session.pkl",
+            "not-an-integer",
+        )
+
+
+def test_resume_mode_rejects_new_session_accessors_with_key_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     configurator = _parse_args(
         monkeypatch,
         "--resume-session",
@@ -99,228 +118,330 @@ def test_resume_mode_rejects_config_accessors_with_key_error(monkeypatch):
     with pytest.raises(KeyError, match="current mode"):
         _ = configurator.session_configs
 
+    with pytest.raises(KeyError, match="current mode"):
+        configurator.get_base_config(0)
+
+    with pytest.raises(KeyError, match="current mode"):
+        configurator.get_component_config(0, "logger")
+
 
 # ---------------------------------------------------------------------------
-# Checkpoint session construction
+# copy_and_modify_session_for_worker
 # ---------------------------------------------------------------------------
 
 
-def test_create_session_from_checkpoint_applies_max_iteration_update(
-    monkeypatch,
-):
-    class FakeSession:
-        def __init__(self) -> None:
-            self.max_iteration_updates: list[int] = []
+@dataclass
+class Component:
+    name: str
 
-        def update_max_iters(self, value: int) -> None:
-            self.max_iteration_updates.append(value)
 
-        def has_resource(self, name: str) -> bool:
-            return False
+class FakeSession:
+    def __init__(
+        self,
+        *,
+        ddp_config: dict[str, Any] | None = None,
+        hooks: tuple[str, ...] = (),
+        resources: tuple[str, ...] = (),
+        steps: tuple[str, ...] = (),
+    ) -> None:
+        self.hooks = {name: Component(name) for name in hooks}
+        self.resources = {name: Component(name) for name in resources}
+        self.steps = {name: Component(name) for name in steps}
+        self.max_iteration_updates: list[int] = []
 
-    loaded_session = FakeSession()
-    loaded_paths: list[str] = []
+        if ddp_config is not None:
+            self.resources["ddp"] = DDPResource(ddp_config)
 
-    monkeypatch.setattr(
-        configurator_sut,
-        "Checkpointer",
-        SimpleNamespace(
-            load_checkpoint=lambda *, path: (
-                loaded_paths.append(path) or loaded_session
-            )
-        ),
-    )
+    def update_max_iters(self, value: int) -> None:
+        self.max_iteration_updates.append(value)
 
-    result = configurator_sut.create_session_from_checkpoint(
-        "session.pkl",
-        session_update_params={"max_iterations": 300},
+    def has_resource(self, name: str) -> bool:
+        return name in self.resources
+
+    def get_resource(self, name: str):
+        return self.resources[name]
+
+    def get_all_hooks(self) -> list[Any]:
+        return list(self.hooks.values())
+
+    def get_all_resources(self) -> list[Any]:
+        return list(self.resources.values())
+
+    def get_all_steps(self) -> list[Any]:
+        return list(self.steps.values())
+
+    def unregister_hook(self, name: str) -> None:
+        del self.hooks[name]
+
+    def unregister_resource(self, name: str) -> None:
+        del self.resources[name]
+
+    def register_resource(self, resource) -> None:
+        self.resources[resource.name] = resource
+
+    def remove_step(self, name: str) -> None:
+        del self.steps[name]
+
+
+def _ddp_config(
+    *,
+    world_size: int = 4,
+    parallel_components: list[str] | None = None,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "world_size": world_size,
+        "backend": "gloo",
+    }
+    if parallel_components is not None:
+        config["parallel_components"] = parallel_components
+    return config
+
+
+def test_copy_and_modify_returns_a_deep_copy_and_updates_iteration_limit() -> None:
+    source = FakeSession(hooks=("metrics",), resources=("cache",), steps=("train",))
+
+    result = training_engine.load_session_for_worker(
+        source,
         rank=0,
+        session_update_params={"max_iterations": 300},
     )
 
-    assert result is loaded_session
-    assert loaded_paths == ["session.pkl"]
-    assert loaded_session.max_iteration_updates == [300]
+    assert result is not source
+    assert result.max_iteration_updates == [300]
+    assert source.max_iteration_updates == []
+    assert result.hooks is not source.hooks
+    assert result.resources is not source.resources
+    assert result.steps is not source.steps
 
 
-def test_secondary_checkpoint_rank_keeps_only_parallel_components(
-    monkeypatch,
-):
-    class Component:
-        def __init__(self, name: str) -> None:
-            self.name = name
+def test_copy_and_modify_without_updates_preserves_iteration_configuration() -> None:
+    source = FakeSession()
 
-    class DDPComponent(Component):
-        def __init__(self) -> None:
-            super().__init__("ddp")
-            self.world_size = 3
-            self._rank = 0
-            self.parallel_components = [
+    result = training_engine.load_session_for_worker(source, rank=0)
+
+    assert result is not source
+    assert result.max_iteration_updates == []
+
+
+def test_rank_zero_worker_replaces_placeholder_ddp_resource_with_rank_zero() -> None:
+    """Every worker, including rank zero, needs a concrete runtime DDP rank."""
+    source = FakeSession(
+        ddp_config=_ddp_config(parallel_components=["ddp"]),
+    )
+    assert source.get_resource("ddp").rank == -1
+
+    result = training_engine.load_session_for_worker(source, rank=0)
+
+    assert result.get_resource("ddp").rank == 0
+    assert source.get_resource("ddp").rank == -1
+
+
+def test_secondary_rank_replaces_ddp_resource_and_keeps_only_parallel_components() -> None:
+    source = FakeSession(
+        ddp_config=_ddp_config(
+            parallel_components=[
                 "ddp",
                 "parallel_hook",
                 "parallel_resource",
                 "parallel_step",
             ]
-            self.config = {
-                'world_size': self.world_size,
-                'parallel_components': self.parallel_components,
-                'backend': 'nccl'
-            }
-
-        @property
-        def rank(self) -> int:
-            return self._rank
-
-    class FakeSession:
-        def __init__(self) -> None:
-            self.ddp = DDPComponent()
-            self.hooks = {
-                "parallel_hook": Component("parallel_hook"),
-                "rank_zero_hook": Component("rank_zero_hook"),
-            }
-            self.resources = {
-                "ddp": self.ddp,
-                "parallel_resource": Component("parallel_resource"),
-                "rank_zero_resource": Component("rank_zero_resource"),
-            }
-            self.steps = {
-                "parallel_step": Component("parallel_step"),
-                "rank_zero_step": Component("rank_zero_step"),
-            }
-
-        # Both APIs are supplied so the test remains useful after the DDP
-        # lookup is corrected from hook to resource.
-        def has_hook(self, name: str) -> bool:
-            return name in self.hooks
-
-        def get_hook(self, name: str):
-            return self.hooks[name]
-
-        def has_resource(self, name: str) -> bool:
-            return name in self.resources
-
-        def get_resource(self, name: str):
-            return self.resources[name]
-
-        def get_all_hooks(self):
-            return list(self.hooks.values())
-
-        def get_all_resources(self):
-            return list(self.resources.values())
-
-        def get_all_steps(self):
-            return list(self.steps.values())
-
-        def unregister_hook(self, name: str) -> None:
-            del self.hooks[name]
-
-        def unregister_resource(self, name: str) -> None:
-            if not isinstance(name, str):
-                raise TypeError("resource name must be a string")
-            del self.resources[name]
-
-        def register_resource(self, resource):
-            self.resources[resource.name] = resource
-
-        def remove_step(self, name: str) -> None:
-            del self.steps[name]
-
-    loaded_session = FakeSession()
-    monkeypatch.setattr(
-        configurator_sut,
-        "Checkpointer",
-        SimpleNamespace(load_checkpoint=lambda *, path: loaded_session),
+        ),
+        hooks=("parallel_hook", "rank_zero_hook"),
+        resources=("parallel_resource", "rank_zero_resource"),
+        steps=("parallel_step", "rank_zero_step"),
     )
 
-    result = configurator_sut.create_session_from_checkpoint(
-        "session.pkl",
-        rank=2,
-    )
+    result = training_engine.load_session_for_worker(source, rank=2)
 
+    assert result.get_resource("ddp").rank == 2
     assert set(result.hooks) == {"parallel_hook"}
     assert set(result.resources) == {"ddp", "parallel_resource"}
     assert set(result.steps) == {"parallel_step"}
 
+    # The parent-owned source session is authoritative and remains unchanged.
+    assert source.get_resource("ddp").rank == -1
+    assert set(source.hooks) == {"parallel_hook", "rank_zero_hook"}
+    assert set(source.resources) == {
+        "ddp",
+        "parallel_resource",
+        "rank_zero_resource",
+    }
+    assert set(source.steps) == {"parallel_step", "rank_zero_step"}
 
-def test_checkpoint_factory_updates_ddp_resource_to_worker_rank(monkeypatch):
-    class DDPComponent:
-        name = "ddp"
-        world_size = 4
-        parallel_components = ["ddp"]
 
-        def __init__(self) -> None:
-            self._rank = 0
+def test_non_ddp_worker_copy_does_not_prune_components() -> None:
+    source = FakeSession(
+        hooks=("hook",),
+        resources=("resource",),
+        steps=("step",),
+    )
 
-        @property
-        def rank(self) -> int:
-            return self._rank
+    result = training_engine.load_session_for_worker(source, rank=5)
 
-        @property
-        def config(self):
-            return {
-                "world_size": self.world_size,
-                "parallel_components": self.parallel_components,
-                "backend": "nccl",
-            }
+    assert set(result.hooks) == {"hook"}
+    assert set(result.resources) == {"resource"}
+    assert set(result.steps) == {"step"}
 
-    class FakeSession:
-        def __init__(self) -> None:
-            self.resources = {'ddp': DDPComponent()}
 
-        def has_hook(self, name: str) -> bool:
-            return False
+def test_ddp_resource_defaults_to_placeholder_rank_and_empty_parallel_list() -> None:
+    resource = DDPResource(_ddp_config(world_size=2))
 
-        def has_resource(self, name: str) -> bool:
-            return name == "ddp"
+    assert resource.rank == -1
+    assert resource.world_size == 2
+    assert resource.parallel_components == []
 
-        def get_resource(self, name: str):
-            assert name == "ddp"
-            return self.resources['ddp']
 
-        def get_all_hooks(self):
-            return []
+def test_ddp_resource_properties_return_defensive_copies() -> None:
+    config = _ddp_config(
+        world_size=3,
+        parallel_components=["ddp", "train"],
+    )
+    resource = DDPResource(config)
 
-        def get_all_resources(self):
-            return self.resources.values()
+    returned_config = resource.config
+    returned_components = resource.parallel_components
+    returned_config["world_size"] = 99
+    returned_components.append("mutated")
 
-        def get_all_steps(self):
-            return []
+    assert resource.world_size == 3
+    assert resource.parallel_components == ["ddp", "train"]
 
-        def unregister_resource(self, name: str) -> None:
-            if not isinstance(name, str):
-                raise TypeError("resource name must be a string")
-            del self.resources[name]
 
-        def register_resource(self, resource):
-            self.resources[resource.name] = resource
+# ---------------------------------------------------------------------------
+# Parent-side session creation
+# ---------------------------------------------------------------------------
 
-    loaded_session = FakeSession()
+
+class RecordingSession:
+    def __init__(self, base_config: dict[str, Any]) -> None:
+        self.base_config = base_config
+        self.steps: list[Any] = []
+        self.hooks: list[Any] = []
+        self.resources: list[Any] = []
+
+    def add_step(self, component) -> None:
+        self.steps.append(component)
+
+    def register_hook(self, component) -> None:
+        self.hooks.append(component)
+
+    def register_resource(self, component) -> None:
+        self.resources.append(component)
+
+
+class RecordingComponent:
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+
+
+class RecordingDDPResource(RecordingComponent):
+    name = "ddp"
+
+    def __init__(self, config: dict[str, Any], rank: int = -1) -> None:
+        super().__init__(config)
+        self.rank = rank
+        self.world_size = config["world_size"]
+        self.parallel_components = list(config.get("parallel_components", []))
+
+
+def _install_recording_registries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(configurator_sut, "TrainingSession", RecordingSession)
     monkeypatch.setattr(
         configurator_sut,
-        "Checkpointer",
-        SimpleNamespace(load_checkpoint=lambda *, path: loaded_session),
+        "STEP_REGISTRY",
+        {"train_step": RecordingComponent},
+    )
+    monkeypatch.setattr(
+        configurator_sut,
+        "HOOK_REGISTRY",
+        {"metrics_hook": RecordingComponent},
+    )
+    monkeypatch.setattr(
+        configurator_sut,
+        "RESOURCE_REGISTRY",
+        {
+            "cache_resource": RecordingComponent,
+            "ddp": RecordingDDPResource,
+        },
     )
 
-    result = configurator_sut.create_session_from_checkpoint(
-        "session.pkl",
-        rank=3,
+
+def test_create_session_from_config_builds_complete_parent_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_recording_registries(monkeypatch)
+    config = {
+        "base_config": {"max_iterations": 3},
+        "train_step": {"value": "step"},
+        "metrics_hook": {"value": "hook"},
+        "cache_resource": {"value": "resource"},
+        "ddp": {
+            "world_size": 2,
+            "backend": "gloo",
+            "parallel_components": ["ddp", "train_step"],
+        },
+    }
+
+    session = configurator_sut.create_session_from_config(config)
+
+    assert isinstance(session, RecordingSession)
+    assert session.base_config is config["base_config"]
+    assert [component.config for component in session.steps] == [
+        config["train_step"]
+    ]
+    assert [component.config for component in session.hooks] == [
+        config["metrics_hook"]
+    ]
+    assert [component.config for component in session.resources] == [
+        config["cache_resource"],
+        config["ddp"],
+    ]
+    assert session.resources[-1].rank == -1
+
+
+def test_create_session_from_config_does_not_prune_rank_zero_only_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_recording_registries(monkeypatch)
+    monkeypatch.setattr(
+        configurator_sut,
+        "STEP_REGISTRY",
+        {
+            "parallel_step": RecordingComponent,
+            "rank_zero_step": RecordingComponent,
+        },
     )
+    config = {
+        "base_config": {},
+        "parallel_step": {"kind": "parallel"},
+        "rank_zero_step": {"kind": "rank-zero"},
+        "ddp": {
+            "world_size": 4,
+            "backend": "gloo",
+            "parallel_components": ["ddp", "parallel_step"],
+        },
+    }
 
-    assert result.get_resource("ddp").rank == 3
+    session = configurator_sut.create_session_from_config(config)
+
+    assert [component.config for component in session.steps] == [
+        config["parallel_step"],
+        config["rank_zero_step"],
+    ]
+    assert session.resources[0].rank == -1
 
 
-def test_ddp_configuration_may_omit_parallel_components(monkeypatch):
-    created_sessions: list[Any] = []
-
-    class FakeSession:
-        def __init__(self, config: dict) -> None:
-            self.config = config
-            self.resources: list[Any] = []
-            created_sessions.append(self)
-
-        def register_resource(self, resource) -> None:
-            self.resources.append(resource)
-
-    monkeypatch.setattr(configurator_sut, "TrainingSession", FakeSession)
+def test_create_session_from_config_allows_ddp_without_parallel_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(configurator_sut, "TrainingSession", RecordingSession)
+    monkeypatch.setattr(configurator_sut, "STEP_REGISTRY", {})
+    monkeypatch.setattr(configurator_sut, "HOOK_REGISTRY", {})
+    monkeypatch.setattr(
+        configurator_sut,
+        "RESOURCE_REGISTRY",
+        {"ddp": DDPResource},
+    )
 
     result = configurator_sut.create_session_from_config(
         {
@@ -329,214 +450,176 @@ def test_ddp_configuration_may_omit_parallel_components(monkeypatch):
                 "world_size": 2,
                 "backend": "gloo",
             },
-        },
-        rank=0,
+        }
     )
 
-    assert result is created_sessions[0]
     assert len(result.resources) == 1
+    assert result.resources[0].rank == -1
     assert result.resources[0].parallel_components == []
 
 
-# ---------------------------------------------------------------------------
-# Worker configuration and process wrappers
-# ---------------------------------------------------------------------------
+def test_create_session_from_config_rejects_unknown_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(configurator_sut, "TrainingSession", RecordingSession)
+    monkeypatch.setattr(configurator_sut, "STEP_REGISTRY", {})
+    monkeypatch.setattr(configurator_sut, "HOOK_REGISTRY", {})
+    monkeypatch.setattr(configurator_sut, "RESOURCE_REGISTRY", {})
 
-
-def test_worker_builds_session_from_checkpoint(monkeypatch, capsys):
-    session = _IdleSession()
-    calls: list[tuple[str, dict[str, int] | None, int]] = []
-
-    def checkpoint_factory(
-        checkpoint_path: str,
-        session_update_params=None,
-        *,
-        rank: int,
+    with pytest.raises(
+        ValueError,
+        match="No step, hook or resource registered with name 'missing'",
     ):
-        calls.append((checkpoint_path, session_update_params, rank))
-        return session
+        configurator_sut.create_session_from_config(
+            {"base_config": {}, "missing": {}}
+        )
 
-    monkeypatch.setattr(engine_sut.signal, "signal", lambda *args: None)
+
+# ---------------------------------------------------------------------------
+# Worker receives a parent-created session, not config/checkpoint source data.
+# ---------------------------------------------------------------------------
+
+
+def test_worker_modifies_supplied_session_for_its_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_session = object()
+    worker_session = IdleSession()
+    calls: list[tuple[Any, int, Any]] = []
+
+    def copy_for_worker(session, rank, session_update_params=None):
+        calls.append((session, rank, session_update_params))
+        return worker_session
+
+    monkeypatch.setattr(engine_sut.signal, "signal", lambda *_: None)
     monkeypatch.setattr(
         engine_sut,
-        "create_session_from_checkpoint",
-        checkpoint_factory,
+        "copy_and_modify_session_for_worker",
+        copy_for_worker,
     )
 
+    updates = {"max_iterations": 500}
     engine_sut.session_process_worker(
-        {
-            "checkpoint_path": "session.pkl",
-            "session_update_params": {"max_iterations": 500},
-        },
+        source_session,
         session_id=7,
         rank=2,
         stop_event=SimpleNamespace(is_set=lambda: True),
+        session_update_params=updates,
     )
 
-    assert calls == [
-        ("session.pkl", {"max_iterations": 500}, 2)
-    ]
-    assert session.entered is True
-    assert session.exited is True
+    assert calls == [(source_session, 2, updates)]
+    assert worker_session.entered is True
+    assert worker_session.exited is True
     assert capsys.readouterr().out == "Session 7[2] exiting.\n"
 
 
-def test_worker_allows_checkpoint_without_update_parameters(monkeypatch):
-    session = _IdleSession()
-    calls: list[tuple[str, Any, int]] = []
+def test_worker_allows_no_session_update_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_session = IdleSession()
+    calls: list[tuple[Any, int, Any]] = []
 
-    def checkpoint_factory(
-        checkpoint_path: str,
-        session_update_params=None,
-        *,
-        rank: int,
-    ):
-        calls.append((checkpoint_path, session_update_params, rank))
-        return session
+    def copy_for_worker(session, rank, session_update_params=None):
+        calls.append((session, rank, session_update_params))
+        return worker_session
 
-    monkeypatch.setattr(engine_sut.signal, "signal", lambda *args: None)
+    source_session = object()
+    monkeypatch.setattr(engine_sut.signal, "signal", lambda *_: None)
     monkeypatch.setattr(
         engine_sut,
-        "create_session_from_checkpoint",
-        checkpoint_factory,
+        "copy_and_modify_session_for_worker",
+        copy_for_worker,
     )
 
     engine_sut.session_process_worker(
-        {"checkpoint_path": "session.pkl"},
+        source_session,
         session_id=1,
         rank=0,
         stop_event=SimpleNamespace(is_set=lambda: True),
     )
 
-    assert calls == [("session.pkl", None, 0)]
+    assert calls == [(source_session, 0, None)]
 
 
-def test_worker_rejects_ambiguous_session_source(monkeypatch):
-    monkeypatch.setattr(engine_sut.signal, "signal", lambda *args: None)
+def test_worker_does_not_create_or_load_the_session_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_session = IdleSession()
+    monkeypatch.setattr(engine_sut.signal, "signal", lambda *_: None)
     monkeypatch.setattr(
         engine_sut,
         "create_session_from_config",
-        lambda config, *, rank: _IdleSession(),
+        lambda *args, **kwargs: pytest.fail(
+            "worker must not construct a new session from config"
+        ),
     )
     monkeypatch.setattr(
         engine_sut,
-        "create_session_from_checkpoint",
-        lambda *args, **kwargs: _IdleSession(),
+        "copy_and_modify_session_for_worker",
+        lambda session, rank, session_update_params=None: worker_session,
     )
 
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        engine_sut.session_process_worker(
-            {
-                "session_config": {},
-                "checkpoint_path": "session.pkl",
-                "session_update_params": None,
-            },
-            session_id=1,
-            rank=0,
-            stop_event=SimpleNamespace(is_set=lambda: True),
-        )
-
-
-def test_process_wrapper_deep_copies_nested_worker_configuration(monkeypatch):
-    class FakeEvent:
-        pass
-
-    class FakeProcess:
-        def __init__(self, *, name, target, args):
-            self.name = name
-            self.target = target
-            self.args = args
-
-    monkeypatch.setattr(engine_sut, "Event", FakeEvent)
-    monkeypatch.setattr(engine_sut, "Process", FakeProcess)
-
-    worker_config = {
-        "checkpoint_path": "session.pkl",
-        "session_update_params": {"max_iterations": 10},
-    }
-
-    wrapper = engine_sut.SessionProcessWrapper(
-        worker_config=worker_config,
-        session_id=4,
-        rank=1,
-    )
-
-    worker_config["session_update_params"]["max_iterations"] = 999
-
-    copied_config = wrapper.process.args[0]
-    assert copied_config == {
-        "checkpoint_path": "session.pkl",
-        "session_update_params": {"max_iterations": 10},
-    }
-    assert copied_config is not worker_config
-    assert (
-        copied_config["session_update_params"]
-        is not worker_config["session_update_params"]
+    engine_sut.session_process_worker(
+        object(),
+        session_id=1,
+        rank=0,
+        stop_event=SimpleNamespace(is_set=lambda: True),
     )
 
 
 # ---------------------------------------------------------------------------
-# TrainingEngine.load_session
+# TrainingEngine.load_session uses the loaded parent session for all wrappers.
 # ---------------------------------------------------------------------------
 
 
-class _RecordingWrapper:
-    instances: list["_RecordingWrapper"] = []
+class RecordingWrapper:
+    instances: list["RecordingWrapper"] = []
 
-    def __init__(self, worker_config, session_id: int, rank: int):
-        self.worker_config = worker_config
+    def __init__(self, session, session_id: int, rank: int, **kwargs) -> None:
+        self.session = session
         self.session_id = session_id
         self.rank = rank
+        self.kwargs = kwargs
         type(self).instances.append(self)
 
 
+class MinimalConfigurator:
+    mode = "new"
+    session_configs: list[dict[str, Any]] = []
+    process_timeout_on_join = 3.0
+
+
 def test_engine_load_session_creates_one_worker_for_non_ddp_checkpoint(
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class LoadedSession:
         def has_resource(self, name: str) -> bool:
             return False
 
-    _RecordingWrapper.instances.clear()
-    monkeypatch.setattr(engine_sut, "SessionProcessWrapper", _RecordingWrapper)
+    loaded_session = LoadedSession()
+    RecordingWrapper.instances.clear()
+    monkeypatch.setattr(engine_sut, "SessionProcessWrapper", RecordingWrapper)
     monkeypatch.setattr(
-        engine_sut,
-        "Checkpointer",
-        SimpleNamespace(load_checkpoint=lambda *, path: LoadedSession()),
+        engine_sut.Checkpointer,
+        "load_checkpoint",
+        lambda path: loaded_session,
     )
 
-    engine = engine_sut.TrainingEngine(
-        SimpleNamespace(process_timeout_on_join=3.0)
-    )
-
-    session_id = engine.load_session(
-        "session.pkl",
-        session_update_params={"max_iterations": 20},
-    )
+    engine = engine_sut.TrainingEngine(MinimalConfigurator())
+    session_id = engine.load_session("session.pkl")
 
     assert session_id == 0
-    assert [wrapper.rank for wrapper in _RecordingWrapper.instances] == [0]
-    assert _RecordingWrapper.instances[0].worker_config == {
-        "checkpoint_path": "session.pkl",
-        "session_update_params": {"max_iterations": 20},
-    }
+    assert [wrapper.rank for wrapper in RecordingWrapper.instances] == [0]
+    assert RecordingWrapper.instances[0].session is loaded_session
 
 
-# @pytest.mark.xfail(
-#     strict=True,
-#     reason=(
-#         f"Known draft issue in {COMMIT}: load_session() looks for DDP in "
-#         "the hook collection even though DDPResource is a resource, so a "
-#         "DDP checkpoint is resumed with only one process."
-#     ),
-# )
-def test_engine_load_session_uses_world_size_from_ddp_resource(monkeypatch):
-    ddp_resource = SimpleNamespace(name="ddp", world_size=4)
+def test_engine_load_session_uses_world_size_from_ddp_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddp_resource = SimpleNamespace(world_size=4)
 
     class LoadedSession:
-        def has_hook(self, name: str) -> bool:
-            return False
-
         def has_resource(self, name: str) -> bool:
             return name == "ddp"
 
@@ -544,23 +627,18 @@ def test_engine_load_session_uses_world_size_from_ddp_resource(monkeypatch):
             assert name == "ddp"
             return ddp_resource
 
-        def get_all_resources(self):
-            return [ddp_resource]
-
-    _RecordingWrapper.instances.clear()
-    monkeypatch.setattr(engine_sut, "SessionProcessWrapper", _RecordingWrapper)
+    RecordingWrapper.instances.clear()
+    monkeypatch.setattr(engine_sut, "SessionProcessWrapper", RecordingWrapper)
     monkeypatch.setattr(
-        engine_sut,
-        "Checkpointer",
-        SimpleNamespace(load_checkpoint=lambda *, path: LoadedSession()),
+        engine_sut.Checkpointer,
+        "load_checkpoint",
+        lambda path: LoadedSession(),
     )
 
-    engine = engine_sut.TrainingEngine(
-        SimpleNamespace(process_timeout_on_join=3.0)
-    )
+    engine = engine_sut.TrainingEngine(MinimalConfigurator())
     engine.load_session("ddp-session.pkl")
 
-    assert [wrapper.rank for wrapper in _RecordingWrapper.instances] == [
+    assert [wrapper.rank for wrapper in RecordingWrapper.instances] == [
         0,
         1,
         2,
@@ -568,223 +646,25 @@ def test_engine_load_session_uses_world_size_from_ddp_resource(monkeypatch):
     ]
 
 
-# ---------------------------------------------------------------------------
-# TrainingSession additions
-# ---------------------------------------------------------------------------
+def test_engine_load_session_forwards_extension_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LoadedSession:
+        def has_resource(self, name: str) -> bool:
+            return False
 
-
-def _bare_training_session() -> session_sut.TrainingSession:
-    session = object.__new__(session_sut.TrainingSession)
-    session._hooks = {}
-    session._resources = {}
-    session._steps = {}
-    return session
-
-
-def test_component_collection_accessors_return_snapshots():
-    session = _bare_training_session()
-    hook = SimpleNamespace(name="hook")
-    resource = SimpleNamespace(name="resource")
-    step = SimpleNamespace(name="step")
-    session._hooks[hook.name] = hook
-    session._resources[resource.name] = resource
-    session._steps[step.name] = step
-
-    hooks = session.get_all_hooks()
-    resources = session.get_all_resources()
-    steps = session.get_all_steps()
-
-    hooks.clear()
-    resources.clear()
-    steps.clear()
-
-    assert session.get_all_hooks() == [hook]
-    assert session.get_all_resources() == [resource]
-    assert session.get_all_steps() == [step]
-
-
-def test_component_removal_methods_remove_by_registered_name(monkeypatch):
-    session = _bare_training_session()
-    hook = SimpleNamespace(name="hook")
-    resource = SimpleNamespace(name="resource")
-    step = SimpleNamespace(name="step")
-
-    monkeypatch.setitem(session_sut.HOOK_REGISTRY, hook.name, object())
-    monkeypatch.setitem(
-        session_sut.RESOURCE_REGISTRY,
-        resource.name,
-        object(),
-    )
-    monkeypatch.setitem(session_sut.STEP_REGISTRY, step.name, object())
-
-    session._hooks[hook.name] = hook
-    session._resources[resource.name] = resource
-    session._steps[step.name] = step
-
-    session.unregister_hook(hook.name)
-    session.unregister_resource(resource.name)
-    session.remove_step(step.name)
-
-    assert session.get_all_hooks() == []
-    assert session.get_all_resources() == []
-    assert session.get_all_steps() == []
-
-
-@pytest.mark.parametrize(
-    ("method_name", "registry", "component_name"),
-    [
-        ("unregister_hook", "HOOK_REGISTRY", "missing_hook"),
-        ("unregister_resource", "RESOURCE_REGISTRY", "missing_resource"),
-        ("remove_step", "STEP_REGISTRY", "missing_step"),
-    ],
-)
-def test_component_removal_rejects_names_absent_from_global_registry(
-    method_name,
-    registry,
-    component_name,
-):
-    session = _bare_training_session()
-    assert component_name not in getattr(session_sut, registry)
-
-    with pytest.raises(ValueError, match=component_name):
-        getattr(session, method_name)(component_name)
-
-
-def test_update_max_iters_preserves_seed_and_session_directory():
-    session = _bare_training_session()
-    session._session_config = session_sut.SessionConfig(
-        rng_seed=42,
-        session_dir="/tmp/example-session",
-        max_iterations=10,
-    )
-
-    session.update_max_iters(25)
-
-    assert session.session_config == session_sut.SessionConfig(
-        rng_seed=42,
-        session_dir="/tmp/example-session",
-        max_iterations=25,
-    )
-
-
-def test_transient_initialization_imports_components_before_sorting(
-    monkeypatch,
-):
-    events: list[tuple[str, Any]] = []
-
+    RecordingWrapper.instances.clear()
+    monkeypatch.setattr(engine_sut, "SessionProcessWrapper", RecordingWrapper)
     monkeypatch.setattr(
-        session_sut,
-        "import_all_modules",
-        lambda package: events.append(("import", package)),
-    )
-    monkeypatch.setattr(
-        session_sut,
-        "topological_sort_of_components",
-        lambda: events.append(("sort", None)) or {"component": 0},
+        engine_sut.Checkpointer,
+        "load_checkpoint",
+        lambda path: LoadedSession(),
     )
 
-    session = _bare_training_session()
-    session._config = {
-        "components_package": "example.components",
-        "device": "cpu",
+    updates = {"max_iterations": 800}
+    engine = engine_sut.TrainingEngine(MinimalConfigurator())
+    engine.load_session("session.pkl", session_update_params=updates)
+
+    assert RecordingWrapper.instances[0].kwargs == {
+        "session_update_params": updates,
     }
-
-    session._init_transient_infra()
-
-    assert events == [
-        ("import", "example.components"),
-        ("sort", None),
-    ]
-    assert session._shared_state == {}
-    assert session._order_of_components == {"component": 0}
-
-
-# ---------------------------------------------------------------------------
-# Package/module discovery and DDPResource metadata
-# ---------------------------------------------------------------------------
-
-
-def _write_module(path: Path, body: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-
-
-def test_import_all_modules_imports_root_package_and_descendants(
-    tmp_path,
-    monkeypatch,
-):
-    package_name = "component_discovery_fixture"
-    sink_name = "component_discovery_sink"
-
-    sink = ModuleType(sink_name)
-    sink.events = []
-    monkeypatch.setitem(sys.modules, sink_name, sink)
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    body = (
-        f"from {sink_name} import events\n"
-        "events.append(__name__)\n"
-    )
-
-    package_dir = tmp_path / package_name
-    _write_module(package_dir / "__init__.py", body)
-    _write_module(package_dir / "model.py", body)
-    _write_module(package_dir / "nested" / "__init__.py", body)
-    _write_module(package_dir / "nested" / "step.py", body)
-
-    try:
-        util_sut.import_all_modules(package_name)
-
-        assert set(sink.events) == {
-            package_name,
-            f"{package_name}.model",
-            f"{package_name}.nested",
-            f"{package_name}.nested.step",
-        }
-    finally:
-        for module_name in list(sys.modules):
-            if (
-                module_name == package_name
-                or module_name.startswith(package_name + ".")
-            ):
-                sys.modules.pop(module_name, None)
-
-
-def test_import_all_modules_accepts_a_plain_module(tmp_path, monkeypatch):
-    module_name = "single_component_module"
-    sink_name = "single_component_sink"
-
-    sink = ModuleType(sink_name)
-    sink.events = []
-    monkeypatch.setitem(sys.modules, sink_name, sink)
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    _write_module(
-        tmp_path / f"{module_name}.py",
-        f"from {sink_name} import events\nevents.append(__name__)\n",
-    )
-
-    try:
-        util_sut.import_all_modules(module_name)
-        assert sink.events == [module_name]
-    finally:
-        sys.modules.pop(module_name, None)
-
-
-def test_ddp_parallel_components_property_returns_a_defensive_copy():
-    resource = configurator_sut.DDPResource(
-        {
-            "world_size": 2,
-            "backend": "gloo",
-            "parallel_components": ["model", "optimizer"],
-        },
-        rank=1,
-    )
-
-    returned = resource.parallel_components
-    returned.append("late_mutation")
-
-    assert resource.parallel_components == ["model", "optimizer"]
-    assert resource.rank == 1
-    assert resource.world_size == 2
-    assert resource.backend == "gloo"
