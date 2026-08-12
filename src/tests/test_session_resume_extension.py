@@ -55,7 +55,7 @@ def test_configurator_resume_mode_exposes_checkpoint_and_timeout(monkeypatch):
     )
 
     assert (
-        configurator.path_of_checkpoint_to_resume()
+        configurator.checkpoint_path
         == "checkpoints/session.pkl"
     )
     assert configurator.process_timeout_on_join == pytest.approx(7.5)
@@ -84,9 +84,9 @@ def test_configurator_extension_parses_max_iterations_as_integer(monkeypatch):
         "250",
     )
 
-    assert configurator.path_of_checkpoint_to_resume() == "session.pkl"
-    assert configurator.new_max_iters() == 250
-    assert isinstance(configurator.new_max_iters(), int)
+    assert configurator.checkpoint_path == "session.pkl"
+    assert configurator.new_max_iters == 250
+    assert isinstance(configurator.new_max_iters, int)
 
 
 def test_resume_mode_rejects_config_accessors_with_key_error(monkeypatch):

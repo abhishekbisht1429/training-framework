@@ -92,7 +92,8 @@ class SessionProcessWrapper:
 
 
 class TrainingEngine:
-    def __init__(self, configurator):
+    def __init__(self, configurator: Configurator):
+        self._configurator = configurator
         self._timeout_on_interrupt = configurator.process_timeout_on_join
         self._session_processes: list[list[SessionProcessWrapper]] = []
 
@@ -348,6 +349,19 @@ class TrainingEngine:
 
     @context_entry
     def __enter__(self):
+        if self._configurator.mode == "new":
+            for session_config in self._configurator.session_configs:
+                self.register_session(session_config)
+        elif self._configurator.mode == "extend":
+            self.load_session(
+                checkpoint_path=self._configurator.checkpoint_path,
+                session_update_params={"max_iterations": self._configurator.new_max_iters}
+            )
+        elif self._configurator.mode == "resume":
+            self.load_session(self._configurator.checkpoint_path)
+        else:
+            raise RuntimeError("Invalid mode!")
+
         return self
 
     @context_exit

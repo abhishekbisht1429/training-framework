@@ -120,9 +120,17 @@ def fake_mp(monkeypatch):
             self.exitcode = exitcode
 
     class FakeConfigurator:
+        def __init__(self):
+            self.session_configs = []
+
         @property
         def process_timeout_on_join(self):
             return 5.0
+
+        @property
+        def mode(self):
+            return "new"
+
     monkeypatch.setattr(sut, "Event", FakeEvent)
     monkeypatch.setattr(sut, "Process", FakeProcess)
     monkeypatch.setattr(sut, "Configurator", FakeConfigurator)
@@ -335,9 +343,9 @@ def test_register_session_assigns_ids_ranks_and_default_process_count(fake_mp):
 def test_start_all_starts_every_registered_worker_and_normal_exit_closes_them(
     fake_mp,
 ):
+    configurator = fake_mp.Configurator()
+    configurator.session_configs.append({"ddp": {"world_size": 2}})
     engine = sut.TrainingEngine(fake_mp.Configurator())
-    engine.register_session({})
-    engine.register_session({"ddp": {"world_size": 2}})
 
     with engine:
         engine.start_all()

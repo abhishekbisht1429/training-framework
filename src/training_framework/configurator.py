@@ -95,17 +95,21 @@ class Configurator:
         self._session_configs = None
         self._checkpoint_path = None
         self._new_max_iters = None
+        self._mode = None
 
         if self._args.config:
+            self._mode = "new"
             config = OmegaConf.load(self._args.config)
             if self._args.override is not None:
                 # cli_config = OmegaConf.from_dotlist(self._args.override)
                 config.merge_with_dotlist(self._args.override)
             self._session_configs = OmegaConf.to_container(config)['sessions']
         elif self._args.extend_session:
+            self._mode = "extend"
             self._checkpoint_path = self._args.extend_session[0]
             self._new_max_iters = int(self._args.extend_session[1])
         elif self._args.resume_session:
+            self._mode = "resume"
             self._checkpoint_path = self._args.resume_session
 
     def get_base_config(self, index):
@@ -140,19 +144,25 @@ class Configurator:
     @property
     def session_configs(self):
         if not self._session_configs:
-            raise KeyError("Cannot use this function in the current mode!")
+            raise KeyError("Cannot use this property in the current mode!")
         return deepcopy(self._session_configs)
 
-    def path_of_checkpoint_to_resume(self):
+    @property
+    def checkpoint_path(self):
         if not self._checkpoint_path:
-            raise KeyError("Cannot use this function in the current mode!")
+            raise KeyError("Cannot use this property in the current mode!")
         return self._checkpoint_path
 
+    @property
     def new_max_iters(self):
         if not self._new_max_iters:
-            raise KeyError("Cannot use this function in the current mode!")
+            raise KeyError("Cannot use this property in the current mode!")
         return self._new_max_iters
 
     @property
     def process_timeout_on_join(self):
         return self._args.process_timeout_on_join
+
+    @property
+    def mode(self):
+        return self._mode
