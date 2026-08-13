@@ -1,65 +1,102 @@
 import collections
+from torch import multiprocessing
 import signal
 import time
-from copy import deepcopy
-from multiprocessing import Event, Process
 from typing import Iterator
 
-from training_framework.builtin_components import Checkpointer
-from training_framework.configurator import create_session_from_config, create_session_from_checkpoint, Configurator
+from training_framework.builtin_components import Checkpointer, DDPResource
+from training_framework.configurator import Configurator
+from training_framework.training_session import TrainingSession
 from training_framework.util import context_entry, context_exit, requires_context
 
 
+def load_session_for_worker(session_state, rank, session_update_params: dict | None=None):
+    # session = Checkpointer.load_checkpoint(path=session)
+    # session = deepcopy(session)
+    session = TrainingSession.from_state(session_state)
+
+    if session_update_params is not None:
+        if "max_iterations" in session_update_params:
+            session.update_max_iters(session_update_params["max_iterations"])
+
+    if session.has_resource("ddp"):
+        placeholder_ddp_resource: DDPResource = session.get_resource("ddp")
+        ddp_resource = DDPResource(
+            config=placeholder_ddp_resource.config,
+            rank=rank
+        )
+        session.unregister_resource(placeholder_ddp_resource.name)
+        session.register_resource(ddp_resource)
+
+        # for processes with rank > 0, remove the non-parallel components (they should run only on rank 0)
+        if rank > 0:
+            parallel_components = set(ddp_resource.parallel_components + ["ddp"])
+            for hook in session.get_all_hooks():
+                if hook.name not in parallel_components:
+                    session.unregister_hook(hook.name)
+            for resource in session.get_all_resources():
+                if resource.name not in parallel_components:
+                    session.unregister_resource(resource.name)
+            for step in session.get_all_steps():
+                if step.name not in parallel_components:
+                    session.remove_step(step.name)
+
+    return session
+
+
 def session_process_worker(
-    worker_config: collections.abc.Mapping,
+    session_state,
     session_id: int,
     rank: int,
     stop_event,
+    **kwargs
 ) -> None:
     # The parent coordinates graceful interrupt handling.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    if "session_config" in worker_config and "checkpoint_path" in worker_config:
-        raise ValueError("session_config and checkpoint_path are mutually exclusive")
-    elif "session_config" in worker_config:
-        session = create_session_from_config(worker_config["session_config"], rank=rank)
-    elif "checkpoint_path" in worker_config:
-        session = create_session_from_checkpoint(
-            worker_config["checkpoint_path"],
-            session_update_params=worker_config["session_update_params"] if "session_update_params" in worker_config else None,
-            rank=rank
-        )
-    else:
-        raise ValueError(f"Invalid worker config: {worker_config}! One of 'session_config' or 'checkpoint_path' must be provided.")
-
+    session_update_params = kwargs["session_update_params"] if "session_update_params" in kwargs else None
+    # important so that model doesn't share the tensors between processes
+    session = load_session_for_worker(session_state, rank, session_update_params=session_update_params)
     with session:
-        while not stop_event.is_set():
-            try:
-                next(session)
-            except StopIteration:
-                break
+        try:
+            while not stop_event.is_set():
+                try:
+                    next(session)
+                except StopIteration:
+                    break
+        except KeyboardInterrupt:
+            print(f"Session {session_id}[{rank}] is interrupted.")
 
     print(f"Session {session_id}[{rank}] exiting.", flush=True)
 
 
 class SessionProcessWrapper:
-    def __init__(self, worker_config: dict, session_id: int, rank: int):
-        self._worker_config = deepcopy(worker_config)
+    def __init__(self,
+                 session: TrainingSession,
+                 session_id: int,
+                 rank: int,
+                 **kwargs
+                 ):
+        # self._worker_config = deepcopy(worker_config)
+        self._session = session
         self._session_id = session_id
         self._rank = rank
-        self._stop_event = Event()
-        self._started = False
 
-        self._session_process = Process(
+        ctx = multiprocessing.get_context("spawn")
+
+        self._stop_event = ctx.Event()
+        self._session_process = ctx.Process(
             name=f"training-session-{session_id}-rank-{rank}",
             target=session_process_worker,
             args=(
-                self._worker_config,
+                self._session.get_state(),
                 session_id,
                 rank,
-                self._stop_event,
+                self._stop_event
             ),
+            kwargs=kwargs
         )
+        self._started = False
 
     @property
     def session_id(self) -> int:
@@ -70,7 +107,7 @@ class SessionProcessWrapper:
         return self._rank
 
     @property
-    def process(self) -> Process:
+    def process(self):
         return self._session_process
 
     @property
@@ -105,22 +142,19 @@ class TrainingEngine:
         session_id = len(self._session_processes)
 
         # load checkpoint here to get ddp info
-        session = Checkpointer.load_checkpoint(path=checkpoint_path)
+        session = Checkpointer.load_checkpoint(checkpoint_path)
 
         if session.has_resource("ddp"):
             world_size = session.get_resource("ddp").world_size
         else:
             world_size = 1
 
-        worker_config = {
-            "checkpoint_path": checkpoint_path,
-            "session_update_params": session_update_params,
-        }
         wrappers = [
             SessionProcessWrapper(
-                worker_config=worker_config,
+                session=session,
                 session_id=session_id,
                 rank=rank,
+                session_update_params=session_update_params
             )
             for rank in range(world_size)
         ]
@@ -154,10 +188,11 @@ class TrainingEngine:
         ):
             raise ValueError("ddp.world_size must be a positive integer")
 
-        worker_config = { "session_config": config }
+        # worker_config = { "session_config": config }
         wrappers = [
             SessionProcessWrapper(
-                worker_config=worker_config,
+                session=TrainingSession(config),
+                # worker_config=worker_config,
                 session_id=session_id,
                 rank=rank,
             )
