@@ -24,6 +24,8 @@ from training_framework.training_session import (
     step, Stateful, SessionHook, LifecycleHook, Resource, Step,
 )
 
+from tests.test_utils import make_config
+
 
 class CriticalCheckpointAccumulatorStepBase(Step, Stateful):
     """A deterministic stateful step suitable for exact resume comparisons."""
@@ -50,22 +52,6 @@ class CriticalCheckpointAccumulatorStepBase(Step, Stateful):
     def set_state(self, state: Any) -> None:
         self.value = state["value"]
         self.history = list(state["history"])
-
-
-def make_config(
-    directory: Path,
-    *,
-    max_iterations: int = 6,
-    seed: int = 2026,
-) -> dict[str, Any]:
-    return {
-        "rng_seed": seed,
-        "sessions_dir": str(directory),
-        "max_iterations": max_iterations,
-        "device": "cpu",
-        "components_package": "training_framework.builtin_components"
-    }
-
 
 def run_to_completion(session: TrainingSession) -> list[int]:
     with session:

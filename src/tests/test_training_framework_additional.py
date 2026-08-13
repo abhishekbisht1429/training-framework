@@ -17,7 +17,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 import training_framework
-from training_framework.configurator import Configurator, create_session_from_config
+from training_framework.configurator import Configurator
 from training_framework.dataloader import InfiniteSampler
 from training_framework.training_engine import TrainingEngine
 from training_framework.training_session import (
@@ -143,31 +143,30 @@ class AdditionalHookBase(LifecycleHook, Stateful):
 
 
 @pytest.fixture
-def base_session_config(tmp_path):
+def minimal_session_config_1(tmp_path):
     return {
-        "max_iterations": 3,
-        "sessions_dir": str(tmp_path / "sessions"),
-        "device": "cpu",
-        "rng_seed": 7,
-        "components_package": "training_framework.builtin_components",
+        "base_config": {
+            "max_iterations": 3,
+            "sessions_dir": str(tmp_path / "sessions"),
+            "device": "cpu",
+            "rng_seed": 7,
+            "components_package": "training_framework.builtin_components",
+        }
     }
 
 
 @pytest.fixture
-def minimal_session_config(tmp_path):
+def minimal_session_config_2(tmp_path):
     return {
-        "max_iterations": 2,
-        "batch_size": 4,
-        "sessions_dir": str(tmp_path / "sessions"),
-        "device": "cpu",
-        "rng_seed": 11,
-        "components_package": "training_framework.builtin_components",
+        "base_config": {
+            "max_iterations": 2,
+            "batch_size": 4,
+            "sessions_dir": str(tmp_path / "sessions"),
+            "device": "cpu",
+            "rng_seed": 11,
+            "components_package": "training_framework.builtin_components",
+        }
     }
-
-
-@pytest.fixture
-def engine():
-    return TrainingEngine({})
 
 def _write_yaml(tmp_path: Path, data: dict, name: str = "config.yaml") -> str:
     path = tmp_path / name
@@ -210,29 +209,29 @@ def test_registry_decorators_register_classes_and_reject_duplicates():
                 pass
 
 
-def test_training_session_initialization_and_device_validation(minimal_session_config, monkeypatch):
-    session = TrainingSession(minimal_session_config)
+def test_training_session_initialization_and_device_validation(minimal_session_config_2, monkeypatch):
+    session = TrainingSession(minimal_session_config_2)
 
-    assert session.session_config.rng_seed == minimal_session_config["rng_seed"]
-    assert session.session_config.max_iterations == minimal_session_config["max_iterations"]
-    assert session.session_config.session_dir.startswith(minimal_session_config["sessions_dir"])
+    assert session.session_config.rng_seed == minimal_session_config_2["base_config"]["rng_seed"]
+    assert session.session_config.max_iterations == minimal_session_config_2["base_config"]["max_iterations"]
+    assert session.session_config.session_dir.startswith(minimal_session_config_2["base_config"]["sessions_dir"])
     assert session.device.type == "cpu"
     assert session._phase is SessionPhase.NEW
 
-    bad_device = deepcopy(minimal_session_config)
-    bad_device["device"] = "tpu"
+    bad_device = deepcopy(minimal_session_config_2)
+    bad_device["base_config"]["device"] = "tpu"
 
     assert TrainingSession(bad_device).device == torch.device("cpu")
 
-    unavailable_cuda = deepcopy(minimal_session_config)
-    unavailable_cuda["device"] = "cuda:0"
+    unavailable_cuda = deepcopy(minimal_session_config_2)
+    unavailable_cuda["base_config"]["device"] = "cuda:0"
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     assert TrainingSession(unavailable_cuda).device == torch.device("cpu")
 
 
-def test_requires_context_for_shared_state_and_iteration(minimal_session_config):
-    session = TrainingSession(minimal_session_config)
+def test_requires_context_for_shared_state_and_iteration(minimal_session_config_2):
+    session = TrainingSession(minimal_session_config_2)
 
     with pytest.raises(RuntimeError, match="Use within"):
         session.iteration_context["x"] = 1
@@ -244,7 +243,7 @@ def test_requires_context_for_shared_state_and_iteration(minimal_session_config)
         next(session)
 
 
-def test_registration_validation_and_lookup(minimal_session_config):
+def test_registration_validation_and_lookup(minimal_session_config_2):
     @step("test_additional_step")
     class AdditionalStep(AdditionalStepBase):
         pass
@@ -257,7 +256,7 @@ def test_registration_validation_and_lookup(minimal_session_config):
     class AdditionalHook(AdditionalHookBase):
         pass
 
-    session = TrainingSession(minimal_session_config)
+    session = TrainingSession(minimal_session_config_2)
 
     with pytest.raises(TypeError):
         session.add_step(object())
@@ -333,7 +332,7 @@ def test_registration_validation_and_lookup(minimal_session_config):
     assert len(session._hooks) == 1
     assert len(session._resources) == 1
 
-def test_context_lifecycle_and_iteration_order(base_session_config):
+def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
     @step("test_additional_step")
     class AdditionalStep(AdditionalStepBase):
         pass
@@ -384,7 +383,7 @@ def test_context_lifecycle_and_iteration_order(base_session_config):
         def set_state(self, state: Any) -> None:
             self.seen_losses = list(state["seen_losses"])
 
-    session = TrainingSession(base_session_config)
+    session = TrainingSession(minimal_session_config_1)
 
     # Each resource and hook has a distinct registered name.
     resource_a = AdditionalResourceA()
@@ -534,7 +533,7 @@ def test_context_lifecycle_and_iteration_order(base_session_config):
             for snapshot in test_hook.shared_snapshots
         )
 
-def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session_config):
+def test_state_round_trip_restores_nested_resources_steps_and_hooks(minimal_session_config_1):
     @step("test_additional_step")
     class AdditionalStep(AdditionalStepBase):
         pass
@@ -547,7 +546,7 @@ def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session
     class AdditionalHook(AdditionalHookBase):
         pass
 
-    session = TrainingSession(base_session_config)
+    session = TrainingSession(minimal_session_config_1)
     additional_resource = AdditionalResource()
     additional_hook = AdditionalHook(call_every=1)
     additional_step = AdditionalStep()
@@ -561,7 +560,7 @@ def test_state_round_trip_restores_nested_resources_steps_and_hooks(base_session
         next(session)
 
     state = session.get_state()
-    restored = TrainingSession(base_session_config)
+    restored = TrainingSession(minimal_session_config_1)
     restored.set_state(state)
 
     assert restored.iteration == session.iteration
@@ -683,7 +682,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     monkeypatch.setattr(sys, "argv", ["pytest", "--config", config_path])
 
     configurator = Configurator()
-    sessions = [create_session_from_config(config) for config in configurator.session_configs]
+    sessions = [TrainingSession(config) for config in configurator.session_configs]
 
     assert len(sessions) == 2
     assert len(sessions[0]._hooks) == 2

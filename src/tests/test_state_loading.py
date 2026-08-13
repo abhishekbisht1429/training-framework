@@ -2,24 +2,14 @@ import pickle
 import random
 
 import numpy as np
-import pytest
 import torch
 
+from tests.test_utils import make_config
 from training_framework.training_session import (
     TrainingSession,
     hook,
     resource,
-    step, Stateful, SessionHook, Resource, Step, StatefulResource, )
-
-
-def make_config(tmp_path, max_iterations=2, seed=123):
-    return {
-        "rng_seed": seed,
-        "sessions_dir": str(tmp_path),
-        "max_iterations": max_iterations,
-        "device": "cpu",
-        "components_package": "training_framework.builtin_components",
-    }
+    step, Stateful, SessionHook, Step, StatefulResource, )
 
 
 class BaseInheritedResource(StatefulResource):

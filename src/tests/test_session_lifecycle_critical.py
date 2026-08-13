@@ -19,7 +19,7 @@ from training_framework.training_session import (
     resource,
     step, LifecycleHook, Resource, Step,
 )
-
+from tests.test_utils import make_config
 
 class LifecycleSetupError(RuntimeError):
     pass
@@ -141,22 +141,6 @@ class TraceStepBase(Step):
         if self.fail:
             session.iteration_context["failure_marker"] = self.label
             raise LifecycleStepError(f"step {self.label} failed")
-
-
-def make_config(
-    directory: Path,
-    *,
-    max_iterations: int = 5,
-    seed: int = 123,
-) -> dict[str, Any]:
-    return {
-        "rng_seed": seed,
-        "sessions_dir": str(directory),
-        "max_iterations": max_iterations,
-        "device": "cpu",
-        "components_package": "training_framework.builtin_components",
-    }
-
 
 def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path):
 
