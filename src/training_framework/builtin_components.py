@@ -156,6 +156,8 @@ class DDPResource(Resource):
         self._backend = config['backend']
         self._rank = rank
         self._parallel_components = config['parallel_components'] if 'parallel_components' in config else []
+        self._master_addr = config['master_addr']
+        self._master_port = config['master_port']
 
     @property
     def backend(self):
@@ -179,8 +181,8 @@ class DDPResource(Resource):
 
     def setup(self, session: TrainingSession) -> Any:
         # Address and port where Rank 0 is hosted (must be reachable by all processes)
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12355"
+        os.environ["MASTER_ADDR"] = self._master_addr
+        os.environ["MASTER_PORT"] = self._master_port
 
         # Explicitly set the CUDA device for this process (1 process per GPU strategy)
         if self._backend == "nccl" and torch.cuda.is_available():
