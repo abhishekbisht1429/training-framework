@@ -645,15 +645,18 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             # 1. Run pre iteration methods
             for iter_hook in self._iteration_hooks:
                 if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
+                    self.send_heartbeat(f"Running {iter_hook.id}")
                     iter_hook.pre_iteration_callback(self)
 
             # 2. Run iteration components
             for step in self._sorted_steps:
+                self.send_heartbeat(f"Running {step.id}")
                 step.run(self)
 
             # 3. Run post iteration methods
             for iter_hook in reversed(self._iteration_hooks):
                 if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
+                    self.send_heartbeat(f"Running {iter_hook.id}")
                     iter_hook.post_iteration_callback(self)
 
             iteration_complete = True
@@ -673,6 +676,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # 1. Setup Resources
         try:
             for resource in self._sorted_resources:
+                self.send_heartbeat(f"Running setup {resource.id}")
                 resource.setup(self)
                 self._successfully_setup_hook_names.add(resource.name)
         except Exception as e:
@@ -680,22 +684,24 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
             for resource in reversed(self._sorted_resources):
                 if resource.name in self._successfully_setup_hook_names:
+                    self.send_heartbeat(f"Running teardown {resource.id} after exception")
                     resource.teardown(self)
 
             self._session_context.clear()
 
             raise
 
-
         # 2. Call Session Hooks
         try:
             for session_hook in self._session_hooks:
                 session_hook.setup(self)
+                self.send_heartbeat(f"Running setup {session_hook.id}")
                 self._successfully_setup_hook_names.add(session_hook.name)
         except Exception:
             print("Failed to setup session hooks!")
             for session_hook in reversed(self._session_hooks):
                 if session_hook.name in self._successfully_setup_hook_names:
+                    self.send_heartbeat(f"Running teardown {session_hook.id} after exception")
                     session_hook.teardown(self)
 
             self._session_context.clear()
@@ -713,6 +719,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             if resource.name not in self._successfully_setup_hook_names:
                 continue
             try:
+                self.send_heartbeat(f"Running teardown {resource.id}")
                 resource.teardown(self)
             except Exception as e:
                 print(f"Error releasing resource '{resource.id}': {e}")
@@ -722,6 +729,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             if session_hook.name not in self._successfully_setup_hook_names:
                 continue
             try:
+                self.send_heartbeat(f"Running teardown {session_hook.id}")
                 session_hook.teardown(self)
             except Exception as e:
                 print(f"Error running teardown '{session_hook.name}': {e}")
@@ -746,3 +754,12 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def set_dist_manager_err_conn(self, err_conn):
         self._dist_manager_err_conn = err_conn
+
+    def send_heartbeat(self, stage):
+        if self._dist_manager_err_conn is not None:
+            self._dist_manager_err_conn.send({
+                'type': 'heartbeat',
+                'pid': os.getpid(),
+                'iteration': self._iteration,
+                'stage': stage,
+            })
