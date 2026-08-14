@@ -328,6 +328,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # import all component modules
         import_all_modules(self._base_config['components_package'])
 
+        self._successfully_setup_resource_names = set()
+        self._successfully_setup_hook_names = set()
+
+        self._dist_manager_err_conn = None
+
         # self._order_of_components = topological_sort_of_components()
 
     @override
@@ -666,16 +671,16 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._raise_if_finished()
 
         # 1. Setup Resources
-        successful_resource_setups = []
         try:
             for resource in self._sorted_resources:
                 resource.setup(self)
-                successful_resource_setups.append(resource)
+                self._successfully_setup_hook_names.add(resource.name)
         except Exception as e:
             print("Failed to setup resources!")
 
-            for resource in reversed(successful_resource_setups):
-                resource.teardown(self)
+            for resource in reversed(self._sorted_resources):
+                if resource.name in self._successfully_setup_hook_names:
+                    resource.teardown(self)
 
             self._session_context.clear()
 
@@ -683,19 +688,19 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
 
         # 2. Call Session Hooks
-        successful_hook_setups = []
         try:
             for session_hook in self._session_hooks:
                 session_hook.setup(self)
+                self._successfully_setup_hook_names.add(session_hook.name)
         except Exception:
-            print("Falied to setup session hooks!")
-            for session_hook in reversed(successful_hook_setups):
-                session_hook.teardown(self)
+            print("Failed to setup session hooks!")
+            for session_hook in reversed(self._session_hooks):
+                if session_hook.name in self._successfully_setup_hook_names:
+                    session_hook.teardown(self)
 
             self._session_context.clear()
 
             raise
-
 
         # 3. Update Phase to READY
         self._phase = SessionPhase.READY
@@ -705,6 +710,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def __exit__(self, exc_type, exc_val, exc_tb):
         # 1. Clean up in reverse order of acquisition to respect dependencies
         for resource in reversed(self._sorted_resources):
+            if resource.name not in self._successfully_setup_hook_names:
+                continue
             try:
                 resource.teardown(self)
             except Exception as e:
@@ -712,6 +719,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         # 2. Call session teardown hooks
         for session_hook in reversed(self._session_hooks):
+            if session_hook.name not in self._successfully_setup_hook_names:
+                continue
             try:
                 session_hook.teardown(self)
             except Exception as e:
@@ -734,3 +743,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             session_dir=self.session_config.session_dir,
             max_iterations=new_max_iters
         )
+
+    def set_dist_manager_err_conn(self, err_conn):
+        self._dist_manager_err_conn = err_conn
