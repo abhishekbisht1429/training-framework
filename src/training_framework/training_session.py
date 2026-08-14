@@ -1,5 +1,6 @@
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 from copy import deepcopy
@@ -332,6 +333,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._successfully_setup_hook_names = set()
 
         self._dist_manager_err_conn = None
+        self._heartbeat_interval = None
+        self._last_heartbeat_time = 0.0
 
         # self._order_of_components = topological_sort_of_components()
 
@@ -755,11 +758,16 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def set_dist_manager_err_conn(self, err_conn):
         self._dist_manager_err_conn = err_conn
 
+    def set_heartbeat_interval(self, interval):
+        self._heartbeat_interval = interval
+
     def send_heartbeat(self, stage):
         if self._dist_manager_err_conn is not None:
-            self._dist_manager_err_conn.send({
-                'type': 'heartbeat',
-                'pid': os.getpid(),
-                'iteration': self._iteration,
-                'stage': stage,
-            })
+            if (time.monotonic() - self._last_heartbeat_time) >= self._heartbeat_interval:
+                self._dist_manager_err_conn.send({
+                    'type': 'heartbeat',
+                    'pid': os.getpid(),
+                    'iteration': self._iteration,
+                    'stage': stage,
+                })
+                self._last_heartbeat_time = time.monotonic()
