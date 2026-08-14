@@ -121,10 +121,10 @@ def test_engine_surfaces_a_real_spawned_worker_failure(tmp_path):
 
     with pytest.raises(
         RuntimeError,
-        match=r"training workers failed: session=0, rank=0, exitcode=",
+        match=r"Worker pid=.* failed:",
     ):
         with TrainingEngine(engine_config) as engine:
-            engine.start_all()
+            engine.start_session()
 
 
 def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_path):

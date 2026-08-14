@@ -58,7 +58,7 @@ def test_extend_mode_matches_uninterrupted_training_through_checkpoint_and_spawn
         new_max_iters=6,
     )
     with TrainingEngine(engine_config) as engine:
-        engine.start_all()
+        engine.start_session()
 
     events = iteration_events(extended_path)
     assert [event["iteration"] for event in events] == [1, 2, 3, 4, 5, 6]
