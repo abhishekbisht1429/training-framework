@@ -1,7 +1,5 @@
 import os
 import random
-import time
-import traceback
 from abc import ABC, abstractmethod
 from collections import deque
 from copy import deepcopy
@@ -12,8 +10,6 @@ from typing import Any, override, List
 
 import numpy as np
 import torch
-import yaml
-
 from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta, import_all_modules
 
 
@@ -261,18 +257,6 @@ def topological_sort_of_components():
 
     return index_of_component
 
-@hook("config_dumper")
-class ConfigDumper(SessionHook):
-
-    def setup(self, session: "TrainingSession") -> Any:
-        session_dir = session.session_config.session_dir
-        config_dump_path = os.path.join(session_dir, "config.yaml")
-        with open(config_dump_path, "w") as f:
-            yaml.safe_dump(session.full_config, f)
-
-    def teardown(self, session: "TrainingSession"):
-        pass
-
 class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def __init__(self, config: dict):
@@ -311,15 +295,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._register_components()
 
-        # dump config
-        # TODO: move it to an internal hook later (modify registry clearance in tests so that internal components remain)
-        ddp_res = self.get_resource('ddp') if self.has_resource('ddp') else None
-        if ddp_res is None or ddp_res.rank == 0:
-            os.makedirs(self.session_config.session_dir, exist_ok=True)
-            config_dump_path = os.path.join(self.session_config.session_dir, "config.yaml")
-            with open(config_dump_path, "w") as f:
-                yaml.safe_dump(self.full_config, f)
-
     def _register_components(self):
         for name in self._config.keys():
             if name in ["base_config"]:
@@ -357,8 +332,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._successfully_setup_hook_names = set()
 
         self._dist_manager_err_conn = None
-        self._heartbeat_interval = None
-        self._last_heartbeat_time = 0.0
+
+        # self._order_of_components = topological_sort_of_components()
 
     @override
     def get_state(self):
@@ -465,10 +440,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         return obj
 
     # --------------------------- Public properties----------------------
-    @property
-    def full_config(self):
-        return deepcopy(self._config)
-
     @property
     def session_config(self) -> SessionConfig:
         return self._session_config
@@ -674,18 +645,15 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             # 1. Run pre iteration methods
             for iter_hook in self._iteration_hooks:
                 if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
-                    self.send_heartbeat(f"Running {iter_hook.id}")
                     iter_hook.pre_iteration_callback(self)
 
             # 2. Run iteration components
             for step in self._sorted_steps:
-                self.send_heartbeat(f"Running {step.id}")
                 step.run(self)
 
             # 3. Run post iteration methods
             for iter_hook in reversed(self._iteration_hooks):
                 if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
-                    self.send_heartbeat(f"Running {iter_hook.id}")
                     iter_hook.post_iteration_callback(self)
 
             iteration_complete = True
@@ -705,7 +673,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # 1. Setup Resources
         try:
             for resource in self._sorted_resources:
-                self.send_heartbeat(f"Running setup {resource.id}")
                 resource.setup(self)
                 self._successfully_setup_hook_names.add(resource.name)
         except Exception as e:
@@ -713,24 +680,22 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
             for resource in reversed(self._sorted_resources):
                 if resource.name in self._successfully_setup_hook_names:
-                    self.send_heartbeat(f"Running teardown {resource.id} after exception")
                     resource.teardown(self)
 
             self._session_context.clear()
 
             raise
 
+
         # 2. Call Session Hooks
         try:
             for session_hook in self._session_hooks:
                 session_hook.setup(self)
-                self.send_heartbeat(f"Running setup {session_hook.id}")
                 self._successfully_setup_hook_names.add(session_hook.name)
         except Exception:
             print("Failed to setup session hooks!")
             for session_hook in reversed(self._session_hooks):
                 if session_hook.name in self._successfully_setup_hook_names:
-                    self.send_heartbeat(f"Running teardown {session_hook.id} after exception")
                     session_hook.teardown(self)
 
             self._session_context.clear()
@@ -743,23 +708,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._dist_manager_err_conn is not None and exc_type is not None:
-            # 0. Send message to manager if an error occurred so that in case cleaning up resources freezes this process
-            self._dist_manager_err_conn.send({
-                'type': 'error',
-                "rank": self.get_resource('ddp').rank,
-                "pid": os.getpid(),
-                "exception_type": str(exc_type),
-                "message": str(exc_val),
-                "traceback": traceback.format_exc(),
-            })
-
         # 1. Clean up in reverse order of acquisition to respect dependencies
         for resource in reversed(self._sorted_resources):
             if resource.name not in self._successfully_setup_hook_names:
                 continue
             try:
-                self.send_heartbeat(f"Running teardown {resource.id}")
                 resource.teardown(self)
             except Exception as e:
                 print(f"Error releasing resource '{resource.id}': {e}")
@@ -769,7 +722,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             if session_hook.name not in self._successfully_setup_hook_names:
                 continue
             try:
-                self.send_heartbeat(f"Running teardown {session_hook.id}")
                 session_hook.teardown(self)
             except Exception as e:
                 print(f"Error running teardown '{session_hook.name}': {e}")
@@ -794,17 +746,3 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def set_dist_manager_err_conn(self, err_conn):
         self._dist_manager_err_conn = err_conn
-
-    def set_heartbeat_interval(self, interval):
-        self._heartbeat_interval = interval
-
-    def send_heartbeat(self, stage):
-        if self._dist_manager_err_conn is not None:
-            if (time.monotonic() - self._last_heartbeat_time) >= self._heartbeat_interval:
-                self._dist_manager_err_conn.send({
-                    'type': 'heartbeat',
-                    'pid': os.getpid(),
-                    'iteration': self._iteration,
-                    'stage': stage,
-                })
-                self._last_heartbeat_time = time.monotonic()
