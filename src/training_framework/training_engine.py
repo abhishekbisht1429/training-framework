@@ -471,71 +471,73 @@ class TrainingEngine:
                     waitables[wrapper.error_conn] = ("connection", wrapper)
                     waitables[wrapper.process.sentinel] = ("sentinel", wrapper)
 
-                while waitables:
-                    ready = wait(waitables)
+                try:
+                    while waitables:
+                        ready = wait(waitables)
 
-                    for key in ready:
-                        entry = waitables.get(key)
-                        if entry is None:
-                            continue
+                        for key in ready:
+                            entry = waitables.get(key)
+                            if entry is None:
+                                continue
 
-                        waitable_type, wrapper = entry
+                            waitable_type, wrapper = entry
 
-                        if waitable_type == "connection":
+                            if waitable_type == "connection":
+                                waitables.pop(key)
+
+                                # Connection may be ready because of a message or EOF.
+                                try:
+                                    errors[wrapper] = key.recv()
+                                except EOFError:
+                                    pass
+                                finally:
+                                    key.close()
+
+                                continue
+
                             waitables.pop(key)
+                            process = wrapper.process
 
-                            # Connection may be ready because of a message or EOF.
-                            try:
-                                errors[wrapper] = key.recv()
-                            except EOFError:
-                                pass
-                            finally:
-                                key.close()
+                            # Sentinel is ready, so join should return immediately.
+                            process.join()
 
-                            continue
+                            if process.exitcode == 0:
+                                waitables.pop(wrapper.error_conn, None)
+                                if not wrapper.error_conn.closed:
+                                    wrapper.error_conn.close()
+                                continue
 
-                        waitables.pop(key)
-                        process = wrapper.process
+                            # Try to recover worker-side exception details.
+                            error = errors.get(wrapper)
 
-                        # Sentinel is ready, so join should return immediately.
-                        process.join()
+                            if error is None and not wrapper.error_conn.closed:
+                                try:
+                                    if wrapper.error_conn.poll():
+                                        error = wrapper.error_conn.recv()
+                                except EOFError:
+                                    pass
 
-                        if process.exitcode == 0:
-                            waitables.pop(wrapper.error_conn, None)
-                            if not wrapper.error_conn.closed:
-                                wrapper.error_conn.close()
-                            continue
+                            # One worker failed; remaining workers may be blocked on it.
+                            for other in self._session_process_wrappers:
+                                if other.process is not process and other.process.is_alive():
+                                    other.process.terminate()
 
-                        # Try to recover worker-side exception details.
-                        error = errors.get(wrapper)
+                            # Reap all worker processes.
+                            for other in self._session_process_wrappers:
+                                if other.process.pid is not None:
+                                    other.process.join()
 
-                        if error is None and not wrapper.error_conn.closed:
-                            try:
-                                if wrapper.error_conn.poll():
-                                    error = wrapper.error_conn.recv()
-                            except EOFError:
-                                pass
+                            if error is not None:
+                                raise RuntimeError(
+                                    f"Worker pid={process.pid} failed:\n{error}"
+                                )
 
-                        # One worker failed; remaining workers may be blocked on it.
-                        for other in self._session_process_wrappers:
-                            if other.process is not process and other.process.is_alive():
-                                other.process.terminate()
-
-                        # Reap all worker processes.
-                        for other in self._session_process_wrappers:
-                            if other.process.pid is not None:
-                                other.process.join()
-
-                        if error is not None:
                             raise RuntimeError(
-                                f"Worker pid={process.pid} failed:\n{error}"
+                                f"Worker pid={process.pid} failed with "
+                                f"exit code {process.exitcode}"
                             )
-
-                        raise RuntimeError(
-                            f"Worker pid={process.pid} failed with "
-                            f"exit code {process.exitcode}"
-                        )
-
+                except KeyboardInterrupt:
+                    self._join_or_terminate(self._session_process_wrappers, timeout=self._timeout_on_interrupt)
             else:
                 # Parent failed, so stop all workers.
                 self.request_stop_all()
