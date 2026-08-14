@@ -28,6 +28,7 @@ class _EngineConfig:
     session_configs: tuple[dict[str, Any], ...] = ()
     checkpoint_path: str | None = None
     new_max_iters: int | None = None
+    heartbeat_timeout: float = 10.0
 
 
 def _training_step(session: TrainingSession):

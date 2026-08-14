@@ -23,6 +23,7 @@ class _ExtendConfig:
     mode: str = "extend"
     process_timeout_on_join: float = 5.0
     session_configs: tuple[dict[str, Any], ...] = ()
+    heartbeat_timeout: float = 10.0
 
 
 def _training_step(session: TrainingSession):
