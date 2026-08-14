@@ -75,7 +75,7 @@ def test_spawned_worker_reconstructs_paused_state_and_continues_exactly(tmp_path
         assert next(paused) == 2
 
     parent_history = list(_training_step(paused).weight_history)
-    wrapper = SessionProcessWrapper(paused, session_id=0, rank=0)
+    wrapper = SessionProcessWrapper(paused, session_id=0, rank=0, heartbeat_timeout=30.0)
     assert _join_spawned_wrapper(wrapper) == 0
 
     resumed_iterations = iteration_events(resumed_path)

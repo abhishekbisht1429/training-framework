@@ -62,6 +62,7 @@ def session_process_worker(
         session_update_params = kwargs["session_update_params"] if "session_update_params" in kwargs else None
         # important so that model doesn't share the tensors between processes
         session = load_session_for_worker(session_state, rank, session_update_params=session_update_params)
+        session.set_heartbeat_interval(kwargs["heartbeat_timeout"] / 3.0)
         with session:
             try:
                 while not stop_event.is_set():
@@ -132,7 +133,7 @@ class SessionProcessWrapper:
         )
         self._started = False
 
-        self._heartbeat_timeout = kwargs.get("heartbeat_timeout", 10.0)
+        self._heartbeat_timeout = kwargs['heartbeat_timeout']
         self._deadline = time.monotonic() + self._heartbeat_timeout
 
     # @property
@@ -486,32 +487,26 @@ class TrainingEngine:
 
                 try:
                     while waitables and failure is None:
-                        active = [
-                            wrapper
-                            for waitable_type, wrapper in waitables.values()
+                        active = [ wrapper for waitable_type, wrapper in waitables.values()
                             if waitable_type == "sentinel"
                         ]
                         if not active:
                             break
 
-                        timeout = max(
-                            0.0,
-                            min(wrapper.deadline for wrapper in active)
-                            - time.monotonic(),
-                        )
+                        timeout = max(0.0, min(wrapper.deadline for wrapper in active) - time.monotonic())
                         ready = wait(waitables, timeout=timeout)
 
                         if not ready:
+                            # wait timed out
                             now = time.monotonic()
-                            timed_out = [
+                            timed_out_wrappers = [
                                 wrapper
                                 for wrapper in active
-                                if wrapper.deadline <= now
-                                   and wrapper.process.is_alive()
+                                if wrapper.deadline <= now and wrapper.process.is_alive()
                             ]
-                            if timed_out:
+                            if timed_out_wrappers:
                                 wrapper = min(
-                                    timed_out,
+                                    timed_out_wrappers,
                                     key=lambda item: item.deadline,
                                 )
                                 failure = TimeoutError(
@@ -522,9 +517,7 @@ class TrainingEngine:
                             continue
 
                         # Read messages before handling process exits.
-                        ready.sort(
-                            key=lambda key: waitables[key][0] == "sentinel"
-                        )
+                        ready.sort(key=lambda key: waitables[key][0] == "sentinel")
 
                         for key in ready:
                             entry = waitables.get(key)
@@ -605,6 +598,7 @@ class TrainingEngine:
                             break
 
                     if failure is not None:
+                        print(failure)
                         # Allow graceful cleanup, then terminate stuck workers.
                         self.request_stop_all()
                         self._join_or_terminate(
