@@ -578,6 +578,8 @@ class TrainingEngine:
                                     continue
 
                                 if message.get('type', None) == 'heartbeat':
+                                    print(f'Heartbeat {message}')
+                                    print(f'Reset deadline for rank {wrapper.rank}')
                                     wrapper.reset_deadline()
                                     continue
                                 else:
@@ -624,43 +626,6 @@ class TrainingEngine:
                 )
         finally:
             self._close_resources()
-
-        # interrupted_during_join = False
-        #
-        # try:
-        #     if exc_type is not None:
-        #         # Preserve and propagate the original context-body exception,
-        #         # but stop children first.
-        #         self.request_stop_all()
-        #         self._join_or_terminate(timeout=self._timeout_on_interrupt)
-        #     else:
-        #         try:
-        #             # Normal behavior: wait for finite training to finish.
-        #
-        #             for wrapper in self._iter_wrappers():
-        #                 if wrapper.started:
-        #                     wrapper.join()
-        #
-        #             while self._sentinels:
-        #                 ready = wait(self._sentinels)
-        #
-        #                 for sentinel in ready:
-        #
-        #
-        #
-        #         except KeyboardInterrupt:
-        #             interrupted_during_join = True
-        #             self.request_stop_all()
-        #             self._join_or_terminate(timeout=self._timeout_on_interrupt)
-        #
-        #     if exc_type is None and not interrupted_during_join:
-        #         self._raise_worker_failures()
-        #
-        # finally:
-        #     self._close_resources()
-        #
-        # if interrupted_during_join:
-        #     raise KeyboardInterrupt
 
         # Never suppress an exception from the with block.
         return False
