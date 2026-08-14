@@ -666,12 +666,36 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._raise_if_finished()
 
         # 1. Setup Resources
-        for resource in self._sorted_resources:
-            resource.setup(self)
+        successful_resource_setups = []
+        try:
+            for resource in self._sorted_resources:
+                resource.setup(self)
+                successful_resource_setups.append(resource)
+        except Exception as e:
+            print("Failed to setup resources!")
+
+            for resource in reversed(successful_resource_setups):
+                resource.teardown(self)
+
+            self._session_context.clear()
+
+            raise
+
 
         # 2. Call Session Hooks
-        for session_hook in self._session_hooks:
-            session_hook.setup(self)
+        successful_hook_setups = []
+        try:
+            for session_hook in self._session_hooks:
+                session_hook.setup(self)
+        except Exception:
+            print("Falied to setup session hooks!")
+            for session_hook in reversed(successful_hook_setups):
+                session_hook.teardown(self)
+
+            self._session_context.clear()
+
+            raise
+
 
         # 3. Update Phase to READY
         self._phase = SessionPhase.READY

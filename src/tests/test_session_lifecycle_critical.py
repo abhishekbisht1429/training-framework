@@ -428,13 +428,6 @@ def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "If __enter__ fails, Python does not call __exit__; TrainingSession "
-        "currently does not roll back resources that were already set up."
-    ),
-)
 def test_partial_setup_failure_rolls_back_initialized_resources(tmp_path):
 
     @resource("critical_lifecycle_resource_a")
