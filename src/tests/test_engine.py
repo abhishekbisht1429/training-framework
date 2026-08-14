@@ -143,6 +143,8 @@ def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_p
             "world_size": 2,
             "backend": "gloo",
             "parallel_components": ["it_3d45_model", "it_3d45_train"],
+            "master_addr": "localhost",
+            "master_port": "12355"
         },
         "it_3d45_model": {},
         "it_3d45_train": {},
