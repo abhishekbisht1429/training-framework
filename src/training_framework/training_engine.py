@@ -57,7 +57,7 @@ def session_process_worker(
     **kwargs
 ) -> None:
     # The parent coordinates graceful interrupt handling.
-    # signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         session_update_params = kwargs["session_update_params"] if "session_update_params" in kwargs else None
         # important so that model doesn't share the tensors between processes
@@ -65,15 +65,15 @@ def session_process_worker(
         session.set_dist_manager_err_conn(error_conn)
         session.set_heartbeat_interval(kwargs["heartbeat_timeout"] / 3.0)
         with session:
-            try:
-                while not stop_event.is_set():
-                    try:
-                        next(session)
-                    except StopIteration:
-                        break
-            except KeyboardInterrupt:
-                # print(f"Session {session_id}[{rank}] is interrupted.")
-                print(f"Session rank[{rank}] is interrupted.")
+            # try:
+            while not stop_event.is_set():
+                try:
+                    next(session)
+                except StopIteration:
+                    break
+            # except KeyboardInterrupt:
+            #     # print(f"Session {session_id}[{rank}] is interrupted.")
+            #     print(f"Session rank[{rank}] is interrupted.")
 
         # print(f"Session {session_id}[{rank}] exiting.", flush=True)
     except BaseException as exc:
