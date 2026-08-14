@@ -57,30 +57,27 @@ def session_process_worker(
     **kwargs
 ) -> None:
     # The parent coordinates graceful interrupt handling.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         session_update_params = kwargs["session_update_params"] if "session_update_params" in kwargs else None
         # important so that model doesn't share the tensors between processes
         session = load_session_for_worker(session_state, rank, session_update_params=session_update_params)
-        session.set_dist_manager_err_conn(error_conn)
-        session.set_heartbeat_interval(10.0)
         with session:
-            # try:
-            while not stop_event.is_set():
-                try:
-                    next(session)
-                except StopIteration:
-                    break
-            # except KeyboardInterrupt:
-            #     # print(f"Session {session_id}[{rank}] is interrupted.")
-            #     print(f"Session rank[{rank}] is interrupted.")
+            try:
+                while not stop_event.is_set():
+                    try:
+                        next(session)
+                    except StopIteration:
+                        break
+            except KeyboardInterrupt:
+                # print(f"Session {session_id}[{rank}] is interrupted.")
+                print(f"Session rank[{rank}] is interrupted.")
 
         # print(f"Session {session_id}[{rank}] exiting.", flush=True)
     except BaseException as exc:
         try:
             error_conn.send(
                 {
-                    'type': 'error',
                     "rank": rank,
                     "pid": os.getpid(),
                     "exception_type": (
@@ -134,9 +131,6 @@ class SessionProcessWrapper:
         )
         self._started = False
 
-        self._heartbeat_timeout = kwargs['heartbeat_timeout']
-        self._deadline = time.monotonic() + self._heartbeat_timeout
-
     # @property
     # def session_id(self) -> int:
     #     return self._session_id
@@ -155,13 +149,6 @@ class SessionProcessWrapper:
     @property
     def started(self) -> bool:
         return self._started
-
-    @property
-    def deadline(self) -> float:
-        return self._deadline
-
-    def reset_deadline(self):
-        self._deadline = time.monotonic() + self._heartbeat_timeout
 
     def start(self) -> None:
         if self._started:
@@ -220,8 +207,7 @@ class TrainingEngine:
                 session=session,
                 # session_id=session_id,
                 rank=rank,
-                session_update_params=session_update_params,
-                heartbeat_timeout=self._configurator.heartbeat_timeout
+                session_update_params=session_update_params
             )
             for rank in range(world_size)
         ]
@@ -263,7 +249,6 @@ class TrainingEngine:
                 # worker_config=worker_config,
                 # session_id=session_id,
                 rank=rank,
-                heartbeat_timeout=self._configurator.heartbeat_timeout
             )
             for rank in range(world_size)
         ]
@@ -297,7 +282,12 @@ class TrainingEngine:
             if wrapper.started:
                 wrapper.request_stop()
 
-    def _join_or_terminate(self, wrappers: list[SessionProcessWrapper] | None = None, timeout: float=5.0) -> None:
+    def _join_or_terminate(
+            self,
+            wrappers: list[SessionProcessWrapper] | None = None,
+            *,
+            timeout: float,
+    ) -> None:
         selected = (
             wrappers
             if wrappers is not None
@@ -469,141 +459,128 @@ class TrainingEngine:
 
         return self
 
-    def _process_ready_waitables(self, waitables, ready_waitables):
-        # Read messages before handling process exits.
-        failure = None
-
-        ready_waitables.sort(key=lambda key: waitables[key][0] == "sentinel")
-
-        for ready_waitable in ready_waitables:
-            entry = waitables.get(ready_waitable)
-            if entry is None:
-                continue
-
-            ready_waitable_type, wrapper = entry
-
-            if ready_waitable_type == "connection":
-                # handle connection waitable
-                try:
-                    message = ready_waitable.recv()
-                    if isinstance(message, dict):
-                        if message.get('type', None) == 'heartbeat':
-                            print(f"Heartbeat received from Process rank {wrapper.rank}. - {message}")
-                            wrapper.reset_deadline()
-                        else:
-                            # treat all messages other than heartbeat as errors
-                            waitables.pop(ready_waitable, None)
-                            ready_waitable.close()
-                            failure = RuntimeError(
-                                f"Worker pid={wrapper.process.pid} failed:\n"
-                                f"{message}"
-                            )
-                    else:
-                        print(f"Unknown message type received! {message}")
-                except EOFError:
-                    waitables.pop(ready_waitable, None)
-                    ready_waitable.close()
-            elif ready_waitable_type == "sentinel":
-                # handle sentinel waitables
-                waitables.pop(ready_waitable, None)
-                # Sentinel is ready, so join returns immediately.
-                wrapper.process.join()
-
-                if wrapper.process.exitcode != 0:
-                    # Drain any queued error after an abnormal exit.
-                    while not wrapper.error_conn.closed and wrapper.error_conn.poll():
-                        try:
-                            message = wrapper.error_conn.recv()
-                        except EOFError:
-                            break
-
-                        # get the last error message sent
-                        if message.get('type', None) == 'error':
-                            failure = RuntimeError(
-                                f"Worker pid={wrapper.process.pid} failed:\n{message}"
-                                if message is not None
-                                else (
-                                    f"Worker pid={wrapper.process.pid} failed with "
-                                    f"exit code {wrapper.process.exitcode}"
-                                )
-                            )
-                # remove the connection for this process from waitables as it is already finished.
-                waitables.pop(wrapper.error_conn, None)
-                if not wrapper.error_conn.closed:
-                    wrapper.error_conn.close()
-            else:
-                raise RuntimeError("Unknown ready waitable type!")
-
-        return failure
-
-    def _monitor_processes(self):
-        waitables = {}
-
-        # Watch worker messages and process termination.
-        for wrapper in self._session_process_wrappers:
-            waitables[wrapper.error_conn] = ("connection", wrapper)
-            waitables[wrapper.process.sentinel] = ("sentinel", wrapper)
-
-        failure = None
-        interrupted = False
-        try:
-            while waitables:
-                if failure:
-                    break
-
-                active = [wrapper for waitable_type, wrapper in waitables.values() if waitable_type == "sentinel"]
-                if not active:
-                    break
-
-                timeout = max(0.0, min(wrapper.deadline for wrapper in active) - time.monotonic())
-                ready = wait(waitables, timeout=timeout)
-
-                if ready:
-                    failure = self._process_ready_waitables(waitables, ready)
-
-                now = time.monotonic()
-                timed_out_wrappers = [
-                    wrapper
-                    for wrapper in active
-                    if wrapper.deadline <= now and wrapper.process.is_alive()
-                ]
-                if timed_out_wrappers:
-                    # wait timed out
-                    wrapper = min(
-                        timed_out_wrappers,
-                        key=lambda item: item.deadline,
-                    )
-                    failure = TimeoutError(
-                        f"Worker pid={wrapper.process.pid} missed its "
-                        f"heartbeat deadline by "
-                        f"{now - wrapper.deadline:.1f}s"
-                    )
-        except KeyboardInterrupt:
-            print("Interrupted!")
-            interrupted = True
-
-        if interrupted or failure:
-            self.request_stop_all()
-            active = [wrapper for waitable_type, wrapper in waitables.values() if waitable_type == "sentinel"]
-            self._join_or_terminate(active, timeout=self._configurator.process_timeout_on_join)
-
-        if failure:
-            raise failure
-
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             if exc_type is None:
-                self._monitor_processes()
+                waitables = {}
+                errors = {}
+
+                # Watch both worker termination and error pipes.
+                for wrapper in self._session_process_wrappers:
+                    waitables[wrapper.error_conn] = ("connection", wrapper)
+                    waitables[wrapper.process.sentinel] = ("sentinel", wrapper)
+
+                while waitables:
+                    ready = wait(waitables)
+
+                    for key in ready:
+                        entry = waitables.get(key)
+                        if entry is None:
+                            continue
+
+                        waitable_type, wrapper = entry
+
+                        if waitable_type == "connection":
+                            waitables.pop(key)
+
+                            # Connection may be ready because of a message or EOF.
+                            try:
+                                errors[wrapper] = key.recv()
+                            except EOFError:
+                                pass
+                            finally:
+                                key.close()
+
+                            continue
+
+                        waitables.pop(key)
+                        process = wrapper.process
+
+                        # Sentinel is ready, so join should return immediately.
+                        process.join()
+
+                        if process.exitcode == 0:
+                            waitables.pop(wrapper.error_conn, None)
+                            if not wrapper.error_conn.closed:
+                                wrapper.error_conn.close()
+                            continue
+
+                        # Try to recover worker-side exception details.
+                        error = errors.get(wrapper)
+
+                        if error is None and not wrapper.error_conn.closed:
+                            try:
+                                if wrapper.error_conn.poll():
+                                    error = wrapper.error_conn.recv()
+                            except EOFError:
+                                pass
+
+                        # One worker failed; remaining workers may be blocked on it.
+                        for other in self._session_process_wrappers:
+                            if other.process is not process and other.process.is_alive():
+                                other.process.terminate()
+
+                        # Reap all worker processes.
+                        for other in self._session_process_wrappers:
+                            if other.process.pid is not None:
+                                other.process.join()
+
+                        if error is not None:
+                            raise RuntimeError(
+                                f"Worker pid={process.pid} failed:\n{error}"
+                            )
+
+                        raise RuntimeError(
+                            f"Worker pid={process.pid} failed with "
+                            f"exit code {process.exitcode}"
+                        )
+
             else:
-                # The parent failed, so stop all workers.
+                # Parent failed, so stop all workers.
                 self.request_stop_all()
-                self._join_or_terminate(
-                    self._session_process_wrappers,
-                    timeout=self._timeout_on_interrupt,
-                )
+
+                self._join_or_terminate(self._session_process_wrappers, timeout=self._timeout_on_interrupt)
+
         finally:
             self._close_resources()
+
+        # interrupted_during_join = False
+        #
+        # try:
+        #     if exc_type is not None:
+        #         # Preserve and propagate the original context-body exception,
+        #         # but stop children first.
+        #         self.request_stop_all()
+        #         self._join_or_terminate(timeout=self._timeout_on_interrupt)
+        #     else:
+        #         try:
+        #             # Normal behavior: wait for finite training to finish.
+        #
+        #             for wrapper in self._iter_wrappers():
+        #                 if wrapper.started:
+        #                     wrapper.join()
+        #
+        #             while self._sentinels:
+        #                 ready = wait(self._sentinels)
+        #
+        #                 for sentinel in ready:
+        #
+        #
+        #
+        #         except KeyboardInterrupt:
+        #             interrupted_during_join = True
+        #             self.request_stop_all()
+        #             self._join_or_terminate(timeout=self._timeout_on_interrupt)
+        #
+        #     if exc_type is None and not interrupted_during_join:
+        #         self._raise_worker_failures()
+        #
+        # finally:
+        #     self._close_resources()
+        #
+        # if interrupted_during_join:
+        #     raise KeyboardInterrupt
 
         # Never suppress an exception from the with block.
         return False
