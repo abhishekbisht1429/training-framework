@@ -482,7 +482,7 @@ class TrainingEngine:
         while waitables:
             if failure:
                 break
-            elif interrupt_time and (time.monotonic() - interrupt_time) > self._wait_time_after_interrupt:
+            elif interrupt_time and (time.monotonic() - interrupt_time) > self._configurator.wait_time_after_interrupt:
                 break
 
             try:
@@ -580,7 +580,7 @@ class TrainingEngine:
 
         if interrupt_time:
             active = [wrapper for waitable_type, wrapper in waitables.values() if waitable_type == "sentinel"]
-            self._join_or_terminate(active)
+            self._join_or_terminate(active, timeout=self._configurator.process_timeout_on_join)
 
 
         return failure
