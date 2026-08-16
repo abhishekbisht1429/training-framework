@@ -11,6 +11,8 @@ from typing import Any, override, List
 
 import numpy as np
 import torch
+import yaml
+
 from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta, import_all_modules
 
 
@@ -258,6 +260,18 @@ def topological_sort_of_components():
 
     return index_of_component
 
+@hook("config_dumper")
+class ConfigDumper(SessionHook):
+
+    def setup(self, session: "TrainingSession") -> Any:
+        session_dir = session.session_config.session_dir
+        config_dump_path = os.path.join(session_dir, "config.yaml")
+        with open(config_dump_path, "w") as f:
+            yaml.safe_dump(session.full_config, f)
+
+    def teardown(self, session: "TrainingSession"):
+        pass
+
 class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def __init__(self, config: dict):
@@ -337,6 +351,13 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._last_heartbeat_time = 0.0
 
         # self._order_of_components = topological_sort_of_components()
+
+        # dump config
+        # TODO: move it to an internal hook later (modify registry clearance in tests so that internal components remain)
+        os.makedirs(self.session_config.session_dir, exist_ok=True)
+        config_dump_path = os.path.join(self.session_config.session_dir, "config.yaml")
+        with open(config_dump_path, "w") as f:
+            yaml.safe_dump(self.full_config, f)
 
     @override
     def get_state(self):
@@ -443,6 +464,10 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         return obj
 
     # --------------------------- Public properties----------------------
+    @property
+    def full_config(self):
+        return deepcopy(self._config)
+
     @property
     def session_config(self) -> SessionConfig:
         return self._session_config
