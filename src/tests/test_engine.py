@@ -28,6 +28,7 @@ class _EngineConfig:
     session_configs: tuple[dict[str, Any], ...] = ()
     checkpoint_path: str | None = None
     new_max_iters: int | None = None
+    heartbeat_timeout: float = 10.0
 
 
 def _training_step(session: TrainingSession):
@@ -74,7 +75,7 @@ def test_spawned_worker_reconstructs_paused_state_and_continues_exactly(tmp_path
         assert next(paused) == 2
 
     parent_history = list(_training_step(paused).weight_history)
-    wrapper = SessionProcessWrapper(paused, session_id=0, rank=0)
+    wrapper = SessionProcessWrapper(paused, session_id=0, rank=0, heartbeat_timeout=30.0)
     assert _join_spawned_wrapper(wrapper) == 0
 
     resumed_iterations = iteration_events(resumed_path)
@@ -121,10 +122,10 @@ def test_engine_surfaces_a_real_spawned_worker_failure(tmp_path):
 
     with pytest.raises(
         RuntimeError,
-        match=r"training workers failed: session=0, rank=0, exitcode=",
+        match=r"Worker pid=.* failed:",
     ):
         with TrainingEngine(engine_config) as engine:
-            engine.start_all()
+            engine.start_session()
 
 
 def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_path):

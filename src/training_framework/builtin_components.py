@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any, override, List
 
 import torch
+from torch.distributed import barrier
 from torch.utils.tensorboard import SummaryWriter
 
 from training_framework.training_session import hook, resource

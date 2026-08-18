@@ -23,6 +23,7 @@ class _ExtendConfig:
     mode: str = "extend"
     process_timeout_on_join: float = 5.0
     session_configs: tuple[dict[str, Any], ...] = ()
+    heartbeat_timeout: float = 10.0
 
 
 def _training_step(session: TrainingSession):
@@ -58,7 +59,7 @@ def test_extend_mode_matches_uninterrupted_training_through_checkpoint_and_spawn
         new_max_iters=6,
     )
     with TrainingEngine(engine_config) as engine:
-        engine.start_all()
+        engine.start_session()
 
     events = iteration_events(extended_path)
     assert [event["iteration"] for event in events] == [1, 2, 3, 4, 5, 6]

@@ -14,7 +14,9 @@ class Configurator:
         group.add_argument("--resume-session", help="Path to checkpoint to resume the session from")
 
         self._parser.add_argument('--override', type=str, nargs='*', default=None)
-        self._parser.add_argument('--process_timeout_on_join', type=float, default=5.0)
+        self._parser.add_argument('--heartbeat-timeout', type=float, default=30.0)
+        self._parser.add_argument('--process_timeout_on_join', type=float, default=30.0)
+        # self._parser.add_argument('--wait-time-after-interrupt', type=float, default=10.0)
 
         self._args = self._parser.parse_args()
 
@@ -92,3 +94,7 @@ class Configurator:
     @property
     def mode(self):
         return self._mode
+
+    @property
+    def heartbeat_timeout(self):
+        return self._args.heartbeat_timeout
