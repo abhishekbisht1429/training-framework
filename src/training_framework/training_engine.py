@@ -63,7 +63,7 @@ def session_process_worker(
         # important so that model doesn't share the tensors between processes
         session = load_session_for_worker(session_state, rank, session_update_params=session_update_params)
         session.set_dist_manager_err_conn(error_conn)
-        session.set_heartbeat_interval(kwargs["heartbeat_timeout"] / 3.0)
+        session.set_heartbeat_interval(10.0)
         with session:
             # try:
             while not stop_event.is_set():
