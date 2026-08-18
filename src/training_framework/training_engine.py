@@ -538,21 +538,19 @@ class TrainingEngine:
 
     def _monitor_processes(self):
         waitables = {}
-        failure = None
 
         # Watch worker messages and process termination.
         for wrapper in self._session_process_wrappers:
             waitables[wrapper.error_conn] = ("connection", wrapper)
             waitables[wrapper.process.sentinel] = ("sentinel", wrapper)
 
-        interrupt_time = None
-        while waitables:
-            if failure:
-                break
-            elif interrupt_time and (time.monotonic() - interrupt_time) > self._configurator.wait_time_after_interrupt:
-                break
+        failure = None
+        interrupted = False
+        try:
+            while waitables:
+                if failure:
+                    break
 
-            try:
                 active = [wrapper for waitable_type, wrapper in waitables.values() if waitable_type == "sentinel"]
                 if not active:
                     break
@@ -580,25 +578,23 @@ class TrainingEngine:
                         f"heartbeat deadline by "
                         f"{now - wrapper.deadline:.1f}s"
                     )
-            except KeyboardInterrupt:
-                print("Interrupted! Requesting proccesses to stop.")
-                self.request_stop_all()
-                interrupt_time = time.monotonic()
+        except KeyboardInterrupt:
+            print("Interrupted!")
+            interrupted = True
 
-        if interrupt_time or failure:
+        if interrupted or failure:
+            self.request_stop_all()
             active = [wrapper for waitable_type, wrapper in waitables.values() if waitable_type == "sentinel"]
             self._join_or_terminate(active, timeout=self._configurator.process_timeout_on_join)
 
-
-        return failure
+        if failure:
+            raise failure
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             if exc_type is None:
-                failure = self._monitor_processes()
-                if failure:
-                    raise failure
+                self._monitor_processes()
             else:
                 # The parent failed, so stop all workers.
                 self.request_stop_all()
