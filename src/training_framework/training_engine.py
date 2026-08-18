@@ -469,6 +469,73 @@ class TrainingEngine:
 
         return self
 
+    def _process_ready_waitables(self, waitables, ready_waitables):
+        # Read messages before handling process exits.
+        failure = None
+
+        ready_waitables.sort(key=lambda key: waitables[key][0] == "sentinel")
+
+        for ready_waitable in ready_waitables:
+            entry = waitables.get(ready_waitable)
+            if entry is None:
+                continue
+
+            ready_waitable_type, wrapper = entry
+
+            if ready_waitable_type == "connection":
+                # handle connection waitable
+                try:
+                    message = ready_waitable.recv()
+                    if isinstance(message, dict):
+                        if message.get('type', None) == 'heartbeat':
+                            print(f"Heartbeat received from Process rank {wrapper.rank}. - {message}")
+                            wrapper.reset_deadline()
+                        else:
+                            # treat all messages other than heartbeat as errors
+                            waitables.pop(ready_waitable, None)
+                            ready_waitable.close()
+                            failure = RuntimeError(
+                                f"Worker pid={wrapper.process.pid} failed:\n"
+                                f"{message}"
+                            )
+                    else:
+                        print(f"Unknown message type received! {message}")
+                except EOFError:
+                    waitables.pop(ready_waitable, None)
+                    ready_waitable.close()
+            elif ready_waitable_type == "sentinel":
+                # handle sentinel waitables
+                waitables.pop(ready_waitable, None)
+                # Sentinel is ready, so join returns immediately.
+                wrapper.process.join()
+
+                if wrapper.process.exitcode != 0:
+                    # Drain any queued error after an abnormal exit.
+                    while not wrapper.error_conn.closed and wrapper.error_conn.poll():
+                        try:
+                            message = wrapper.error_conn.recv()
+                        except EOFError:
+                            break
+
+                        # get the last error message sent
+                        if message.get('type', None) == 'error':
+                            failure = RuntimeError(
+                                f"Worker pid={wrapper.process.pid} failed:\n{message}"
+                                if message is not None
+                                else (
+                                    f"Worker pid={wrapper.process.pid} failed with "
+                                    f"exit code {wrapper.process.exitcode}"
+                                )
+                            )
+                # remove the connection for this process from waitables as it is already finished.
+                waitables.pop(wrapper.error_conn, None)
+                if not wrapper.error_conn.closed:
+                    wrapper.error_conn.close()
+            else:
+                raise RuntimeError("Unknown ready waitable type!")
+
+        return failure
+
     def _monitor_processes(self):
         waitables = {}
         failure = None
@@ -494,91 +561,31 @@ class TrainingEngine:
                 ready = wait(waitables, timeout=timeout)
 
                 if ready:
-                    # Read messages before handling process exits.
-                    ready.sort(key=lambda key: waitables[key][0] == "sentinel")
+                    failure = self._process_ready_waitables(waitables, ready)
 
-                    for ready_waitable in ready:
-                        entry = waitables.get(ready_waitable)
-                        if entry is None:
-                            continue
-
-                        ready_waitable_type, wrapper = entry
-
-                        if ready_waitable_type == "connection":
-                            # handle connection waitable
-                            try:
-                                message = ready_waitable.recv()
-                                if isinstance(message, dict):
-                                    if message.get('type', None) == 'heartbeat':
-                                        wrapper.reset_deadline()
-                                    else:
-                                        # treat all messages other than heartbeat as errors
-                                        waitables.pop(ready_waitable, None)
-                                        ready_waitable.close()
-                                        failure = RuntimeError(
-                                            f"Worker pid={wrapper.process.pid} failed:\n"
-                                            f"{message}"
-                                        )
-                                else:
-                                    print(f"Unknown message type received! {message}")
-                            except EOFError:
-                                waitables.pop(ready_waitable, None)
-                                ready_waitable.close()
-                        elif ready_waitable_type == "sentinel":
-                            # handle sentinel waitables
-                            waitables.pop(ready_waitable, None)
-                            # Sentinel is ready, so join returns immediately.
-                            wrapper.process.join()
-
-                            if wrapper.process.exitcode != 0:
-                                # Drain any queued error after an abnormal exit.
-                                error = None
-                                while not wrapper.error_conn.closed and wrapper.error_conn.poll():
-                                    try:
-                                        message = wrapper.error_conn.recv()
-                                    except EOFError:
-                                        break
-
-                                    # get the last error message sent
-                                    if message.get('type', None) == 'error':
-                                        failure = RuntimeError(
-                                            f"Worker pid={wrapper.process.pid} failed:\n{message}"
-                                            if error is not None
-                                            else (
-                                                f"Worker pid={wrapper.process.pid} failed with "
-                                                f"exit code {wrapper.process.exitcode}"
-                                            )
-                                        )
-                            # remove the connection for this process from waitables as it is already finished.
-                            waitables.pop(wrapper.error_conn, None)
-                            if not wrapper.error_conn.closed:
-                                wrapper.error_conn.close()
-                        else:
-                            raise RuntimeError("Unknown ready waitable type!")
-                else:
+                now = time.monotonic()
+                timed_out_wrappers = [
+                    wrapper
+                    for wrapper in active
+                    if wrapper.deadline <= now and wrapper.process.is_alive()
+                ]
+                if timed_out_wrappers:
                     # wait timed out
-                    now = time.monotonic()
-                    timed_out_wrappers = [
-                        wrapper
-                        for wrapper in active
-                        if wrapper.deadline <= now and wrapper.process.is_alive()
-                    ]
-                    if timed_out_wrappers:
-                        wrapper = min(
-                            timed_out_wrappers,
-                            key=lambda item: item.deadline,
-                        )
-                        failure = TimeoutError(
-                            f"Worker pid={wrapper.process.pid} missed its "
-                            f"heartbeat deadline by "
-                            f"{now - wrapper.deadline:.1f}s"
-                        )
+                    wrapper = min(
+                        timed_out_wrappers,
+                        key=lambda item: item.deadline,
+                    )
+                    failure = TimeoutError(
+                        f"Worker pid={wrapper.process.pid} missed its "
+                        f"heartbeat deadline by "
+                        f"{now - wrapper.deadline:.1f}s"
+                    )
             except KeyboardInterrupt:
                 print("Interrupted! Requesting proccesses to stop.")
                 self.request_stop_all()
                 interrupt_time = time.monotonic()
 
-        if interrupt_time:
+        if interrupt_time or failure:
             active = [wrapper for waitable_type, wrapper in waitables.values() if waitable_type == "sentinel"]
             self._join_or_terminate(active, timeout=self._configurator.process_timeout_on_join)
 

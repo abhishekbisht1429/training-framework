@@ -198,5 +198,4 @@ class DDPResource(Resource):
         )
 
     def teardown(self, session):
-        barrier()
         torch.distributed.destroy_process_group()
