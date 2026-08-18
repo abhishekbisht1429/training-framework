@@ -16,7 +16,7 @@ class Configurator:
         self._parser.add_argument('--override', type=str, nargs='*', default=None)
         self._parser.add_argument('--heartbeat-timeout', type=float, default=30.0)
         self._parser.add_argument('--process_timeout_on_join', type=float, default=30.0)
-        self._parser.add_argument('--wait-time-after-interrupt', type=float, default=10.0)
+        # self._parser.add_argument('--wait-time-after-interrupt', type=float, default=10.0)
 
         self._args = self._parser.parse_args()
 
@@ -98,7 +98,3 @@ class Configurator:
     @property
     def heartbeat_timeout(self):
         return self._args.heartbeat_timeout
-
-    @property
-    def wait_time_after_interrupt(self):
-        return self._args.wait_time_after_interrupt
