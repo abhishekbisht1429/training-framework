@@ -1,6 +1,7 @@
 import os
 import random
 import time
+import traceback
 from abc import ABC, abstractmethod
 from collections import deque
 from copy import deepcopy
@@ -742,6 +743,17 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._dist_manager_err_conn is not None and exc_type is not None:
+            # 0. Send message to manager if an error occurred so that in case cleaning up resources freezes this process
+            self._dist_manager_err_conn.send({
+                'type': 'error',
+                "rank": self.get_resource('ddp').rank,
+                "pid": os.getpid(),
+                "exception_type": str(exc_type),
+                "message": str(exc_val),
+                "traceback": traceback.format_exc(),
+            })
+
         # 1. Clean up in reverse order of acquisition to respect dependencies
         for resource in reversed(self._sorted_resources):
             if resource.name not in self._successfully_setup_hook_names:
