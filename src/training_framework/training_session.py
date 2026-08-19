@@ -311,6 +311,15 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._register_components()
 
+        # dump config
+        # TODO: move it to an internal hook later (modify registry clearance in tests so that internal components remain)
+        ddp_res = self.get_resource('ddp') if self.has_resource('ddp') else None
+        if ddp_res is None or ddp_res.rank == 0:
+            os.makedirs(self.session_config.session_dir, exist_ok=True)
+            config_dump_path = os.path.join(self.session_config.session_dir, "config.yaml")
+            with open(config_dump_path, "w") as f:
+                yaml.safe_dump(self.full_config, f)
+
     def _register_components(self):
         for name in self._config.keys():
             if name in ["base_config"]:
@@ -350,15 +359,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._dist_manager_err_conn = None
         self._heartbeat_interval = None
         self._last_heartbeat_time = 0.0
-
-        # dump config
-        # TODO: move it to an internal hook later (modify registry clearance in tests so that internal components remain)
-        ddp_res = self.get_resource('ddp') if self.has_resource('ddp') else None
-        if ddp_res is None or ddp_res.rank == 0:
-            os.makedirs(self.session_config.session_dir, exist_ok=True)
-            config_dump_path = os.path.join(self.session_config.session_dir, "config.yaml")
-            with open(config_dump_path, "w") as f:
-                yaml.safe_dump(self.full_config, f)
 
     @override
     def get_state(self):
