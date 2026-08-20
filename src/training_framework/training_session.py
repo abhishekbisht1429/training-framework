@@ -314,7 +314,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         # dump config
         # TODO: move it to an internal hook later (modify registry clearance in tests so that internal components remain)
         ddp_res = self.get_resource('ddp') if self.has_resource('ddp') else None
-        if ddp_res is None or ddp_res.rank == 0:
+        # dump config only once when the session object is created in the main process
+        if ddp_res is None or ddp_res.rank == -1:
             os.makedirs(self.session_config.session_dir, exist_ok=True)
             config_dump_path = os.path.join(self.session_config.session_dir, "config.yaml")
             with open(config_dump_path, "w") as f:
