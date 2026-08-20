@@ -2,23 +2,28 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Package version](https://img.shields.io/badge/version-0.3.4-blue.svg)](./pyproject.toml)
+[![Python tests](https://github.com/abhishekbisht1429/training-framework/actions/workflows/python-tests.yaml/badge.svg)](https://github.com/abhishekbisht1429/training-framework/actions/workflows/python-tests.yaml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-A lightweight, component-based framework for organizing PyTorch training workflows into reusable **sessions**, **resources**, **hooks**, and **steps**.
+A component-based framework for building, running, checkpointing, and supervising PyTorch training workflows.
 
-The framework provides:
+Training code is organized into reusable **resources**, **hooks**, and **steps** inside a `TrainingSession`. A `TrainingEngine` creates or restores a session in the parent process, serializes its state, launches one or more spawned worker processes, and monitors those workers for completion, errors, interrupts, and missed heartbeats.
 
-- a deterministic session lifecycle;
-- registry-based component discovery;
-- explicit component prerequisites;
-- per-iteration and per-session shared contexts;
-- stateful checkpoint save and restore;
-- Python, NumPy, PyTorch, and CUDA RNG restoration;
-- configuration through YAML and OmegaConf overrides;
-- one worker thread per training session;
-- built-in logging, checkpointing, TensorBoard, and infinite sampling utilities.
+> **Project status:** This project is under active development. The current API is suitable for experimentation and framework development, but review [Current behavior and limitations](#current-behavior-and-limitations) before using it for long-running or production workloads.
 
-> **Project status:** the framework is under active development. Review the [current behavior and limitations](#current-behavior-and-limitations) before using it for long-running or production workloads.
+## Features
+
+- Configuration-driven session construction with YAML and OmegaConf overrides
+- Decorator-based registration and recursive component-package discovery
+- Explicit resource, hook, and step dependencies
+- Topological execution ordering and dependency-cycle detection
+- Session-level and iteration-level shared contexts
+- Stateful component checkpointing and session restoration
+- Restoration of Python, NumPy, PyTorch, and CUDA RNG state
+- Spawn-based worker processes with error forwarding and heartbeat monitoring
+- Single-node PyTorch DistributedDataParallel process-group setup
+- Resume and extend modes for saved sessions
+- Built-in logging, checkpointing, TensorBoard, and infinite samplers
 
 ## Table of contents
 
@@ -27,14 +32,17 @@ The framework provides:
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Core concepts](#core-concepts)
-- [Component registration](#component-registration)
-- [Component prerequisites](#component-prerequisites)
+- [Component registration and discovery](#component-registration-and-discovery)
+- [Component dependencies](#component-dependencies)
+- [Session lifecycle](#session-lifecycle)
 - [Shared contexts](#shared-contexts)
-- [State and checkpointing](#state-and-checkpointing)
+- [Configuration and command-line interface](#configuration-and-command-line-interface)
+- [Process model and supervision](#process-model-and-supervision)
+- [Distributed training with DDP](#distributed-training-with-ddp)
+- [Checkpointing, resume, and extension](#checkpointing-resume-and-extension)
 - [Built-in components](#built-in-components)
-- [YAML configuration](#yaml-configuration)
-- [Running multiple sessions](#running-multiple-sessions)
-- [InfiniteSampler](#infinitesampler)
+- [Infinite samplers](#infinite-samplers)
+- [Direct session execution](#direct-session-execution)
 - [API summary](#api-summary)
 - [Testing](#testing)
 - [Current behavior and limitations](#current-behavior-and-limitations)
@@ -43,65 +51,67 @@ The framework provides:
 ## Architecture
 
 ```text
+Parent process
+
+Configurator
+    |
+    v
 TrainingEngine
-│
-├── worker thread ──> TrainingSession A
-│                    ├── Resources
-│                    ├── Hooks
-│                    ├── Steps
-│                    ├── session_context
-│                    └── iteration_context
-│
-├── worker thread ──> TrainingSession B
-│                    ├── Resources
-│                    ├── Hooks
-│                    └── Steps
-│
-└── ...
+    |
+    +-- create TrainingSession from YAML
+    |       or
+    +-- load TrainingSession from checkpoint
+    |
+    +-- capture session state
+    |
+    +-- spawn worker process rank 0
+    |       +-- reconstruct TrainingSession from state
+    |       +-- configure rank-specific DDP resource, when enabled
+    |       +-- run resources, hooks, and steps
+    |       +-- send heartbeats and errors to the parent
+    |
+    +-- spawn worker processes rank 1..N-1 for DDP
+    |       +-- reconstruct the same session state
+    |       +-- keep only configured parallel components
+    |       +-- run the rank-specific session
+    |
+    +-- monitor worker pipes and process sentinels
+            +-- propagate worker failures
+            +-- detect heartbeat timeouts
+            +-- coordinate graceful shutdown
+            +-- terminate or kill unresponsive workers
 ```
 
-A `TrainingSession` owns one complete training workflow. A `TrainingEngine` can execute multiple sessions concurrently, using one Python thread for each registered session.
+Even a non-DDP run is executed in one spawned worker process. Child processes ignore `SIGINT`; the parent process handles interruption and coordinates shutdown.
 
-Within a session:
+A `TrainingSession` contains:
 
-- **resources** manage objects whose lifetime follows the session context;
-- **hooks** observe session or iteration lifecycle events;
-- **steps** perform the ordered work of each iteration;
-- **session context** shares data across the active session;
-- **iteration context** shares transient data within one iteration.
+- **Resources**: objects with session-scoped setup and teardown, such as models, optimizers, datasets, writers, and distributed infrastructure.
+- **Hooks**: callbacks around session setup/teardown and/or training iterations.
+- **Steps**: ordered units of work performed during every training iteration.
+- **Session context**: shared state for the lifetime of an active session.
+- **Iteration context**: temporary shared state that is cleared after every iteration.
 
 ## Requirements
+
+The package currently declares:
 
 - Python 3.12 or newer
 - PyTorch 2.11 or newer
 - NumPy 2.4.4 or newer
 - OmegaConf 2.3 or newer
+- Matplotlib 3.10.9 or newer
 - TensorBoard 2.20 or newer
 
-The package metadata contains the complete dependency list.
+See [`pyproject.toml`](./pyproject.toml) for the complete dependency list.
 
 ## Installation
 
-### Install directly from GitHub
-
-```bash
-python -m pip install "git+https://github.com/abhishekbisht1429/training-framework.git@main"
-```
-
-To pin the exact version documented here:
+### Install from GitHub
 
 ```bash
 python -m pip install \
-  "git+https://github.com/abhishekbisht1429/training-framework.git@c4e09ea4a75d92baf965c72c786c9c874e376e7b"
-```
-
-### Add it to another `pyproject.toml`
-
-```toml
-[project]
-dependencies = [
-    "training-framework @ git+https://github.com/abhishekbisht1429/training-framework.git@main",
-]
+  "git+https://github.com/abhishekbisht1429/training-framework.git@main"
 ```
 
 ### Development installation
@@ -111,382 +121,224 @@ git clone https://github.com/abhishekbisht1429/training-framework.git
 cd training-framework
 python -m pip install --upgrade pip
 python -m pip install -e .
-pytest
 ```
 
 ## Quick start
 
-The following example creates a resource, a lifecycle hook, and a step; declares their dependencies; and runs the session through `TrainingEngine`.
+This example defines a stateful resource, a training step, and a lifecycle hook. The framework discovers the component module, creates the components from YAML, spawns a worker, and runs five iterations.
+
+### 1. Create a project package
+
+```text
+my_project/
+├── __init__.py
+├── config.yaml
+├── train.py
+└── components/
+    ├── __init__.py
+    └── demo.py
+```
+
+The package containing decorated components must be importable by both the parent process and spawned worker processes.
+
+### 2. Define components
+
+Create `my_project/components/demo.py`:
 
 ```python
-from training_framework.training_engine import TrainingEngine
 from training_framework.training_session import (
+    LifecycleHook,
+    StatefulResource,
+    Step,
     TrainingSession,
     hook,
+    requires_resource,
     resource,
-    step, LifecycleHook, Resource, Step, requires_hook, requires_resource,
+    step,
 )
 
 
-@resource("example_metric_store")
-class MetricStore(Resource):
-    def __init__(self):
-        self.losses: list[float] = []
+@resource("counter")
+class CounterResource(StatefulResource):
+    def __init__(self, config: dict):
+        self.value = int(config.get("start", 0))
 
-    def setup(self, session: TrainingSession):
-        self.losses.clear()
-
-    def teardown(self, session: TrainingSession):
+    def setup(self, session: TrainingSession) -> None:
         pass
 
-
-@hook("example_loss_printer")
-@requires_resource("example_metric_store")
-class LossPrinter(LifecycleHook):
-    def __init__(self, call_every: int = 1):
-        self.call_every = call_every
-
-    def setup(self, session: TrainingSession):
+    def teardown(self, session: TrainingSession) -> None:
         pass
 
-    def teardown(self, session: TrainingSession):
+    def get_state(self) -> dict[str, int]:
+        return {"value": self.value}
+
+    def set_state(self, state: dict[str, int]) -> None:
+        self.value = state["value"]
+
+
+@step("increment")
+@requires_resource("counter")
+class IncrementStep(Step):
+    def __init__(self, config: dict):
+        self.amount = int(config.get("amount", 1))
+
+    def run(self, session: TrainingSession) -> None:
+        counter = session.get_resource("counter")
+        counter.value += self.amount
+        session.iteration_context["counter_value"] = counter.value
+
+
+@hook("progress")
+@requires_resource("counter")
+class ProgressHook(LifecycleHook):
+    def __init__(self, config: dict):
+        self.call_every = int(config.get("call_every", 1))
+
+    def setup(self, session: TrainingSession) -> None:
+        pass
+
+    def teardown(self, session: TrainingSession) -> None:
         pass
 
     def pre_iteration_callback(self, session: TrainingSession) -> None:
         pass
 
     def post_iteration_callback(self, session: TrainingSession) -> None:
-        loss = session.iteration_context["loss"]
-        print(f"iteration={session.iteration} loss={loss:.3f}")
-
-
-@step("example_train_step")
-@requires_resource("example_metric_store")
-@requires_hook("example_loss_printer")
-class TrainStep(Step):
-    def __init__(self, metric_store_id: str):
-        self.metric_store_id = metric_store_id
-
-    def run(self, session: TrainingSession) -> None:
-        # Replace this with a real forward/backward/optimizer operation.
-        loss = 1.0 / session.iteration
-
-        # Visible to later steps and post-iteration hooks in this iteration.
-        session.iteration_context["loss"] = loss
-
-        # Visible for the lifetime of the active session context.
-        session.session_context["last_loss"] = loss
-
-        metric_store = session.get_resource(self.metric_store_id)
-        metric_store.losses.append(loss)
-
-
-config = {
-    "rng_seed": 42,
-    "sessions_dir": "./runs",
-    "max_iterations": 5,
-    "device": "cpu",
-}
-
-session = TrainingSession(config)
-
-# Dependencies must be registered before their consumers.
-metric_store_id = session.register_resource(MetricStore())
-session.register_hook(LossPrinter(call_every=1))
-session.add_step(TrainStep(metric_store_id))
-
-engine = TrainingEngine({})
-engine.register_session(session)
-
-# TrainingEngine.run_all() must be called inside the engine context.
-with engine:
-    engine.start_all(wait=True)
+        value = session.iteration_context["counter_value"]
+        print(f"iteration={session.iteration}, counter={value}")
 ```
 
-Alternatively, a session can be driven directly instead of registering it with an engine:
+Each configured component class receives its YAML mapping as one `config` argument.
+
+### 3. Create the YAML configuration
+
+Create `my_project/config.yaml`:
+
+```yaml
+sessions:
+  - base_config:
+      rng_seed: 42
+      sessions_dir: ./runs
+      max_iterations: 5
+      components_package: my_project.components
+      device: cpu
+
+    counter:
+      start: 0
+
+    increment:
+      amount: 2
+
+    progress:
+      call_every: 1
+
+    logger:
+      log_every: 1
+
+    checkpointer:
+      checkpoint_every: 5
+```
+
+Every top-level key inside a session, other than `base_config`, must match a registered resource, hook, or step name.
+
+### 4. Create the entry point
+
+Create `my_project/train.py`:
 
 ```python
-with session:
-    for iteration in session:
-        print(iteration)
+from training_framework.configurator import Configurator
+from training_framework.training_engine import TrainingEngine
+
+
+def main() -> None:
+    configurator = Configurator()
+
+    with TrainingEngine(configurator) as engine:
+        engine.start_session()
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-A finished session cannot be entered again. A session that exits before reaching `max_iterations` is paused and can be re-entered.
+The `if __name__ == "__main__"` guard is required for safe process spawning.
+
+### 5. Run training
+
+From the directory containing `my_project`:
+
+```bash
+python -m my_project.train --config my_project/config.yaml
+```
+
+The parent process creates the session and worker configuration. The worker process reconstructs the session and executes the configured components.
 
 ## Core concepts
 
-### TrainingSession
-
-`TrainingSession` is an iterator and context manager. Its required configuration fields are:
-
-```python
-config = {
-    "rng_seed": 42,
-    "sessions_dir": "./runs",
-    "max_iterations": 100,
-    "device": "cpu",       # or an available value such as "cuda:0"
-}
-```
-
-At construction, the session:
-
-1. creates a timestamped session directory path under `sessions_dir`;
-2. stores an immutable `SessionConfig`;
-3. seeds Python, NumPy, PyTorch, and CUDA RNGs;
-4. validates the requested device;
-5. initializes resource, hook, step, and context collections.
-
-The session phases are:
-
-```text
-NEW ──enter──> READY ──next()──> RUNNING
-                                │
-                                ├── context exits early ──> PAUSED
-                                └── iteration limit reached ──> FINISHED
-```
-
-`SessionPhase.INTERRUPTED` is defined but is not currently assigned by the execution path.
-
 ### Resource
 
-A resource owns infrastructure or data used by a session, such as a dataset, writer, process, logger backend, or model service.
+A resource owns an object or service whose lifecycle follows the session context.
 
 ```python
-@resource("my_resource")
-class MyResource(Resource):
-    def setup(self, session: TrainingSession):
-        ...
+from training_framework.training_session import Resource, TrainingSession, resource
 
-    def teardown(self, session: TrainingSession):
-        ...
+
+@resource("dataset")
+class DatasetResource(Resource):
+    def __init__(self, config: dict):
+        self.config = config
+        self.dataset = None
+
+    def setup(self, session: TrainingSession) -> None:
+        self.dataset = build_dataset(self.config)
+
+    def teardown(self, session: TrainingSession) -> None:
+        self.dataset = None
 ```
 
-Resources are set up in registration order and torn down in reverse registration order.
-
-Registering a resource returns an instance-specific ID:
-
-```python
-resource_id = session.register_resource(MyResource())
-resource = session.get_resource(resource_id)
-```
-
-The registry name identifies the component type; the returned resource ID identifies one registered instance.
+Resources are set up before session hooks and torn down in reverse resource order.
 
 ### Hook
 
-Hooks observe session or iteration events.
-
 The framework provides three hook interfaces:
 
-| Interface | Required methods |
+| Interface | Methods |
 |---|---|
 | `SessionHook` | `setup(session)`, `teardown(session)` |
 | `IterationHook` | `pre_iteration_callback(session)`, `post_iteration_callback(session)` |
-| `LifecycleHook` | all four methods above |
+| `LifecycleHook` | All four methods |
 
-An iteration hook must expose a positive integer `call_every` value.
-
-```python
-@hook("metrics_hook")
-class MetricsHook(LifecycleHook):
-    def __init__(self, call_every: int = 10):
-        self.call_every = call_every
-
-    def setup(self, session):
-        pass
-
-    def teardown(self, session):
-        pass
-
-    def pre_iteration_callback(self, session):
-        pass
-
-    def post_iteration_callback(self, session):
-        pass
-```
-
-Iteration callbacks run when at least one of the following is true:
+An iteration hook must expose a positive `call_every` integer. An iteration hook is selected when:
 
 - the current iteration is the first iteration;
-- the current iteration is the last configured iteration;
+- the current iteration is the configured final iteration; or
 - `session.iteration % hook.call_every == 0`.
 
-Therefore, the first and last iterations always invoke every iteration hook, regardless of `call_every`.
-
-For hooks registered as `A`, `B`, and `C`, callback order is:
-
-```text
-A.pre -> B.pre -> C.pre -> steps -> C.post -> B.post -> A.post
-```
+The first and final iterations therefore invoke every iteration hook, regardless of `call_every`.
 
 ### Step
 
-A step is one ordered unit of iteration work.
+A step performs one unit of work during every iteration:
 
 ```python
-@step("forward")
-class ForwardStep(Step):
-    def run(self, session: TrainingSession) -> None:
-        ...
-```
-
-Steps execute in the order in which they were added:
-
-```python
-session.add_step(LoadBatchStep())
-session.add_step(ForwardStep())
-session.add_step(BackwardStep())
-session.add_step(OptimizerStep())
-```
-
-## Component registration
-
-Component decorators assign a globally unique registry name:
-
-```python
-@resource("dataset")
-class DatasetResource(Resource):
-    ...
-
-
-@hook("metrics")
-class MetricsHook(SessionHook):
-    ...
+from training_framework.training_session import Step, TrainingSession, step
 
 
 @step("train")
 class TrainStep(Step):
-    ...
+    def __init__(self, config: dict):
+        self.config = config
+
+    def run(self, session: TrainingSession) -> None:
+        # Forward pass, loss, backward pass, optimizer update, and so on.
+        ...
 ```
 
-The corresponding registries are:
-
-```python
-RESOURCE_REGISTRY
-HOOK_REGISTRY
-STEP_REGISTRY
-```
-
-Registering two classes under the same name in the same registry raises `ValueError`.
-
-Registration is required for session checkpoint reconstruction. Before loading a checkpoint, import every module that declares custom resource, hook, and step classes so that their decorators populate the registries.
-
-## Component prerequisites
-
-Dependencies are declared by registry name:
-
-```python
-@step("optimizer")
-@requires_resource("model")
-@requires_hook("metrics")
-@requires_step("backward")
-class OptimizerStep(Step):
-    ...
-```
-
-The allowed dependency types are:
-
-| Consumer | May require resources | May require hooks | May require steps |
-|---|:---:|:---:|:---:|
-| `Resource` | Yes | No | No |
-| `Hook` | Yes | Yes | No |
-| `Step` | Yes | Yes | Yes |
-
-The decorators enforce those type rules:
-
-- `@requires_resource(...)` may decorate a `Resource`, `Hook`, or `Step` subclass;
-- `@requires_hook(...)` may decorate a `Hook` or `Step` subclass;
-- `@requires_step(...)` may decorate only a `Step` subclass.
-
-Prerequisites must already be present in the same session before the dependent component is registered:
-
-```python
-session.register_resource(ModelResource())
-
-session.register_hook(MetricsHook())
-
-session.add_step(BackwardStep())
-session.add_step(OptimizerStep())
-```
-
-Missing prerequisites raise `RuntimeError` and identify missing resources, hooks, or steps. Names are checked by category, so a hook named `model` does not satisfy a required resource named `model`.
-
-Multiple prerequisite decorators are supported. Python applies stacked decorators from bottom to top:
-
-```python
-@step("consumer")
-@requires_resource("second")
-@requires_resource("first")
-class ConsumerStep(Step):
-    ...
-```
-
-Registration order is significant. The framework currently validates direct prerequisites but does not resolve, auto-register, topologically sort, or detect circular dependency graphs.
-
-## Shared contexts
-
-### `iteration_context`
-
-`session.iteration_context` is a dictionary for communication within one iteration.
-
-```python
-class ForwardStep(Step):
-    def run(self, session):
-        session.iteration_context["output"] = output
-
-
-class LossStep(Step):
-    def run(self, session):
-        output = session.iteration_context["output"]
-        session.iteration_context["loss"] = compute_loss(output)
-```
-
-Properties:
-
-- available only while the session context is active;
-- shared by steps and hooks in the current iteration;
-- available to post-iteration hooks;
-- cleared after post-iteration callbacks complete;
-- not saved in session checkpoints.
-
-Access outside `with session:` raises `RuntimeError`.
-
-### `session_context`
-
-`session.session_context` is a dictionary shared for the active session lifetime.
-
-```python
-class ProducerHook(SessionHook):
-    def setup(self, session):
-        session.session_context["run_name"] = "experiment-1"
-
-    def teardown(self, session):
-        pass
-
-
-class ConsumerHook(SessionHook):
-    def setup(self, session):
-        print(session.session_context["run_name"])
-
-    def teardown(self, session):
-        pass
-```
-
-Properties:
-
-- persists across iterations while the session remains active;
-- is shared by session components;
-- is included in `TrainingSession.get_state()`;
-- is restored by `TrainingSession.set_state()`;
-- is cleared when the session context exits.
-
-Because it is checkpointed, values stored in `session_context` must be serializable if the session is saved.
-
-## State and checkpointing
+Steps are executed in dependency order.
 
 ### Stateful components
 
-A component that must preserve mutable state across checkpoints should implement `Stateful` or inherit one of the convenience abstract classes:
+Components with mutable state that must survive checkpointing can inherit one of:
 
 - `StatefulResource`
 - `StatefulStep`
@@ -494,404 +346,741 @@ A component that must preserve mutable state across checkpoints should implement
 - `StatefulIterationHook`
 - `StatefulLifeCycleHook`
 
+They must implement:
+
 ```python
-from typing import Any
+def get_state(self):
+    ...
 
-from training_framework.training_session import step, StatefulStep
 
-
-@step("counter")
-class CounterStep(StatefulStep):
-    def __init__(self, increment: int = 1):
-        self.increment = increment
-        self.value = 0
-
-    def run(self, session) -> None:
-        self.value += self.increment
-
-    def get_state(self) -> Any:
-        return {"value": self.value}
-
-    def set_state(self, state: Any) -> None:
-        self.value = state["value"]
+def set_state(self, state) -> None:
+    ...
 ```
 
-The framework automatically captures exact constructor `args` and `kwargs` through `CaptureInitMeta`. During restoration it:
+The framework captures each component's constructor arguments and uses them to reconstruct the component before calling `set_state()`.
 
-1. finds each class by its registry name;
-2. reconstructs it with the captured constructor call;
-3. calls `set_state()` for `Stateful` components.
+## Component registration and discovery
 
-Constructor arguments and returned state must therefore be serializable.
+Register classes with decorators:
 
-### Session state
+```python
+@resource("model")
+class ModelResource(Resource):
+    ...
+
+
+@hook("metrics")
+class MetricsHook(LifecycleHook):
+    ...
+
+
+@step("optimizer_step")
+class OptimizerStep(Step):
+    ...
+```
+
+Registries are global within each Python interpreter:
+
+```python
+RESOURCE_REGISTRY
+HOOK_REGISTRY
+STEP_REGISTRY
+```
+
+A duplicate name in the same registry raises `ValueError`.
+
+`base_config.components_package` identifies the package that contains application components. During session initialization, the framework:
+
+1. imports that package;
+2. recursively discovers its submodules with `pkgutil.walk_packages()`;
+3. imports every discovered module; and
+4. relies on module-level decorators to populate the registries.
+
+For reliable spawn and checkpoint behavior:
+
+- define component classes at module scope;
+- return the original class from custom decorators;
+- avoid registration that depends on process ID, rank, or other process-specific state;
+- make the component package importable from a fresh Python interpreter; and
+- keep component names stable across checkpoint save and restore.
+
+## Component dependencies
+
+Dependencies are declared using registry names:
+
+```python
+from training_framework.training_session import (
+    requires_hook,
+    requires_resource,
+    requires_step,
+    step,
+)
+
+
+@step("optimizer_step")
+@requires_step("backward")
+@requires_hook("metrics")
+@requires_resource("optimizer")
+class OptimizerStep(Step):
+    ...
+```
+
+Supported dependency directions are:
+
+| Consumer | May require a resource | May require a hook | May require a step |
+|---|:---:|:---:|:---:|
+| Resource | Yes | No | No |
+| Hook | Yes | Yes | No |
+| Step | Yes | Yes | Yes |
+
+The framework builds a registry-wide prerequisite graph and performs a topological sort. It raises an error when:
+
+- a named prerequisite has not been registered in the expected registry; or
+- the component graph contains a cycle.
+
+The resulting order controls resource setup, hook callbacks, and step execution. Teardown and post-iteration hook callbacks use reverse order.
+
+A dependency name being registered does not automatically add that component to a session. Include all required runtime components in the session YAML. For DDP, include all dependencies needed on secondary ranks in `ddp.parallel_components` as well.
+
+## Session lifecycle
+
+A `TrainingSession` is both a context manager and an iterator.
+
+```text
+Construct session
+    |
+    +-- import component package
+    +-- instantiate configured components
+    +-- create session directory
+    +-- dump config.yaml
+    |
+Enter session
+    +-- resource.setup() in dependency order
+    +-- SessionHook.setup() in dependency order
+    |
+Each iteration
+    +-- selected IterationHook.pre_iteration_callback()
+    +-- Step.run() in dependency order
+    +-- selected IterationHook.post_iteration_callback() in reverse order
+    +-- clear iteration_context
+    |
+Exit session
+    +-- resource.teardown() in reverse dependency order
+    +-- SessionHook.teardown() in reverse dependency order
+    +-- clear session_context
+```
+
+The main phases are:
+
+```text
+NEW -> READY -> RUNNING -> FINISHED
+                  |
+                  +-> PAUSED when the context exits before max_iterations
+```
+
+If an iteration fails, its iteration counter is rolled back and its iteration context is cleared before the exception propagates.
+
+## Shared contexts
+
+### `iteration_context`
+
+`session.iteration_context` is a dictionary for communication among hooks and steps during one iteration.
+
+```python
+session.iteration_context["batch"] = batch
+loss = session.iteration_context["loss"]
+```
+
+It is:
+
+- available only while the session context is active;
+- visible to pre-hooks, steps, and post-hooks;
+- cleared after every iteration; and
+- not included in session checkpoints.
+
+### `session_context`
+
+`session.session_context` is a dictionary shared for the active session lifetime.
+
+```python
+session.session_context["best_loss"] = best_loss
+```
+
+It is included in `TrainingSession.get_state()` and restored with the session. It is cleared when the session context exits. Values that exist when a checkpoint is created must therefore be serializable.
+
+## Configuration and command-line interface
+
+### YAML structure
+
+The configuration root must contain a `sessions` list:
+
+```yaml
+sessions:
+  - base_config:
+      rng_seed: 42
+      sessions_dir: ./runs
+      max_iterations: 1000
+      components_package: my_project.components
+      device: cuda:0
+
+    model:
+      hidden_size: 512
+
+    train:
+      learning_rate: 0.0003
+
+    logger:
+      log_every: 10
+```
+
+`base_config` fields:
+
+| Field | Required | Meaning |
+|---|:---:|---|
+| `rng_seed` | Yes | Seed used for Python, NumPy, PyTorch, and CUDA RNG initialization |
+| `sessions_dir` | Yes | Parent directory for timestamped session directories |
+| `max_iterations` | Yes | Number of training iterations |
+| `components_package` | Yes | Importable package recursively scanned for decorated components |
+| `device` | No | Requested device string; defaults to CPU, and unavailable CUDA requests currently fall back to CPU |
+
+A session directory is created as:
+
+```text
+<sessions_dir>/session_YYYYMMDD_HHMMSS/
+```
+
+The resolved session configuration is written to `config.yaml` in that directory.
+
+> **Current engine scope:** use one entry in `sessions` per invocation. The current engine stores one active wrapper set, so registering another session replaces the previous set rather than scheduling both concurrently.
+
+### New session
+
+```bash
+python -m my_project.train --config my_project/config.yaml
+```
+
+### OmegaConf overrides
+
+```bash
+python -m my_project.train \
+  --config my_project/config.yaml \
+  --override \
+  'sessions[0].base_config.max_iterations=2000' \
+  'sessions[0].logger.log_every=25'
+```
+
+Overrides are applied only in `--config` mode.
+
+### Resume a checkpoint
+
+```bash
+python -m my_project.train \
+  --resume-session ./runs/session_.../checkpoints/<checkpoint-name>
+```
+
+### Extend a checkpoint
+
+To restore a checkpoint and replace its maximum iteration count:
+
+```bash
+python -m my_project.train \
+  --extend-session ./runs/session_.../checkpoints/<checkpoint-name> 5000
+```
+
+### Process-monitoring options
+
+```bash
+python -m my_project.train \
+  --config my_project/config.yaml \
+  --heartbeat-timeout 60 \
+  --process_timeout_on_join 30
+```
+
+| Argument | Default | Meaning |
+|---|---:|---|
+| `--heartbeat-timeout` | `30.0` | Maximum seconds a live worker may go without a heartbeat |
+| `--process_timeout_on_join` | `30.0` | Graceful-shutdown period before surviving workers are terminated |
+
+The three operating modes, `--config`, `--resume-session`, and `--extend-session`, are mutually exclusive and one is required.
+
+## Process model and supervision
+
+The engine uses `torch.multiprocessing.get_context("spawn")`.
+
+For each worker, the parent:
+
+1. calls `TrainingSession.get_state()`;
+2. passes the state to a new interpreter;
+3. reconstructs the session with `TrainingSession.from_state()`;
+4. starts training in that child process; and
+5. watches both the worker's message pipe and process sentinel.
+
+The worker sends:
+
+- **heartbeat messages**, including PID, iteration, and the current component stage; and
+- **error messages**, including rank, exception type, message, and traceback.
+
+The worker heartbeat interval is currently fixed at 10 seconds. The parent timeout is configurable with `--heartbeat-timeout`.
+
+On interruption, worker failure, or heartbeat timeout, the engine:
+
+1. sets each worker's cooperative stop event;
+2. waits for the configured graceful-shutdown period;
+3. terminates surviving processes;
+4. waits briefly again; and
+5. kills processes that still remain alive.
+
+The stop event is checked between iterations. A step, hook, setup, or teardown call that is already running is not interrupted cooperatively.
+
+## Distributed training with DDP
+
+Adding a top-level `ddp` resource makes the engine create `world_size` worker processes.
+
+```yaml
+sessions:
+  - base_config:
+      rng_seed: 42
+      sessions_dir: ./runs
+      max_iterations: 1000
+      components_package: my_project.components
+      device: cpu
+
+    ddp:
+      world_size: 4
+      backend: nccl
+      master_addr: "127.0.0.1"
+      master_port: "12355"
+      parallel_components:
+        - model
+        - optimizer
+        - dataloader
+        - train
+
+    model: {}
+    optimizer: {}
+    dataloader: {}
+    train: {}
+
+    logger:
+      log_every: 10
+
+    checkpointer:
+      checkpoint_every: 100
+```
+
+`master_port` should be a string because it is assigned to the `MASTER_PORT` environment variable.
+
+### Rank-specific session construction
+
+The parent session contains a placeholder DDP resource with rank `-1`. In each child process, the framework replaces it with a resource configured for that worker's rank.
+
+- Rank 0 keeps every configured component.
+- Ranks greater than 0 keep only `ddp` and component names listed in `parallel_components`.
+- Non-parallel logging, checkpointing, and other rank-zero-only work can therefore remain off secondary ranks by omitting those names.
+
+Every resource, hook, and step required by a parallel component must also be listed when it is needed on secondary ranks.
+
+### What the DDP resource does
+
+During setup, the built-in DDP resource:
+
+- sets `MASTER_ADDR` and `MASTER_PORT`;
+- selects CUDA device `rank` for the NCCL backend;
+- updates `session.device` to that CUDA device; and
+- calls `torch.distributed.init_process_group()`.
+
+During teardown, it destroys the process group.
+
+### Model wrapping is application code
+
+The framework initializes the process group but does not automatically wrap your model. Use the public PyTorch DDP class after the DDP resource has been set up:
+
+```python
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+ddp_resource = session.get_resource("ddp")
+model = model.to(session.device)
+model = DDP(
+    model,
+    device_ids=(
+        [ddp_resource.rank]
+        if ddp_resource.backend == "nccl"
+        else None
+    ),
+)
+```
+
+A model resource that always requires DDP can declare:
+
+```python
+@resource("model")
+@requires_resource("ddp")
+class ModelResource(Resource):
+    ...
+```
+
+This ensures that the DDP resource is set up before the model resource.
+
+### Current DDP scope
+
+The current CUDA mapping uses the process rank directly as the local CUDA device index. Treat the implementation as a single-node, one-process-per-GPU design. Multi-node execution requires separate global-rank and local-rank handling that is not currently exposed by the framework.
+
+## Checkpointing, resume, and extension
+
+### Built-in checkpointer
+
+Add the built-in `checkpointer` hook to YAML:
+
+```yaml
+checkpointer:
+  checkpoint_every: 100
+  checkpoints_dir: ./runs/checkpoints  # optional
+```
+
+If `checkpoints_dir` is omitted, checkpoints are written to a `checkpoints` directory under the session directory.
+
+The checkpointer uses `torch.save(session, path)`. Because it is an iteration hook, it saves on:
+
+- the first iteration;
+- the final configured iteration; and
+- iterations divisible by `checkpoint_every`.
+
+### Stored session state
 
 `TrainingSession.get_state()` includes:
 
-- original session configuration;
 - current iteration;
 - immutable `SessionConfig`;
+- component constructor arguments;
+- state from `Stateful` resources, hooks, and steps;
+- `session_context`;
 - Python RNG state;
 - NumPy RNG state;
-- PyTorch CPU RNG state;
-- PyTorch CUDA RNG state;
-- resource definitions and state;
-- hook definitions and state;
-- step definitions and state;
-- captured constructor arguments;
-- `session_context`.
+- PyTorch CPU RNG state; and
+- CUDA RNG state.
 
-Transient objects such as `device` and `iteration_context` are recreated instead of restored directly.
+Transient infrastructure, such as the selected device, iteration context, manager pipe, and heartbeat timer, is recreated in each worker.
 
-### Save and restore directly
+### Resume
 
-```python
-import torch
-
-# Save the complete session object.
-torch.save(session, "checkpoint.pt")
-
-# Ensure modules containing all custom registered classes are imported first.
-restored_session = torch.load(
-    "checkpoint.pt",
-    map_location="cpu",
-    weights_only=False,
-)
+```bash
+python -m my_project.train --resume-session <checkpoint-path>
 ```
 
-Python `pickle` can also be used because `TrainingSession` implements the state protocol:
+The engine loads the session in the parent, recovers the saved DDP world size when present, sends session state to workers, and continues from the saved iteration.
 
-```python
-import pickle
+### Extend
 
-payload = pickle.dumps(session)
-restored_session = pickle.loads(payload)
+```bash
+python -m my_project.train --extend-session <checkpoint-path> <new-max-iterations>
 ```
 
-### Built-in Checkpointer
+The session is restored as in resume mode, then each worker receives the new maximum iteration count before training starts.
 
-```python
-from training_framework.builtin_components import Checkpointer
+### Checkpoint safety
 
-checkpointer = Checkpointer(
-    {
-        "checkpoint_every": 100,
-        "checkpoints_dir": "./runs/checkpoints",
-    }
-)
+Checkpoint loading uses `torch.load(..., weights_only=False)`, which can execute arbitrary code through Python deserialization. Load only checkpoints from trusted sources.
 
-session.register_hook(checkpointer)
-```
-
-Load a saved checkpoint with:
-
-```python
-restored_session = Checkpointer.load_checkpoint(
-    "./runs/checkpoints/<checkpoint-name>",
-    map_location="cpu",
-)
-```
-
-The built-in checkpointer is an iteration hook, so it saves on the first iteration, the last iteration, and iterations divisible by `checkpoint_every`.
+Exact training continuation also depends on application state. Persist model, optimizer, scheduler, scaler, sampler, and any data-pipeline state that affects the next batch.
 
 ## Built-in components
 
-### Logger
+Built-ins are registered when `training_framework` is imported.
 
-`Logger` is registered under the hook name `logger`.
+### `logger` hook
 
-```python
-from training_framework.builtin_components import Logger
-
-session.register_hook(
-    Logger(
-        {
-            "log_every": 10,
-            "log_file": "./runs/training.log",  # optional
-        }
-    )
-)
+```yaml
+logger:
+  log_every: 10
+  log_file: ./runs/train.log  # optional
 ```
 
-It writes:
+It prints:
 
 ```text
 Iteration <current>/<maximum>
 ```
 
-If `log_file` is omitted, output is written to standard output. The parent directory for a configured log file must already exist.
+When `log_file` is omitted, output goes to standard output. Create the log file's parent directory before training.
 
-### Checkpointer
-
-`Checkpointer` is registered under the hook name `checkpointer`.
-
-Required configuration:
-
-```python
-{
-    "checkpoint_every": 100,
-    "checkpoints_dir": "./runs/checkpoints",  # optional
-}
-```
-
-When `checkpoints_dir` is omitted, checkpoints are written under the session directory. The directory is created automatically.
-
-### Tensorboard
-
-`Tensorboard` is registered under the resource name `tensorboard`.
-
-```python
-from training_framework.builtin_components import Tensorboard
-
-resource_id = session.register_resource(
-    Tensorboard(
-        {
-            "host": "127.0.0.1",
-            "port": 6006,
-            "logdir": "./runs/tensorboard",  # optional server log directory
-        }
-    )
-)
-
-# The writer is created during resource setup and is therefore available
-# only after the session has entered its context, including from steps/hooks.
-with session:
-    tensorboard = session.get_resource(resource_id)
-    writer = tensorboard.summary_writer
-    writer.add_scalar("example/value", 1.0, session.iteration)
-```
-
-On setup, the resource starts a TensorBoard subprocess and creates a PyTorch `SummaryWriter`. On teardown, it closes the writer and terminates the subprocess.
-
-The `tensorboard` executable must be available in the active environment, and the configured port must be free.
-
-## YAML configuration
-
-`Configurator` reads a YAML file from the first positional command-line argument. The root must contain a `sessions` list.
+### `checkpointer` hook
 
 ```yaml
-sessions:
-  - rng_seed: 42
-    sessions_dir: ./runs
-    max_iterations: 100
-    device: cpu
-
-    logger:
-      log_every: 10
-      log_file: ./runs/training.log
-
-    checkpointer:
-      checkpoint_every: 25
-      checkpoints_dir: ./runs/checkpoints
-
-    tensorboard:
-      host: 127.0.0.1
-      port: 6006
-      logdir: ./runs/tensorboard
+checkpointer:
+  checkpoint_every: 100
+  checkpoints_dir: ./runs/checkpoints  # optional
 ```
 
-Create sessions from the configuration:
+It saves the complete session object at its selected iterations.
+
+### `tensorboard` resource
+
+```yaml
+tensorboard:
+  host: "127.0.0.1"
+  port: 6006
+  logdir: ./runs/tensorboard  # optional server log directory
+```
+
+On setup, it:
+
+- starts the external `tensorboard` command;
+- creates a PyTorch `SummaryWriter`; and
+- exposes that writer through `summary_writer`.
 
 ```python
-from training_framework.configurator import Configurator
-from training_framework.training_engine import TrainingEngine
-
-configurator = Configurator()
-sessions = configurator.create_sessions()
-
-# Configurator attaches configured built-in Logger, Checkpointer, and
-# Tensorboard components. Attach application-specific steps and components here.
-for session in sessions:
-    session.add_step(...)
-
-engine = TrainingEngine({})
-for session in sessions:
-    engine.register_session(session)
-
-with engine:
-    engine.start_all()
+tensorboard = session.get_resource("tensorboard")
+tensorboard.summary_writer.add_scalar(
+    "train/loss",
+    loss,
+    session.iteration,
+)
 ```
 
-Run the program:
+On teardown, it closes the writer and terminates the TensorBoard process. The `tensorboard` executable must be available and the selected port must be free.
 
-```bash
-python train.py config.yaml
+### `ddp` resource
+
+Required fields:
+
+```yaml
+ddp:
+  world_size: 4
+  backend: nccl
+  master_addr: "127.0.0.1"
+  master_port: "12355"
+  parallel_components: []  # optional
 ```
 
-### Command-line overrides
+See [Distributed training with DDP](#distributed-training-with-ddp).
 
-Pass OmegaConf dot-list overrides after `--override`:
+## Infinite samplers
 
-```bash
-python train.py config.yaml --override \
-  'sessions[0].max_iterations=25' \
-  'sessions[0].logger.log_every=5'
-```
+### `InfiniteSampler`
 
-### Configurator API
-
-```python
-configurator.get_base_config(index)
-configurator.get_component_config(session_index, key)
-configurator.create_sessions()
-```
-
-`get_sub_config()` returns a deep copy of a mapping. It raises `KeyError` for a missing key and `ValueError` when the selected value is not a mapping.
-
-## Running multiple sessions
-
-```python
-engine = TrainingEngine({})
-
-engine.register_session(session_a)
-engine.register_session(session_b)
-
-with engine:
-    engine.start_all(wait=True)
-```
-
-`wait=True` starts every registered session and joins all worker threads before returning from `run_all()`.
-
-For non-blocking startup:
-
-```python
-with engine:
-    engine.start_all(wait=False)
-    # The worker threads are active here.
-    do_other_work()
-
-# Leaving the context clears each per-session active flag and joins every
-# still-running worker thread.
-```
-
-Shutdown is cooperative at iteration boundaries. A worker that has started checks its active flag before beginning the next iteration. If it is already inside `next(session)`, the current iteration is allowed to finish before the flag is checked again.
-
-Registering the same `TrainingSession` object twice in one engine raises `RuntimeError`.
-
-## InfiniteSampler
-
-`InfiniteSampler` repeatedly yields a new random permutation of indices from `0` through `n_samples - 1`.
+`InfiniteSampler` repeatedly yields random permutations of dataset indices:
 
 ```python
 from torch.utils.data import DataLoader
-
 from training_framework.dataloader import InfiniteSampler
 
+
 sampler = InfiniteSampler(len(dataset))
-loader = DataLoader(dataset, batch_size=32, sampler=sampler)
+loader = DataLoader(
+    dataset,
+    batch_size=32,
+    sampler=sampler,
+)
 ```
 
-The sampler has no natural end. Session iteration limits, rather than sampler exhaustion, should determine training length.
+It has no natural end. Use the session's `max_iterations` to bound training.
+
+### `DistributedInfiniteSampler`
+
+`DistributedInfiniteSampler` creates one deterministic, rank-specific slice of a shuffled global index sequence for each logical epoch:
+
+```python
+from training_framework.dataloader import DistributedInfiniteSampler
+
+
+sampler = DistributedInfiniteSampler(
+    num_samples=len(dataset),
+    rank=rank,
+    world_size=world_size,
+    shuffle=True,
+    seed=42,
+    drop_last=False,
+)
+```
+
+When rank and world size are omitted, it resolves them from an initialized PyTorch distributed process group, or falls back to rank 0 and world size 1.
+
+It exposes:
+
+```python
+state = sampler.get_state()
+sampler.set_state(state)
+```
+
+The iterator is infinite even though `len(sampler)` reports one rank-local logical epoch.
+
+> **Checkpointing note:** with `DataLoader(num_workers > 0)`, sampler indices may be prefetched before their batches are consumed. Treat exact mid-epoch sampler restoration as experimental and track consumed progress in the training loop when exact replay matters.
+
+## Direct session execution
+
+For single-process development or unit tests, a session can be driven without `TrainingEngine`:
+
+```python
+import yaml
+from training_framework.training_session import TrainingSession
+
+
+with open("my_project/config.yaml") as config_file:
+    config = yaml.safe_load(config_file)["sessions"][0]
+
+session = TrainingSession(config)
+
+with session:
+    for iteration in session:
+        print(iteration)
+```
+
+Direct execution bypasses spawned-worker supervision, error pipes, heartbeat monitoring, and rank-specific DDP reconstruction. Use `TrainingEngine` for the normal managed execution path.
 
 ## API summary
 
-### TrainingSession
+### `Configurator`
 
 | Member | Purpose |
 |---|---|
-| `TrainingSession(config)` | Create a session and seed its RNGs |
-| `register_resource(resource)` | Validate and register a resource; returns its instance ID |
-| `get_resource(resource_id)` | Retrieve a registered resource |
-| `register_hook(hook)` | Validate and register a hook |
-| `add_step(step)` | Validate and append a step |
-| `session_config` | Immutable `SessionConfig` |
-| `iteration` | Current iteration number |
-| `device` | Validated `torch.device` |
+| `Configurator()` | Parse command-line mode and options |
+| `mode` | `new`, `resume`, or `extend` |
+| `session_configs` | Deep copy of parsed YAML session configurations in new mode |
+| `checkpoint_path` | Checkpoint path in resume or extend mode |
+| `new_max_iters` | New iteration limit in extend mode |
+| `heartbeat_timeout` | Worker heartbeat deadline |
+| `process_timeout_on_join` | Graceful process-join timeout |
+| `get_component_config(session_index, key)` | Return a deep copy of one component mapping |
+| `get_all_component_configs(session_index)` | Return all non-`base_config` component mappings |
+
+### `TrainingEngine`
+
+| Member | Purpose |
+|---|---|
+| `TrainingEngine(configurator)` | Create a process manager from CLI configuration |
+| `start_session()` | Start all worker ranks for the active session; requires engine context |
+| `register_session(config)` | Construct a new parent session and worker wrappers |
+| `load_session(path, session_update_params=None)` | Load a checkpoint and prepare worker wrappers |
+| `request_stop_all()` | Request cooperative shutdown of started workers |
+
+Normal usage is:
+
+```python
+with TrainingEngine(Configurator()) as engine:
+    engine.start_session()
+```
+
+The engine monitors workers while leaving the context.
+
+### `TrainingSession`
+
+| Member | Purpose |
+|---|---|
+| `TrainingSession(config)` | Import components, construct a session, seed RNGs, and dump configuration |
+| `session_config` | Frozen `SessionConfig` containing seed, directory, and max iterations |
+| `iteration` | Current completed/in-progress iteration counter |
+| `device` | Active `torch.device` |
 | `session_context` | Session-lifetime shared dictionary |
 | `iteration_context` | Current-iteration shared dictionary; context-only |
-| `get_state()` | Return serializable session state |
-| `set_state(state)` | Restore session state |
+| `get_resource(name)` | Retrieve a configured resource |
+| `has_resource(name)` | Test whether a resource is present |
+| `get_all_resources()` | Return configured resources |
+| `get_all_hooks()` | Return configured hooks |
+| `get_all_steps()` | Return configured steps |
+| `register_resource(resource)` | Add a registered resource instance |
+| `register_hook(hook)` | Add a registered hook instance |
+| `add_step(step)` | Add a registered step instance |
+| `unregister_resource(name)` | Remove a resource from the session |
+| `unregister_hook(name)` | Remove a hook from the session |
+| `remove_step(name)` | Remove a step from the session |
+| `get_state()` | Capture serializable session state |
+| `set_state(state)` | Restore state into a session |
+| `TrainingSession.from_state(state)` | Reconstruct a session from captured state |
+| `update_max_iters(value)` | Replace the session's maximum iteration count |
 
-### TrainingEngine
-
-| Member | Purpose |
-|---|---|
-| `TrainingEngine(config)` | Create an engine |
-| `register_session(session)` | Register one session and create its worker thread |
-| `run_all(wait=True)` | Start all registered session threads |
-
-`run_all()` requires an active engine context.
-
-### Registries and decorators
+### Registration decorators
 
 | API | Purpose |
 |---|---|
-| `@resource(name)` | Register a resource class |
-| `@hook(name)` | Register a hook class |
-| `@step(name)` | Register a step class |
+| `@resource(name)` | Register a `Resource` subclass |
+| `@hook(name)` | Register a `Hook` subclass |
+| `@step(name)` | Register a `Step` subclass |
 | `@requires_resource(name)` | Declare a resource prerequisite |
 | `@requires_hook(name)` | Declare a hook prerequisite |
 | `@requires_step(name)` | Declare a step prerequisite |
+| `topological_sort_of_components()` | Validate and order the global component graph |
 
 ## Testing
 
-Install the project and run:
+Install the package in editable mode and run:
 
 ```bash
-pytest
+python -m pip install -e .
+python -m pytest
 ```
 
-The repository test suite covers:
+Run a focused file with:
 
-- session lifecycle and iteration ordering;
-- component registries and validation;
-- prerequisite decorators and category-aware dependency checks;
-- configuration parsing and overrides;
-- built-in Logger, Checkpointer, and TensorBoard behavior;
-- session-context sharing, persistence, and cleanup;
-- state and constructor-argument restoration;
-- Python, NumPy, and PyTorch training-state behavior;
-- threaded execution and cooperative shutdown;
-- duplicate session registration;
-- `InfiniteSampler` behavior.
+```bash
+python -m pytest src/tests/test_engine.py -q
+```
 
-The GitHub Actions workflow runs the suite on Python 3.12 and 3.13.
+The GitHub Actions workflow runs the suite on Python 3.12 and Python 3.13.
+
+The current tests cover areas including:
+
+- config-driven session execution;
+- component registration and dependency validation;
+- lifecycle and shared-context behavior;
+- state and RNG restoration;
+- checkpoint resume and extension;
+- real spawned-worker continuation and error propagation;
+- rank-specific DDP session reconstruction; and
+- heartbeat/process-monitoring behavior.
 
 ## Current behavior and limitations
 
-The following points describe the current `0.3.4` implementation:
+1. **The engine currently manages one active session definition per invocation.** Although YAML uses a `sessions` list, each registration replaces the engine's current worker-wrapper set. Use one list entry until multi-session orchestration is implemented.
 
-1. **Registration order matters.** A prerequisite must be registered before its consumer. Dependencies are validated but are not automatically resolved or sorted.
-2. **Circular dependencies are not detected.** Avoid dependency cycles between components.
-3. **Component registry names are global within a Python process.** Importing two classes with the same name in the same registry raises `ValueError`.
-4. **Custom component modules must be imported before checkpoint loading.** Restoration looks up classes in the global registries.
-5. **Constructor arguments and persistent state must be serializable.** This includes values stored in `session_context` at checkpoint time.
-6. **Thread shutdown is cooperative.** A long-running or blocked step can delay engine context exit because Python threads are not forcefully interrupted.
-7. **Session ownership is enforced only within one engine.** Do not register the same session object with multiple engines concurrently.
-8. **An engine's worker threads are created during registration and are intended for one start.** Create a new engine when a completely new execution run is required.
-9. **In version 0.3.4, session exit calls component `teardown` methods with `None`.** Implement the required parameter, but do not rely on it containing the session until the call site is changed to pass the active `TrainingSession`.
-10. **The built-in TensorBoard resource launches an external process and waits during setup.** Use an available port and ensure the executable can be started.
+2. **DDP is currently single-node oriented.** The process rank is used directly as the CUDA device index. There is no separate local-rank abstraction for multi-node execution.
+
+3. **DDP does not wrap models automatically.** Application resources must move models to `session.device` and construct `torch.nn.parallel.DistributedDataParallel` themselves.
+
+4. **Secondary-rank components are opt-in.** Ranks greater than zero retain only names in `ddp.parallel_components`, plus the DDP resource. Include every transitive runtime dependency required by those components.
+
+5. **Registries are global per interpreter.** Duplicate decorator names in one registry fail. Test suites that clear registries must account for Python's module import cache before expecting decorators to run again.
+
+6. **Spawn requires importable and serializable definitions.** Define worker targets and component classes at module scope. Constructor arguments, state returned by `get_state()`, and checkpointed session-context values must be serializable.
+
+7. **Heartbeat detection happens between framework stages.** A single long-running component call can exceed the deadline without sending another heartbeat. Set `--heartbeat-timeout` above the longest expected uninterrupted setup, hook, step, or teardown operation.
+
+8. **Graceful stopping occurs between iterations.** A worker already inside a component call will finish or block there until the join timeout causes termination.
+
+9. **Checkpoint files are trusted-code artifacts.** The built-in loader uses unrestricted Python deserialization. Never load an untrusted checkpoint.
+
+10. **Exact data-pipeline replay is application-dependent.** DataLoader prefetching can move a sampler's issued position ahead of consumed batches. Persist and restore committed batch progress when exact continuation is required.
+
+11. **An unavailable CUDA device currently falls back to CPU.** Validate the final `session.device` in application code when silent fallback is undesirable.
+
+12. **TensorBoard is an external process.** Starting it requires an available executable and port, and including it in DDP parallel components would start one server per retained rank.
 
 ## Project layout
 
 ```text
 training-framework/
-├── .github/workflows/python-tests.yaml
-├── pyproject.toml
-├── README.md
+├── .github/
+│   └── workflows/
+│       └── python-tests.yaml
+├── src/
+│   ├── training_framework/
+│   │   ├── __init__.py
+│   │   ├── builtin_components.py
+│   │   ├── configurator.py
+│   │   ├── dataloader.py
+│   │   ├── training_engine.py
+│   │   ├── training_session.py
+│   │   └── util.py
+│   └── tests/
 ├── LICENSE
-└── src/
-    ├── training_framework/
-    │   ├── configurator.py
-    │   ├── dataloader.py
-    │   ├── resources.py
-    │   ├── training_engine.py
-    │   ├── training_session.py
-    │   └── util.py
-    └── tests/
-        ├── test_registrations.py
-        ├── test_session_context.py
-        ├── test_state_loading.py
-        ├── test_threads.py
-        ├── test_training_framework_additional.py
-        └── test_training_session.py
+├── README.md
+└── pyproject.toml
 ```
 
 ## License
 
-This repository is distributed under the [Apache License 2.0](./LICENSE).
-
+This repository is licensed under the [Apache License 2.0](./LICENSE).
 
 ---
-
-This README was generated with the assistance of ChatGPT. In case you come across some errors please report it by creating a new issue.
+**Author Note**
+This README was generated using ChatGPT. Although, I have done an overview of it, please open an issue if you find anything missing and inconsistent.
