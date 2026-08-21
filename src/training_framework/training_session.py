@@ -40,7 +40,7 @@ from training_framework.registry import (
 )
 from training_framework.session_components import SessionComponents
 from training_framework.session_config import SessionConfig, SessionPhase
-from training_framework.session_io import ConfigDumper, write_session_config
+from training_framework.session_io import write_session_config
 from training_framework.session_state import (
     capture_component_collection,
     capture_rng_state,
@@ -120,13 +120,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._register_default_components()
         self._register_components()
-
-        ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
-        if ddp_resource is None or cast(Any, ddp_resource).rank == -1:
-            write_session_config(
-                self.session_config.session_dir,
-                self.full_config,
-            )
 
     def _set_component_collections(
             self,
@@ -487,6 +480,14 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             self._teardown_resources(after_exception=True)
             self._session_context.clear()
             raise
+
+        # Dump config (only for rank 0)
+        ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
+        if ddp_resource is None or cast(Any, ddp_resource).rank == 0:
+            write_session_config(
+                self.session_config.session_dir,
+                self.full_config,
+            )
 
         self._phase = SessionPhase.READY
         return self
