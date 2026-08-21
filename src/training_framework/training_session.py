@@ -519,8 +519,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 "traceback": traceback.format_exc(),
             })
 
-        self._teardown_resources()
         self._teardown_session_hooks()
+        self._teardown_resources()
         self._session_context.clear()
 
         if self._phase is SessionPhase.READY:
