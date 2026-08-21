@@ -61,3 +61,32 @@ def test_config_driven_session_runs_training_and_lifecycle_end_to_end(tmp_path):
         "model_teardown",
         "metrics_teardown",
     ]
+
+
+
+def test_default_components_are_available_through_public_api(tmp_path):
+    register_test_components()
+    session = TrainingSession(session_config(tmp_path, max_iterations=4))
+
+    hook_names = {
+        component.name for component in session.get_all_hooks()
+    }
+    assert {"logger", "checkpointer"} <= hook_names
+    assert not session.has_resource("tensorboard")
+
+
+def test_explicit_builtin_configs_override_defaults_and_enable_tensorboard(tmp_path):
+    register_test_components()
+    config = session_config(tmp_path, max_iterations=4)
+    config.update({
+        "logger": {"log_every": 3},
+        "checkpointer": {"checkpoint_every": 2},
+        "tensorboard": {"host": "127.0.0.1", "port": 6006},
+    })
+
+    session = TrainingSession(config)
+
+    hooks = {component.name: component for component in session.get_all_hooks()}
+    assert hooks["logger"].call_every == 3
+    assert hooks["checkpointer"].call_every == 2
+    assert session.has_resource("tensorboard")

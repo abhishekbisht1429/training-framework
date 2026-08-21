@@ -9,6 +9,7 @@ from typing import Any, cast, override
 import numpy as np
 import torch
 
+from training_framework.builtin_components import Logger, Checkpointer
 from training_framework.components import (
     Hook,
     IterationHook,
@@ -117,6 +118,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._phase = SessionPhase.NEW
 
+        self._register_default_components()
         self._register_components()
 
         ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
@@ -141,6 +143,21 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._resources = self._components.resources
         self._steps = self._components.steps
         self._hooks = self._components.hooks
+
+    def _register_default_components(self) -> None:
+        # Register logger
+        self.register_hook(
+            Logger({
+                'log_every': 10
+            })
+        )
+
+        # Register Checkpointer
+        self.register_hook(
+            Checkpointer({
+                'checkpoint_every': 100,
+            })
+        )
 
     def _register_components(self) -> None:
         self._components.register_from_config(self._config)
@@ -321,14 +338,14 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def get_all_steps(self):
         return list(self._steps.values())
 
-    def register_resource(self, component: Resource):
-        return self._components.register_resource(component)
+    def register_resource(self, component: Resource, overwrite=False):
+        return self._components.register_resource(component, overwrite=overwrite)
 
-    def register_hook(self, component: Hook):
-        self._components.register_hook(component)
+    def register_hook(self, component: Hook, overwrite=False):
+        return self._components.register_hook(component, overwrite=overwrite)
 
-    def add_step(self, component: Step):
-        self._components.add_step(component)
+    def add_step(self, component: Step, overwrite=False):
+        return self._components.add_step(component, overwrite=overwrite)
 
     def remove_step(self, step_name):
         self._components.remove_step(step_name)

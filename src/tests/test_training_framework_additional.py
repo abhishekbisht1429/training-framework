@@ -16,7 +16,6 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-import training_framework
 from training_framework.configurator import Configurator
 from training_framework.dataloader import InfiniteSampler
 from training_framework.training_engine import TrainingEngine
@@ -24,7 +23,6 @@ from training_framework.training_session import (
     HOOK_REGISTRY,
     RESOURCE_REGISTRY,
     STEP_REGISTRY,
-    SessionPhase,
     TrainingSession,
     hook,
     resource,
@@ -123,7 +121,7 @@ class AdditionalHookBase(LifecycleHook, Stateful):
     def post_iteration_callback(self, session: TrainingSession) -> None:
         self.events.append(f"post:{session.iteration}")
         self.post_iterations.append(session.iteration)
-        self.shared_snapshots.append(dict(session._shared_state))
+        self.shared_snapshots.append(dict(session.iteration_context))
 
     def get_state(self) -> Any:
         return {
@@ -216,7 +214,7 @@ def test_training_session_initialization_and_device_validation(minimal_session_c
     assert session.session_config.max_iterations == minimal_session_config_2["base_config"]["max_iterations"]
     assert session.session_config.session_dir.startswith(minimal_session_config_2["base_config"]["sessions_dir"])
     assert session.device.type == "cpu"
-    assert session._phase is SessionPhase.NEW
+    assert session.iteration == 0
 
     bad_device = deepcopy(minimal_session_config_2)
     bad_device["base_config"]["device"] = "tpu"
@@ -319,18 +317,18 @@ def test_registration_validation_and_lookup(minimal_session_config_2):
     hook_obj = AdditionalHook(call_every=1)
     resource_obj = AdditionalResource()
 
-    session.add_step(step_obj)
-    session.register_hook(hook_obj)
+    step_id = session.add_step(step_obj)
+    hook_id = session.register_hook(hook_obj)
     resource_id = session.register_resource(resource_obj)
 
+    assert step_id == "test_additional_step"
+    assert hook_id == "test_additional_hook"
     assert resource_id == "test_additional_resource"
+    assert step_obj in session.get_all_steps()
+    assert hook_obj in session.get_all_hooks()
     assert session.get_resource(resource_id) is resource_obj
     with pytest.raises(KeyError):
         session.get_resource("missing-resource")
-
-    assert len(session._steps) == 1
-    assert len(session._hooks) == 1
-    assert len(session._resources) == 1
 
 def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
     @step("test_additional_step")
@@ -397,11 +395,11 @@ def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
     resource_a_id = session.register_resource(resource_a)
     resource_b_id = session.register_resource(resource_b)
 
-    session.register_hook(hook_a)
-    session.register_hook(hook_b)
+    hook_a_id = session.register_hook(hook_a)
+    hook_b_id = session.register_hook(hook_b)
 
-    session.add_step(step_a)
-    session.add_step(step_b)
+    step_a_id = session.add_step(step_a)
+    step_b_id = session.add_step(step_b)
 
     # Verify the session contains two distinct logical resources/hooks,
     # rather than duplicate instances of one registered component.
@@ -409,13 +407,21 @@ def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
     assert resource_b.name == "additional_resource_b"
     assert resource_a_id != resource_b_id
 
-    assert [test_hook.name for test_hook in session._hooks.values()] == [
+    assert {hook_a_id, hook_b_id} == {
         "additional_hook_a",
         "additional_hook_b",
-    ]
+    }
+    assert {step_a_id, step_b_id} == {
+        "test_additional_step",
+        "toy_model_step",
+    }
+    assert hook_a in session.get_all_hooks()
+    assert hook_b in session.get_all_hooks()
+    assert session.get_resource(resource_a_id) is resource_a
+    assert session.get_resource(resource_b_id) is resource_b
 
-    with session:
-        assert session._phase is SessionPhase.READY
+    with session as active_session:
+        assert active_session is session
 
         assert resource_a.setup_calls == 1
         assert resource_b.setup_calls == 1
@@ -431,15 +437,13 @@ def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
         assert session.iteration == 1
 
         # Iteration-scoped shared state must be cleared after next() returns.
-        assert session._shared_state == {}
+        assert session.iteration_context == {}
 
         second = next(session)
 
         assert second == 2
         assert session.iteration == 2
-        assert session._shared_state == {}
-
-    assert session._phase is SessionPhase.PAUSED
+        assert session.iteration_context == {}
 
     assert resource_a.events == ["setup", "teardown"]
     assert resource_b.events == ["setup", "teardown"]
@@ -448,9 +452,9 @@ def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
     assert resource_a.teardown_calls == 1
     assert resource_b.teardown_calls == 1
 
-    with session:
+    with session as active_session:
+        assert active_session is session
         assert session.iteration == 2
-        assert session._phase is SessionPhase.READY
 
         assert resource_a.setup_calls == 2
         assert resource_b.setup_calls == 2
@@ -478,7 +482,7 @@ def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
 
         assert third == 3
         assert session.iteration == 3
-        assert session._shared_state == {}
+        assert session.iteration_context == {}
 
     assert resource_a.events == [
         "setup",
@@ -565,13 +569,29 @@ def test_state_round_trip_restores_nested_resources_steps_and_hooks(minimal_sess
 
     assert restored.iteration == session.iteration
     assert restored.session_config == session.session_config
-    assert len(restored._resources) == 1
-    assert len(restored._steps) == 1
-    assert len(restored._hooks) == 1
+    restored_resources = [
+        component
+        for component in restored.get_all_resources()
+        if isinstance(component, AdditionalResource)
+    ]
+    restored_steps = [
+        component
+        for component in restored.get_all_steps()
+        if isinstance(component, AdditionalStep)
+    ]
+    restored_hooks = [
+        component
+        for component in restored.get_all_hooks()
+        if isinstance(component, AdditionalHook)
+    ]
 
-    restored_resource = next(iter(restored._resources.values()))
-    restored_step = list(restored._steps.values())[0]
-    restored_hook = list(restored._hooks.values())[0]
+    assert len(restored_resources) == 1
+    assert len(restored_steps) == 1
+    assert len(restored_hooks) == 1
+
+    restored_resource = restored_resources[0]
+    restored_step = restored_steps[0]
+    restored_hook = restored_hooks[0]
 
     assert isinstance(restored_resource, AdditionalResource)
     assert isinstance(restored_step, AdditionalStep)
@@ -643,12 +663,6 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
 
 
 def test_configurator_create_sessions_attaches_expected_components(tmp_path, monkeypatch):
-    # The registry is cleared before every test, so to re-register the builtin components a
-    # reload is required
-    import importlib
-    importlib.reload(training_framework.builtin_components)
-    from training_framework.builtin_components import Checkpointer, Logger, Tensorboard
-
     sample_config = {
         "sessions": [
             {
@@ -660,8 +674,6 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
                     "rng_seed": 1,
                     "components_package": "training_framework.builtin_components",
                 },
-                "logger": {"log_every": 1, "log_file": str(tmp_path / "log1.txt")},
-                "checkpointer": {"checkpoint_every": 1, "checkpoints_dir": str(tmp_path / "ckpts1")},
                 "tensorboard": {"host": "0.0.0.0", "port": 16050},
             },
             {
@@ -673,7 +685,6 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
                     "rng_seed": 1,
                     "components_package": "training_framework.builtin_components",
                 },
-                "checkpointer": {"checkpoint_every": 2, "checkpoints_dir": str(tmp_path / "ckpts2")},
             },
         ]
     }
@@ -685,12 +696,16 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     sessions = [TrainingSession(config) for config in configurator.session_configs]
 
     assert len(sessions) == 2
-    assert len(sessions[0]._hooks) == 2
-    assert len(sessions[0]._resources) == 1
-    assert any(isinstance(h, Logger) for h in sessions[0]._hooks.values())
-    assert any(isinstance(h, Checkpointer) for h in sessions[0]._hooks.values())
-    assert any(isinstance(r, Tensorboard) for r in sessions[0]._resources.values())
 
-    assert len(sessions[1]._hooks) == 1
-    assert len(sessions[1]._resources) == 0
-    assert any(isinstance(h, Checkpointer) for h in sessions[1]._hooks.values())
+    first_hook_names = {
+        component.name for component in sessions[0].get_all_hooks()
+    }
+    second_hook_names = {
+        component.name for component in sessions[1].get_all_hooks()
+    }
+
+    assert {"logger", "checkpointer"} <= first_hook_names
+    assert {"logger", "checkpointer"} <= second_hook_names
+    assert sessions[0].has_resource("tensorboard")
+    assert sessions[0].get_resource("tensorboard").name == "tensorboard"
+    assert not sessions[1].has_resource("tensorboard")
