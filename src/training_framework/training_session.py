@@ -2,276 +2,87 @@ import os
 import random
 import time
 import traceback
-from abc import ABC, abstractmethod
-from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum, auto
-from typing import Any, override, List
+from typing import Any, cast, override
 
 import numpy as np
 import torch
-import yaml
 
-from training_framework.util import context_entry, context_exit, requires_context, CaptureInitMeta, import_all_modules
+from training_framework.components import (
+    Hook,
+    IterationHook,
+    LifecycleHook,
+    Resource,
+    SessionHook,
+    Stateful,
+    StatefulIterationHook,
+    StatefulLifecycleHook,
+    StatefulLifeCycleHook,
+    StatefulResource,
+    StatefulSessionHook,
+    StatefulStep,
+    Step,
+)
+from training_framework.registry import (
+    HOOK_REGISTRY,
+    RESOURCE_REGISTRY,
+    STEP_REGISTRY,
+    hook,
+    make_registry,
+    requires_hook,
+    requires_resource,
+    requires_step,
+    resource,
+    step,
+    topological_sort_of_components,
+)
+from training_framework.session_components import SessionComponents
+from training_framework.session_config import SessionConfig, SessionPhase
+from training_framework.session_io import ConfigDumper, write_session_config
+from training_framework.session_state import (
+    capture_component_collection,
+    capture_rng_state,
+    restore_component_collection,
+    restore_rng_state,
+)
+from training_framework.util import (
+    CaptureInitMeta,
+    context_entry,
+    context_exit,
+    import_all_modules,
+    requires_context,
+)
+
+__all__ = [
+    "HOOK_REGISTRY",
+    "Hook",
+    "IterationHook",
+    "LifecycleHook",
+    "RESOURCE_REGISTRY",
+    "Resource",
+    "STEP_REGISTRY",
+    "SessionConfig",
+    "SessionHook",
+    "SessionPhase",
+    "Stateful",
+    "StatefulIterationHook",
+    "StatefulLifeCycleHook",
+    "StatefulLifecycleHook",
+    "StatefulResource",
+    "StatefulSessionHook",
+    "StatefulStep",
+    "Step",
+    "TrainingSession",
+    "hook",
+    "make_registry",
+    "requires_hook",
+    "requires_resource",
+    "requires_step",
+    "resource",
+    "step"
+]
 
-
-#TODO: check for circular dependencies later
-
-@dataclass(frozen=True)
-class SessionConfig:
-    rng_seed: int
-    session_dir: str
-    max_iterations: int
-
-
-class SessionPhase(Enum):
-    NEW = auto()
-    READY = auto()
-    RUNNING = auto()
-    PAUSED = auto()
-    FINISHED = auto()
-    INTERRUPTED = auto()
-
-
-class Stateful(ABC):
-    @abstractmethod
-    def get_state(self) -> Any:
-        raise NotImplementedError
-
-    @abstractmethod
-    def set_state(self, state: Any) -> None:
-        raise NotImplementedError
-
-    def __getstate__(self) -> Any:
-        return self.get_state()
-
-
-    def __setstate__(self, state: Any) -> None:
-        self.set_state(state)
-
-
-class Hook(ABC, metaclass=CaptureInitMeta):
-    name: str
-    pass
-
-
-class SessionHook(Hook, ABC):
-    @abstractmethod
-    def setup(self,  session: "TrainingSession"):
-        pass
-
-    @abstractmethod
-    def teardown(self, session: "TrainingSession"):
-        pass
-
-
-class IterationHook(Hook, ABC):
-    call_every: int
-    @abstractmethod
-    def pre_iteration_callback(self, session: "TrainingSession") -> None:
-        pass
-
-    @abstractmethod
-    def post_iteration_callback(self, session: "TrainingSession") -> None:
-        pass
-
-
-class LifecycleHook(SessionHook, IterationHook, ABC):
-    """
-    An instance of this class wraps two callbacks (pre and post) around training iteration.
-    The callbacks would be called for an iteration that is multiple of 'call_every'.
-    pre would be called before the iteration starts and post would be called after it is finished.
-    """
-    pass
-
-
-class Resource(ABC, metaclass=CaptureInitMeta):
-    name: str
-
-    @abstractmethod
-    def setup(self, session: "TrainingSession"):
-        pass
-
-    @abstractmethod
-    def teardown(self, session: "TrainingSession"):
-        pass
-
-
-class Step(ABC, metaclass=CaptureInitMeta):
-    name: str
-
-    @abstractmethod
-    def run(self, session: "TrainingSession") -> None:
-        pass
-
-
-class StatefulIterationHook(IterationHook, Stateful, ABC):
-    pass
-
-
-class StatefulSessionHook(SessionHook, Stateful, ABC):
-    pass
-
-
-class StatefulLifeCycleHook(LifecycleHook, Stateful, ABC):
-    pass
-
-
-class StatefulStep(Step, Stateful, ABC):
-    pass
-
-
-class StatefulResource(Resource, Stateful, ABC):
-    pass
-
-# ==================== Registry ================
-def make_registry(type):
-    registry = {}
-
-    def register(name: str):
-        def wrapper(cls):
-            if not issubclass(cls, type):
-                raise TypeError(f"{cls.__name__} must be subclass of {type.__name__}")
-            if name in registry:
-                raise ValueError(f"{type} with name '{name}' already registered")
-            registry[name] = cls
-            cls.name = name
-            cls.id = f"{type.__name__}.{cls.name}"
-            return cls
-        return wrapper
-
-    return registry, register
-
-HOOK_REGISTRY, hook = make_registry(Hook)
-RESOURCE_REGISTRY, resource = make_registry(Resource)
-STEP_REGISTRY, step = make_registry(Step)
-# ====================================================
-
-def requires_step(step_name: str):
-    def wrapper(cls):
-        # A step can only be required by another step.
-        if not issubclass(cls, Step):
-            raise TypeError(
-                f"@requires_step can only be applied to Step subclasses. "
-                f"'{cls.__name__}' is not a Step."
-            )
-
-        if "required_steps" not in cls.__dict__:
-            cls.required_steps = []
-
-        cls.required_steps.append(step_name)
-        return cls
-
-    return wrapper
-
-
-def requires_hook(hook_name: str):
-    def wrapper(cls):
-        # A hook can only be required by a step or another hook.
-        if not issubclass(cls, (Step, Hook)):
-            raise TypeError(
-                f"@requires_hook can only be applied to Step or Hook subclasses. "
-                f"'{cls.__name__}' is neither."
-            )
-
-        if "required_hooks" not in cls.__dict__:
-            cls.required_hooks = []
-
-        cls.required_hooks.append(hook_name)
-        return cls
-
-    return wrapper
-
-def requires_resource(resource_name: str):
-    def wrapper(cls):
-        if not issubclass(cls, (Step, Hook, Resource)):
-            raise TypeError(
-                "@requires_resource can only be applied to Step, Hook, "
-                f"or Resource subclasses. '{cls.__name__}' is neither."
-            )
-
-        if "required_resources" not in cls.__dict__:
-            cls.required_resources = list(
-                getattr(cls, "required_resources", ())
-            )
-
-        cls.required_resources.append(resource_name)
-        return cls
-
-    return wrapper
-
-def topological_sort_of_components():
-    # NOTE: the requires_<component> decorator ensure the correct dependency order between
-    # the different types of components, so we are not checking for that here again
-    components = list(STEP_REGISTRY.values()) + list(HOOK_REGISTRY.values()) + list(RESOURCE_REGISTRY.values())
-
-    prerequisites_graph: dict[str, List[str]] = {component.id: [] for component in components}
-    for component in components:
-        for required_hook_name in getattr(component, 'required_hooks', []):
-            if required_hook_name not in HOOK_REGISTRY:
-                raise RuntimeError(f"unmet prerequisite! '{required_hook_name}' not registered.")
-            prerequisites_graph[component.id].append(HOOK_REGISTRY[required_hook_name].id)
-
-        for required_step_name in getattr(component, 'required_steps', []):
-            if required_step_name not in STEP_REGISTRY:
-                raise RuntimeError(f"unmet prerequisite! '{required_step_name}' not registered.")
-            prerequisites_graph[component.id].append(STEP_REGISTRY[required_step_name].id)
-
-        for required_resource_name in getattr(component, 'required_resources', []):
-            if required_resource_name not in RESOURCE_REGISTRY:
-                raise RuntimeError(f"unmet prerequisite! '{required_resource_name}' not registered.")
-            prerequisites_graph[component.id].append(RESOURCE_REGISTRY[required_resource_name].id)
-
-    # create dependents graph
-    dependents_graph: dict[str, List[str]] = {component_id: [] for component_id in prerequisites_graph.keys()}
-    for component_id, prerequisites in prerequisites_graph.items():
-        for prerequisite in prerequisites:
-            dependents_graph[prerequisite].append(component_id)
-
-    queue = deque()
-
-    # find prereq count
-    prereq_count = {}
-    for component_id, prereqs in prerequisites_graph.items():
-        prereq_count[component_id] = len(prereqs)
-        if prereq_count[component_id] == 0:
-            queue.append(component_id)
-
-    sorted_components = []
-
-    while len(queue) > 0:
-        front_node = queue.popleft()
-        sorted_components.append(front_node)
-
-        for dependent_id in dependents_graph[front_node]:
-            prereq_count[dependent_id] -= 1
-
-            if prereq_count[dependent_id] == 0:
-                queue.append(dependent_id)
-
-    if len(sorted_components) != len(prerequisites_graph):
-        raise RuntimeError("Cyclic dependency detected in the component graph!")
-
-
-    index_of_component: dict[str, int] = {}
-    for i, component_id in enumerate(sorted_components):
-        index_of_component[component_id] = i
-
-    return index_of_component
-
-@hook("config_dumper")
-class ConfigDumper(SessionHook):
-
-    def setup(self, session: "TrainingSession") -> Any:
-        session_dir = session.session_config.session_dir
-        config_dump_path = os.path.join(session_dir, "config.yaml")
-        with open(config_dump_path, "w") as f:
-            yaml.safe_dump(session.full_config, f)
-
-    def teardown(self, session: "TrainingSession"):
-        pass
 
 class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
@@ -289,10 +100,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             max_iterations=self._base_config['max_iterations'],
         )
 
-        # callbacks
-        self._resources: dict[str, Resource] = {}
-        self._steps: dict[str, Step] = {}
-        self._hooks: dict[str, Hook] = {}
+        self._set_component_collections()
 
         # session essentials
         self._iteration = 0
@@ -311,37 +119,31 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._register_components()
 
-        # dump config
-        # TODO: move it to an internal hook later (modify registry clearance in tests so that internal components remain)
-        ddp_res = self.get_resource('ddp') if self.has_resource('ddp') else None
-        # dump config only once when the session object is created in the main process
-        if ddp_res is None or ddp_res.rank == -1:
-            os.makedirs(self.session_config.session_dir, exist_ok=True)
-            config_dump_path = os.path.join(self.session_config.session_dir, "config.yaml")
-            with open(config_dump_path, "w") as f:
-                yaml.safe_dump(self.full_config, f)
+        ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
+        if ddp_resource is None or cast(Any, ddp_resource).rank == -1:
+            write_session_config(
+                self.session_config.session_dir,
+                self.full_config,
+            )
 
-    def _register_components(self):
-        for name in self._config.keys():
-            if name in ["base_config"]:
-                continue
-            if name in STEP_REGISTRY:
-                step_config = self._config[name]
-                step_cls = STEP_REGISTRY[name]
-                step_obj = step_cls(step_config)
-                self.add_step(step_obj)
-            elif name in HOOK_REGISTRY:
-                hook_config = self._config[name]
-                hook_cls = HOOK_REGISTRY[name]
-                hook_obj = hook_cls(hook_config)
-                self.register_hook(hook_obj)
-            elif name in RESOURCE_REGISTRY:
-                resource_config = self._config[name]
-                resource_cls = RESOURCE_REGISTRY[name]
-                resource_obj = resource_cls(resource_config)
-                self.register_resource(resource_obj)
-            else:
-                raise ValueError(f"No step, hook or resource registered with name '{name}'!")
+    def _set_component_collections(
+            self,
+            *,
+            resources: dict[str, Resource] | None = None,
+            steps: dict[str, Step] | None = None,
+            hooks: dict[str, Hook] | None = None,
+    ) -> None:
+        self._components = SessionComponents(
+            resources=resources,
+            steps=steps,
+            hooks=hooks,
+        )
+        self._resources = self._components.resources
+        self._steps = self._components.steps
+        self._hooks = self._components.hooks
+
+    def _register_components(self) -> None:
+        self._components.register_from_config(self._config)
 
     # will contain only those attributes which need to be recreated after state load
     def _init_transient_infra(self):
@@ -364,105 +166,84 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @override
     def get_state(self):
         state = {
-            'config': self._base_config,
-            'iteration': self._iteration,
-            'torch_rng_state': torch.get_rng_state(),
-            'python_rng_state': random.getstate(),
-            'cuda_rng_state': torch.cuda.get_rng_state_all(),
-            'np_rng_state': np.random.get_state(),
-            "base_config": self._session_config,
-            'resources_state': {
-                name: {
-                    'state': resource.get_state() if isinstance(resource, Stateful) else None,
-                    'init_args': resource._init_args
-                } for name, resource in self._resources.items()
-            },
-            'steps_state': {
-                name: {
-                    'state': step.get_state() if isinstance(step, Stateful) else None,
-                    'init_args': step._init_args
-                } for name, step in self._steps.items()
-            },
-            'hooks_state': {
-                name: {
-                    'state': hook.get_state() if isinstance(hook, Stateful) else None,
-                    'init_args': hook._init_args
-                } for name, hook in self._hooks.items()
-            },
-            'session_context': deepcopy(self._session_context),
-            'init_args': self._init_args
+            "config": deepcopy(self._config),
+            "base_config": deepcopy(self._base_config),
+            "session_config": self._session_config,
+            "iteration": self._iteration,
+            "resources_state": capture_component_collection(self._resources),
+            "steps_state": capture_component_collection(self._steps),
+            "hooks_state": capture_component_collection(self._hooks),
+            "session_context": deepcopy(self._session_context),
+            "init_args": self._init_args,
         }
-
+        state.update(capture_rng_state())
         return state
+
+    @staticmethod
+    def _configuration_from_state(state):
+        if "session_config" in state:
+            return (
+                state["config"],
+                state["base_config"],
+                state["session_config"],
+            )
+
+        init_args = state["init_args"]
+        if init_args["args"]:
+            config = init_args["args"][0]
+        else:
+            config = init_args["kwargs"]["config"]
+
+        return config, state["config"], state["base_config"]
 
     @override
     def set_state(self, state):
-        # 1. Restore configuration and tracking variables
-        self._base_config = state['config']
-        self._iteration = state['iteration']
-        self._session_config = state["base_config"]
+        (
+            self._config,
+            self._base_config,
+            self._session_config,
+        ) = self._configuration_from_state(state)
+        self._iteration = state["iteration"]
 
-        # Guard CUDA restoration in case code is loaded on a CPU-only machine
-        if torch.cuda.is_available() and 'cuda_rng_state' in state:
-            torch.cuda.set_rng_state_all(state['cuda_rng_state'])
+        self._set_component_collections(
+            resources=restore_component_collection(
+                state["resources_state"],
+                RESOURCE_REGISTRY,
+            ),
+            steps=restore_component_collection(
+                state["steps_state"],
+                STEP_REGISTRY,
+            ),
+            hooks=restore_component_collection(
+                state["hooks_state"],
+                HOOK_REGISTRY,
+            ),
+        )
 
-        # Dynamically Reconstruct Polymorphic Nested Collections
-
-        # Rebuild resources
-        self._resources: dict[str, Resource] = {}
-        for name, resource_info in state['resources_state'].items():
-            cls = RESOURCE_REGISTRY[name]
-            init_args = resource_info['init_args']
-            obj = cls(*init_args['args'], **init_args['kwargs'])
-            if issubclass(cls, Stateful):
-                resource_state = resource_info['state']
-                obj.set_state(resource_state)
-            self._resources[name] = obj
-
-
-        # Rebuild steps
-        self._steps: dict[str, Step] = {}
-        for name, step_info in state['steps_state'].items():
-            cls = STEP_REGISTRY[name]
-            init_args = step_info['init_args']
-            obj = cls(*init_args['args'], **init_args['kwargs'])
-            if issubclass(cls, Stateful):
-                step_state = step_info['state']
-                obj.set_state(step_state)
-            self._steps[name] = obj
-
-        # Rebuild hooks
-        self._hooks: dict[str, "Hook"] = {}
-        for name, hook_info in state['hooks_state'].items():
-            cls = HOOK_REGISTRY[name]
-            init_args = hook_info['init_args']
-            obj = cls(*init_args['args'], **init_args['kwargs'])
-            if issubclass(cls, Stateful):
-                hook_state = hook_info['state']
-                obj.set_state(hook_state)
-            self._hooks[name] = obj
-
-        # Restore session context
-        self._session_context = state['session_context']
+        self._session_context = state["session_context"]
         self._init_transient_infra()
+        restore_rng_state(state)
 
-        # Restore Global RNG (Random Number Generator) States
-        torch.set_rng_state(state['torch_rng_state'])
-        random.setstate(state['python_rng_state'])
-        np.random.set_state(state['np_rng_state'])
-        # TODO: maybe change the session phase to paused after restoration (by default it is set to new)
+    def _prepare_for_state_restore(self, state) -> None:
+        self._init_args = state["init_args"]
+        (
+            self._config,
+            self._base_config,
+            self._session_config,
+        ) = self._configuration_from_state(state)
+        self._session_context = {}
+        self._phase = SessionPhase.NEW
+        import_all_modules(self._base_config["components_package"])
 
     @override
     def __setstate__(self, state):
-        init_args = state['init_args']
-        self.__init__(*init_args['args'], **init_args['kwargs'])
+        self._prepare_for_state_restore(state)
         self.set_state(state)
 
     @classmethod
     def from_state(cls, session_state):
-        init_args = session_state['init_args']
-        obj = cls(*init_args['args'], **init_args['kwargs'])
-        obj.set_state(session_state)
+        obj = cls.__new__(cls)
+        obj.__setstate__(session_state)
         return obj
 
     # --------------------------- Public properties----------------------
@@ -490,50 +271,43 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @requires_context
     def iteration_context(self):
         return self._shared_state
+
     # --------------------------------------------------------------------
 
-    # ---------------------- Helper private attributes ----------------------
     @property
     def _sorted_hooks(self):
-        order_of_components = topological_sort_of_components()
-        return sorted(list(self._hooks.values()), key=lambda hook: order_of_components[hook.id])
+        return self._components.ordered_hooks
 
     @property
     def _sorted_resources(self):
-        order_of_components = topological_sort_of_components()
-        return sorted(list(self._resources.values()), key=lambda resource: order_of_components[resource.id])
+        return self._components.ordered_resources
 
     @property
     def _sorted_steps(self):
-        order_of_components = topological_sort_of_components()
-        return sorted(list(self._steps.values()), key=lambda step: order_of_components[step.id])
+        return self._components.ordered_steps
 
     @property
     def _stateful_hooks(self):
-        return [hook for hook in self._sorted_hooks if isinstance(hook, Stateful)]
+        return [
+            component
+            for component in self._sorted_hooks
+            if isinstance(component, Stateful)
+        ]
 
     @property
     def _iteration_hooks(self):
-        return [hook for hook in self._sorted_hooks if isinstance(hook, IterationHook)]
+        return self._components.iteration_hooks
 
     @property
     def _session_hooks(self):
-        return [hook for hook in self._sorted_hooks if isinstance(hook, SessionHook)]
-
-    # ------------------------------------------------------------------------
-
-    # ---------------------- Shared Context Management -----------------------
+        return self._components.session_hooks
 
     @requires_context
     def _clear_iteration_state(self):
         self._shared_state.clear()
 
-    # ----------------------------------------------------------------------
-    # TODO: can we make a check that only those resources which are labeled as required can be accessed through the method below ?
     def get_resource(self, key: str):
-        if key not in self._resources:
-            raise KeyError(f"{key} not found in resources!")
-        return self._resources[key]
+        return self._components.get_resource(key)
 
     def has_resource(self, resource_name):
         return resource_name in self._resources
@@ -547,86 +321,23 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def get_all_steps(self):
         return list(self._steps.values())
 
-    # ================= component modifiers ======================
+    def register_resource(self, component: Resource):
+        return self._components.register_resource(component)
 
-    def register_resource(self, resource: Resource):
-        if not isinstance(resource, Resource):
-            raise TypeError(
-                f"The provided object '{type(resource).__name__}' "
-                f"is not an instance of {Resource.__name__}!"
-            )
+    def register_hook(self, component: Hook):
+        self._components.register_hook(component)
 
-        if not hasattr(resource, "name") or resource.name not in RESOURCE_REGISTRY:
-            raise ValueError(
-                f"Resource '{type(resource).__name__}' "
-                "not registered in RESOURCE_REGISTRY!"
-            )
-
-        if resource.name in self._resources:
-            raise ValueError(f"Resource '{resource.name}' already registered!")
-
-        self._resources[resource.name] = resource
-
-        return resource.name
-
-    def register_hook(self, hook: Hook):
-        if not isinstance(hook, Hook):
-            raise TypeError(
-                f"The provided object '{type(hook).__name__}' "
-                f"is not an instance of {Hook.__name__}!"
-            )
-
-        if not hasattr(hook, "name") or hook.name not in HOOK_REGISTRY:
-            raise ValueError(
-                f"Hook '{type(hook).__name__}' "
-                "not registered in HOOK_REGISTRY!"
-            )
-
-        if hook.name in self._hooks:
-            raise ValueError(f"Hook '{hook.name}' already registered!")
-
-        self._hooks[hook.name] = hook
-
-    def add_step(self, step: Step):
-        if not isinstance(step, Step):
-            raise TypeError(
-                f"The provided object '{type(step).__name__}' "
-                f"is not an instance of {Step.__name__}!"
-            )
-
-        if not hasattr(step, "name") or step.name not in STEP_REGISTRY:
-            raise ValueError(
-                f"Step '{type(step).__name__}' "
-                "not registered in STEP_REGISTRY!"
-            )
-
-        if step.name in self._steps:
-            raise ValueError(f"Step '{step.name}' already registered!")
-
-        self._steps[step.name] = step
+    def add_step(self, component: Step):
+        self._components.add_step(component)
 
     def remove_step(self, step_name):
-        if step_name not in STEP_REGISTRY:
-            raise ValueError(f"Step '{step_name}' not in STEP_REGISTRY!")
-        if step_name not in self._steps:
-            raise ValueError(f"Step '{step_name}' is not added to this session!")
-        del self._steps[step_name]
+        self._components.remove_step(step_name)
 
     def unregister_hook(self, hook_name):
-        if hook_name not in HOOK_REGISTRY:
-            raise ValueError(f"Hook '{hook_name}' not in HOOK_REGISTRY!")
-        if hook_name not in self._hooks:
-            raise ValueError(f"Hook '{hook_name}' not registered with current session!")
-        del self._hooks[hook_name]
+        self._components.unregister_hook(hook_name)
 
     def unregister_resource(self, resource_name):
-        if resource_name not in RESOURCE_REGISTRY:
-            raise ValueError(f"Resource '{resource_name}' not in RESOURCE_REGISTRY!")
-        if resource_name not in self._resources:
-            raise ValueError(f"Resource '{resource_name}' not registered with current session!")
-        del self._resources[resource_name]
-
-    # ===========================================================
+        self._components.unregister_resource(resource_name)
 
     def _check_and_get_device(self):
         if 'device' not in self._base_config:
@@ -699,86 +410,86 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         return self._iteration
 
+    def _setup_resources(self) -> None:
+        for component in self._sorted_resources:
+            self.send_heartbeat(f"Running setup {component.id}")
+            component.setup(self)
+            self._successfully_setup_resource_names.add(component.name)
+
+    def _setup_session_hooks(self) -> None:
+        for component in self._session_hooks:
+            component.setup(self)
+            self.send_heartbeat(f"Running setup {component.id}")
+            self._successfully_setup_hook_names.add(component.name)
+
+    def _teardown_resources(self, *, after_exception: bool = False) -> None:
+        stage_suffix = " after exception" if after_exception else ""
+        for component in reversed(self._sorted_resources):
+            if component.name not in self._successfully_setup_resource_names:
+                continue
+            try:
+                self.send_heartbeat(
+                    f"Running teardown {component.id}{stage_suffix}"
+                )
+                component.teardown(self)
+            except Exception as error:
+                print(f"Error releasing resource '{component.id}': {error}")
+
+    def _teardown_session_hooks(self, *, after_exception: bool = False) -> None:
+        stage_suffix = " after exception" if after_exception else ""
+        for component in reversed(self._session_hooks):
+            if component.name not in self._successfully_setup_hook_names:
+                continue
+            try:
+                self.send_heartbeat(
+                    f"Running teardown {component.id}{stage_suffix}"
+                )
+                component.teardown(self)
+            except Exception as error:
+                print(f"Error running teardown '{component.name}': {error}")
+
     @context_entry
     def __enter__(self):
         self._raise_if_finished()
+        self._successfully_setup_resource_names.clear()
+        self._successfully_setup_hook_names.clear()
 
-        # 1. Setup Resources
         try:
-            for resource in self._sorted_resources:
-                self.send_heartbeat(f"Running setup {resource.id}")
-                resource.setup(self)
-                self._successfully_setup_hook_names.add(resource.name)
-        except Exception as e:
+            self._setup_resources()
+        except Exception:
             print("Failed to setup resources!")
-
-            for resource in reversed(self._sorted_resources):
-                if resource.name in self._successfully_setup_hook_names:
-                    self.send_heartbeat(f"Running teardown {resource.id} after exception")
-                    resource.teardown(self)
-
+            self._teardown_resources(after_exception=True)
             self._session_context.clear()
-
             raise
 
-        # 2. Call Session Hooks
         try:
-            for session_hook in self._session_hooks:
-                session_hook.setup(self)
-                self.send_heartbeat(f"Running setup {session_hook.id}")
-                self._successfully_setup_hook_names.add(session_hook.name)
+            self._setup_session_hooks()
         except Exception:
             print("Failed to setup session hooks!")
-            for session_hook in reversed(self._session_hooks):
-                if session_hook.name in self._successfully_setup_hook_names:
-                    self.send_heartbeat(f"Running teardown {session_hook.id} after exception")
-                    session_hook.teardown(self)
-
+            self._teardown_session_hooks(after_exception=True)
+            self._teardown_resources(after_exception=True)
             self._session_context.clear()
-
             raise
 
-        # 3. Update Phase to READY
         self._phase = SessionPhase.READY
         return self
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._dist_manager_err_conn is not None and exc_type is not None:
-            # 0. Send message to manager if an error occurred so that in case cleaning up resources freezes this process
             self._dist_manager_err_conn.send({
-                'type': 'error',
-                "rank": self.get_resource('ddp').rank,
+                "type": "error",
+                "rank": cast(Any, self.get_resource("ddp")).rank,
                 "pid": os.getpid(),
                 "exception_type": str(exc_type),
                 "message": str(exc_val),
                 "traceback": traceback.format_exc(),
             })
 
-        # 1. Clean up in reverse order of acquisition to respect dependencies
-        for resource in reversed(self._sorted_resources):
-            if resource.name not in self._successfully_setup_hook_names:
-                continue
-            try:
-                self.send_heartbeat(f"Running teardown {resource.id}")
-                resource.teardown(self)
-            except Exception as e:
-                print(f"Error releasing resource '{resource.id}': {e}")
-
-        # 2. Call session teardown hooks
-        for session_hook in reversed(self._session_hooks):
-            if session_hook.name not in self._successfully_setup_hook_names:
-                continue
-            try:
-                self.send_heartbeat(f"Running teardown {session_hook.id}")
-                session_hook.teardown(self)
-            except Exception as e:
-                print(f"Error running teardown '{session_hook.name}': {e}")
-
-        # 3. clear session context
+        self._teardown_resources()
+        self._teardown_session_hooks()
         self._session_context.clear()
 
-        # 4. Update the phase
         if self._phase is SessionPhase.READY:
             self._phase = SessionPhase.NEW
         elif self._phase is SessionPhase.RUNNING:
