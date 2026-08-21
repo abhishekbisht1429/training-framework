@@ -29,14 +29,15 @@ from training_framework.registry import (
     HOOK_REGISTRY,
     RESOURCE_REGISTRY,
     STEP_REGISTRY,
+    format_execution_graph,
     hook,
+    topological_sort_of_components,
     make_registry,
     requires_hook,
     requires_resource,
     requires_step,
     resource,
     step,
-    topological_sort_of_components,
 )
 from training_framework.session_components import SessionComponents
 from training_framework.session_config import SessionConfig, SessionPhase
@@ -90,6 +91,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def __init__(self, config: dict):
         self._config = config
         self._base_config = config["base_config"]
+        self._base_config.setdefault("show-execution-graph", True)
 
         session_dir = os.path.join(
             self._base_config['sessions_dir'],
@@ -331,6 +333,17 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def get_all_steps(self):
         return list(self._steps.values())
 
+    def execution_graph(self) -> str:
+        return format_execution_graph(
+            resources=self.get_all_resources(),
+            hooks=self.get_all_hooks(),
+            steps=self.get_all_steps(),
+            max_iterations=self.session_config.max_iterations,
+        )
+
+    def print_execution_graph(self, *, file=None) -> None:
+        print(self.execution_graph(), file=file)
+
     def register_resource(self, component: Resource, overwrite=False):
         return self._components.register_resource(component, overwrite=overwrite)
 
@@ -461,6 +474,8 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @context_entry
     def __enter__(self):
         self._raise_if_finished()
+        if self._base_config.get("show-execution-graph", True):
+            self.print_execution_graph()
         self._successfully_setup_resource_names.clear()
         self._successfully_setup_hook_names.clear()
 
