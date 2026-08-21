@@ -459,6 +459,86 @@ def test_partial_setup_failure_rolls_back_initialized_resources(tmp_path):
     assert getattr(session, "_active", False) is False
 
 
+def test_hook_setup_failure_rolls_back_hooks_and_resources(tmp_path):
+    @resource("critical_hook_setup_resource")
+    class CriticalHookSetupResource(TraceResourceBase):
+        pass
+
+    @hook("critical_hook_setup_ready")
+    class CriticalHookSetupReady(TraceHookBase):
+        pass
+
+    @hook("critical_hook_setup_failing")
+    class CriticalHookSetupFailing(TraceHookBase):
+        def setup(self, session: TrainingSession):
+            self.setup_calls += 1
+            self.trace.append(f"hook:{self.label}:setup")
+            raise LifecycleSetupError(f"hook {self.label} setup failed")
+
+    trace: list[str] = []
+    session = TrainingSession(
+        make_config(tmp_path / "hook-setup-rollback", max_iterations=1)
+    )
+    resource_obj = CriticalHookSetupResource("resource", trace)
+    ready_hook = CriticalHookSetupReady("ready", trace)
+    failing_hook = CriticalHookSetupFailing("failing", trace)
+    session.register_resource(resource_obj)
+    session.register_hook(ready_hook)
+    session.register_hook(failing_hook)
+
+    with pytest.raises(LifecycleSetupError, match="hook failing setup failed"):
+        with session:
+            pass
+
+    assert trace == [
+        "resource:resource:setup",
+        "hook:ready:setup",
+        "hook:failing:setup",
+        "hook:ready:teardown",
+        "resource:resource:teardown",
+    ]
+    assert failing_hook.teardown_calls == 0
+    assert session.session_context == {}
+    assert session._phase is SessionPhase.NEW
+    assert getattr(session, "_active", False) is False
+
+
+def test_resource_and_hook_with_same_name_have_independent_setup_tracking(tmp_path):
+    shared_name = "critical_shared_lifecycle_name"
+
+    @resource(shared_name)
+    class CriticalSharedNameResource(TraceResourceBase):
+        pass
+
+    @hook(shared_name)
+    class CriticalSharedNameHook(TraceHookBase):
+        def setup(self, session: TrainingSession):
+            self.setup_calls += 1
+            self.trace.append(f"hook:{self.label}:setup")
+            raise LifecycleSetupError(f"hook {self.label} setup failed")
+
+    trace: list[str] = []
+    session = TrainingSession(
+        make_config(tmp_path / "shared-name-rollback", max_iterations=1)
+    )
+    resource_obj = CriticalSharedNameResource("shared", trace)
+    hook_obj = CriticalSharedNameHook("shared", trace)
+    session.register_resource(resource_obj)
+    session.register_hook(hook_obj)
+
+    with pytest.raises(LifecycleSetupError, match="hook shared setup failed"):
+        with session:
+            pass
+
+    assert trace == [
+        "resource:shared:setup",
+        "hook:shared:setup",
+        "resource:shared:teardown",
+    ]
+    assert hook_obj.teardown_calls == 0
+    assert resource_obj.teardown_calls == 1
+
+
 def test_step_failure_still_clears_iteration_context_and_runs_session_cleanup(
     tmp_path,
 ):
