@@ -474,8 +474,12 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @context_entry
     def __enter__(self):
         self._raise_if_finished()
+
+        ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
         if self._base_config.get("show-execution-graph", True):
-            self.print_execution_graph()
+            # print only for rank zero
+            if ddp_resource is None or ddp_resource.rank == 0:
+                self.print_execution_graph()
         self._successfully_setup_resource_names.clear()
         self._successfully_setup_hook_names.clear()
 
@@ -497,7 +501,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             raise
 
         # Dump config (only for rank 0)
-        ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
         if ddp_resource is None or cast(Any, ddp_resource).rank == 0:
             write_session_config(
                 self.session_config.session_dir,

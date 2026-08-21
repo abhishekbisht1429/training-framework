@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from training_framework.training_session import SessionPhase, TrainingSession
+from training_framework.training_session import (
+    Resource,
+    SessionPhase,
+    TrainingSession,
+    resource,
+)
 from tests.test_utils import read_events, register_test_components, session_config
 
 
@@ -58,8 +63,8 @@ def test_config_driven_session_runs_training_and_lifecycle_end_to_end(tmp_path):
         "metrics",
         "iteration",
         "metrics",
-        "model_teardown",
         "metrics_teardown",
+        "model_teardown",
     ]
 
 
@@ -90,3 +95,45 @@ def test_explicit_builtin_configs_override_defaults_and_enable_tensorboard(tmp_p
     assert hooks["logger"].call_every == 3
     assert hooks["checkpointer"].call_every == 2
     assert session.has_resource("tensorboard")
+
+
+@pytest.mark.parametrize(
+    ("rank", "should_print_graph"),
+    [(0, True), (1, False)],
+)
+def test_execution_graph_is_printed_only_for_ddp_rank_zero(
+        tmp_path,
+        capsys,
+        rank,
+        should_print_graph,
+):
+    @resource("ddp", overwrite=True)
+    class DDPTestResource(Resource):
+        def __init__(self, config):
+            self.rank = config["rank"]
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    config = {
+        "base_config": {
+            "rng_seed": 1,
+            "sessions_dir": str(tmp_path / f"rank-{rank}"),
+            "max_iterations": 1,
+            "device": "cpu",
+            "components_package": "training_framework.builtin_components",
+            "show-execution-graph": True,
+        },
+        "ddp": {"rank": rank},
+    }
+
+    with TrainingSession(config):
+        pass
+
+    graph_was_printed = (
+        "TRAINING SESSION EXECUTION GRAPH" in capsys.readouterr().out
+    )
+    assert graph_was_printed is should_print_graph

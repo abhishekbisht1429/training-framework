@@ -234,10 +234,10 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
 
     expected_trace.extend(
         [
-            "resource:B:teardown",
-            "resource:A:teardown",
             "hook:B:teardown",
             "hook:A:teardown",
+            "resource:B:teardown",
+            "resource:A:teardown",
         ]
     )
 
@@ -365,10 +365,10 @@ def test_body_exception_propagates_after_normal_cleanup(tmp_path):
         "resource:B:setup",
         "hook:A:setup",
         "hook:B:setup",
-        "resource:B:teardown",
-        "resource:A:teardown",
         "hook:B:teardown",
         "hook:A:teardown",
+        "resource:B:teardown",
+        "resource:A:teardown",
     ]
     assert session.session_context == {}
     assert session._phase is SessionPhase.NEW
@@ -422,9 +422,9 @@ def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
     assert session.session_context == {}
     assert session._phase is SessionPhase.NEW
     assert trace[-3:] == [
+        "hook:A:teardown",
         "resource:B:teardown",
         "resource:A:teardown",
-        "hook:A:teardown",
     ]
 
 

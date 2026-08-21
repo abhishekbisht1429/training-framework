@@ -84,7 +84,7 @@ def test_execution_graph_expands_component_functions_in_runtime_order(tmp_path):
     hook_teardown = graph.index("Hook.graph_hook.teardown()")
 
     assert resource_setup < hook_setup < hook_pre < step_run < hook_post
-    assert hook_post < resource_teardown < hook_teardown
+    assert hook_post < hook_teardown < resource_teardown
     assert "requires: Resource.graph_resource" in graph
     assert "requires: Hook.graph_hook" in graph
     assert "cadence: first, every 2, final" in graph

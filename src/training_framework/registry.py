@@ -260,8 +260,8 @@ def format_execution_graph(
     _append_execution_calls(
         lines,
         "      ",
-        [(component, "teardown") for component in reversed(ordered_resources)]
-        + [(component, "teardown") for component in reversed(session_hooks)],
+        [(component, "teardown") for component in reversed(session_hooks)]
+        + [(component, "teardown") for component in reversed(ordered_resources)],
     )
     lines.extend([
         "  |",
