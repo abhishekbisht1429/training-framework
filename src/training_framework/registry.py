@@ -1,18 +1,25 @@
 from collections import deque
+from collections.abc import Iterable
 
-from training_framework.components import Hook, Resource, Step
+from training_framework.components import (
+    Hook,
+    IterationHook,
+    Resource,
+    SessionHook,
+    Step,
+)
 
 
 def make_registry(component_type):
     registry = {}
 
-    def register(name: str):
+    def register(name: str, overwrite=False):
         def wrapper(cls):
             if not issubclass(cls, component_type):
                 raise TypeError(
                     f"{cls.__name__} must be subclass of {component_type.__name__}"
                 )
-            if name in registry:
+            if overwrite == False and name in registry:
                 raise ValueError(
                     f"{component_type} with name '{name}' already registered"
                 )
@@ -157,3 +164,154 @@ def topological_sort_of_components() -> dict[str, int]:
         component_id: index
         for index, component_id in enumerate(sorted_components)
     }
+
+
+def format_execution_graph(
+        *,
+        resources: Iterable[Resource],
+        hooks: Iterable[Hook],
+        steps: Iterable[Step],
+        max_iterations: int,
+) -> str:
+    """Return the session's component lifecycle as a readable execution graph."""
+    order = topological_sort_of_components()
+    ordered_resources = sorted(
+        resources,
+        key=lambda component: order[component.id],
+    )
+    ordered_hooks = sorted(
+        hooks,
+        key=lambda component: order[component.id],
+    )
+    ordered_steps = sorted(
+        steps,
+        key=lambda component: order[component.id],
+    )
+
+    session_hooks = [
+        component
+        for component in ordered_hooks
+        if isinstance(component, SessionHook)
+    ]
+    iteration_hooks = [
+        component
+        for component in ordered_hooks
+        if isinstance(component, IterationHook)
+    ]
+
+    lines = [
+        "TRAINING SESSION EXECUTION GRAPH",
+        "================================",
+        f"Max iterations: {max_iterations}",
+        "",
+        "START",
+        "  |",
+        "  +-- SETUP",
+    ]
+    _append_execution_calls(
+        lines,
+        "  |   ",
+        [(component, "setup") for component in ordered_resources]
+        + [(component, "setup") for component in session_hooks],
+    )
+
+    lines.extend([
+        "  |",
+        f"  +-- ITERATION (repeats 1..{max_iterations})",
+        "  |   |",
+        "  |   +-- PRE-ITERATION",
+    ])
+    _append_execution_calls(
+        lines,
+        "  |   |   ",
+        [
+            (component, "pre_iteration_callback")
+            for component in iteration_hooks
+        ],
+    )
+
+    lines.extend([
+        "  |   |",
+        "  |   +-- STEPS",
+    ])
+    _append_execution_calls(
+        lines,
+        "  |   |   ",
+        [(component, "run") for component in ordered_steps],
+    )
+
+    lines.extend([
+        "  |   |",
+        "  |   +-- POST-ITERATION",
+    ])
+    _append_execution_calls(
+        lines,
+        "  |       ",
+        [
+            (component, "post_iteration_callback")
+            for component in reversed(iteration_hooks)
+        ],
+    )
+
+    lines.extend([
+        "  |",
+        "  +-- TEARDOWN",
+    ])
+    _append_execution_calls(
+        lines,
+        "      ",
+        [(component, "teardown") for component in reversed(ordered_resources)]
+        + [(component, "teardown") for component in reversed(session_hooks)],
+    )
+    lines.extend([
+        "  |",
+        "END",
+    ])
+    return "\n".join(lines)
+
+
+def _append_execution_calls(lines, prefix, calls) -> None:
+    if not calls:
+        lines.append(f"{prefix}(none)")
+        return
+
+    for index, (component, method_name) in enumerate(calls, start=1):
+        annotations = []
+        requirements = _component_requirements(component)
+        if requirements:
+            annotations.append(f"requires: {', '.join(requirements)}")
+        if method_name in {
+            "pre_iteration_callback",
+            "post_iteration_callback",
+        }:
+            annotations.append(
+                f"cadence: {_hook_cadence(component.call_every)}"
+            )
+
+        annotation = f" [{'; '.join(annotations)}]" if annotations else ""
+        lines.append(
+            f"{prefix}{index:02d}. {component.id}.{method_name}(){annotation}"
+        )
+
+
+def _component_requirements(component) -> list[str]:
+    return (
+        [
+            f"Resource.{name}"
+            for name in getattr(component, "required_resources", ())
+        ]
+        + [
+            f"Hook.{name}"
+            for name in getattr(component, "required_hooks", ())
+        ]
+        + [
+            f"Step.{name}"
+            for name in getattr(component, "required_steps", ())
+        ]
+    )
+
+
+def _hook_cadence(call_every: int) -> str:
+    if call_every == 1:
+        return "every iteration"
+    return f"first, every {call_every}, final"
