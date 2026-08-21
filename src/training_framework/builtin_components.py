@@ -1,18 +1,23 @@
+from __future__ import annotations
+
 import os
 import subprocess
 import sys
 import time
 from copy import deepcopy
-from typing import Any, override, List
+from typing import TYPE_CHECKING, Any, override
 
 import torch
-from torch.distributed import barrier
 from torch.utils.tensorboard import SummaryWriter
 
-from training_framework.training_session import hook, resource
-from training_framework.training_session import TrainingSession, Stateful, LifecycleHook, Resource, \
+from training_framework.registry import hook, resource
+from training_framework.components import Stateful, LifecycleHook, Resource, \
     StatefulResource
 from training_framework.util import timestamp_str
+
+if TYPE_CHECKING:
+    from training_framework.training_session import TrainingSession
+
 
 @hook("checkpointer")
 class Checkpointer(LifecycleHook, Stateful):
@@ -42,6 +47,13 @@ class Checkpointer(LifecycleHook, Stateful):
 
     @override
     def post_iteration_callback(self, session: "TrainingSession") -> None:
+        if (
+            session.iteration == 1
+            and session.session_config.max_iterations > 1
+            and not self._config.get("checkpoint_first", False)
+        ):
+            return
+
         print("Creating checkpoint...")
         # File path
         filepath = os.path.join(self._checkpoints_dir, timestamp_str())

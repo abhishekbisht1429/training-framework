@@ -13,18 +13,13 @@ from typing import Any
 COMPONENTS_PACKAGE = "tests.test_components"
 
 
-def register_test_components(*, include_builtins: bool = False) -> ModuleType:
-    """Re-register components after the repository's registry-clearing fixture.
+def register_test_components() -> ModuleType:
+    """Register test-only components after the fixture restores the built-ins.
 
     The test component module is imported normally on the first call and
     reloaded on later calls. This is also compatible with a fresh spawned
     interpreter, where the module is imported by TrainingSession itself.
     """
-
-    if include_builtins:
-        import training_framework.builtin_components as builtin_components
-
-        importlib.reload(builtin_components)
 
     existing = sys.modules.get(COMPONENTS_PACKAGE)
     if existing is None:

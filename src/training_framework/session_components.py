@@ -30,46 +30,51 @@ class SessionComponents:
             if name == "base_config":
                 continue
             if name in STEP_REGISTRY:
-                self.add_step(STEP_REGISTRY[name](component_config))
+                self.add_step(STEP_REGISTRY[name](component_config), overwrite=True)
             elif name in HOOK_REGISTRY:
-                self.register_hook(HOOK_REGISTRY[name](component_config))
+                self.register_hook(HOOK_REGISTRY[name](component_config), overwrite=True)
             elif name in RESOURCE_REGISTRY:
-                self.register_resource(RESOURCE_REGISTRY[name](component_config))
+                self.register_resource(RESOURCE_REGISTRY[name](component_config), overwrite=True)
             else:
                 raise ValueError(
                     f"No step, hook or resource registered with name '{name}'!"
                 )
 
-    def register_resource(self, component: Resource) -> str:
+    def register_resource(self, component: Resource, overwrite=False) -> str:
         self._validate_component(
             component,
             Resource,
             RESOURCE_REGISTRY,
             self.resources,
+            overwrite=overwrite
         )
         self.resources[component.name] = component
         return component.name
 
-    def register_hook(self, component: Hook) -> None:
+    def register_hook(self, component: Hook, overwrite=False) -> str:
         self._validate_component(
             component,
             Hook,
             HOOK_REGISTRY,
             self.hooks,
+            overwrite=overwrite,
         )
         self.hooks[component.name] = component
+        return component.name
 
-    def add_step(self, component: Step) -> None:
+    def add_step(self, component: Step, overwrite=False) -> str:
         self._validate_component(
             component,
             Step,
             STEP_REGISTRY,
             self.steps,
+            overwrite=overwrite,
         )
         self.steps[component.name] = component
+        return component.name
 
     @staticmethod
-    def _validate_component(component, base_type, registry, collection) -> None:
+    def _validate_component(component, base_type, registry, collection, overwrite=False) -> None:
         if not isinstance(component, base_type):
             raise TypeError(
                 f"The provided object '{type(component).__name__}' "
@@ -82,7 +87,7 @@ class SessionComponents:
                 f"not registered in {base_type.__name__.upper()}_REGISTRY!"
             )
 
-        if component.name in collection:
+        if overwrite == False and component.name in collection:
             raise ValueError(
                 f"{base_type.__name__} '{component.name}' already registered!"
             )

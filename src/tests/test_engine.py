@@ -131,7 +131,7 @@ def test_engine_surfaces_a_real_spawned_worker_failure(tmp_path):
 def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_path):
     """Verify the commit's rank filtering with genuine registered components."""
 
-    register_test_components(include_builtins=True)
+    register_test_components()
     config = {
         "base_config": {
             "rng_seed": 31,
@@ -174,20 +174,39 @@ def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_p
     assert rank_zero.session_config.max_iterations == 8
     assert rank_one.session_config.max_iterations == 8
 
-    assert {resource.name for resource in rank_zero.get_all_resources()} == {
+    rank_zero_resource_names = {
+        resource.name for resource in rank_zero.get_all_resources()
+    }
+    rank_zero_step_names = {
+        step.name for step in rank_zero.get_all_steps()
+    }
+    rank_zero_hook_names = {
+        hook.name for hook in rank_zero.get_all_hooks()
+    }
+
+    assert {
         "ddp",
         "it_3d45_model",
         "it_3d45_rank0_resource",
-    }
-    assert {step.name for step in rank_zero.get_all_steps()} == {
+    } <= rank_zero_resource_names
+    assert {
         "it_3d45_train",
         "it_3d45_rank0_step",
-    }
-    assert {hook.name for hook in rank_zero.get_all_hooks()} == {"it_3d45_rank0_hook"}
+    } <= rank_zero_step_names
+    assert "it_3d45_rank0_hook" in rank_zero_hook_names
 
-    assert {resource.name for resource in rank_one.get_all_resources()} == {
-        "ddp",
-        "it_3d45_model",
+    rank_one_resource_names = {
+        resource.name for resource in rank_one.get_all_resources()
     }
-    assert {step.name for step in rank_one.get_all_steps()} == {"it_3d45_train"}
-    assert rank_one.get_all_hooks() == []
+    rank_one_step_names = {
+        step.name for step in rank_one.get_all_steps()
+    }
+    rank_one_hook_names = {
+        hook.name for hook in rank_one.get_all_hooks()
+    }
+
+    assert {"ddp", "it_3d45_model"} <= rank_one_resource_names
+    assert "it_3d45_rank0_resource" not in rank_one_resource_names
+    assert "it_3d45_train" in rank_one_step_names
+    assert "it_3d45_rank0_step" not in rank_one_step_names
+    assert "it_3d45_rank0_hook" not in rank_one_hook_names

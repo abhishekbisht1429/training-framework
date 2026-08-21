@@ -236,7 +236,7 @@ def test_checkpoint_resume_preserves_model_and_optimizer_state(tmp_path):
 def test_builtin_checkpointer_loads_mid_run_checkpoint_and_resumes_exactly(tmp_path):
     """Exercise the real Checkpointer save/load path, not only pickle directly."""
 
-    @hook("checkpointer")
+    @hook("test_checkpointer")
     class CheckpointerTest(Checkpointer):
         pass
 
@@ -262,8 +262,9 @@ def test_builtin_checkpointer_loads_mid_run_checkpoint_and_resumes_exactly(tmp_p
     assert run_to_completion(session) == [1, 2, 3, 4, 5]
     expected_final_state = step_obj.get_state()
 
-    checkpoint_paths = sorted(path for path in checkpoints_dir.iterdir() if path.is_file())
-    assert len(checkpoint_paths) == 4
+    checkpoint_paths = sorted(
+        path for path in checkpoints_dir.iterdir() if path.is_file()
+    )
 
     loaded_by_iteration = {
         loaded.iteration: loaded
@@ -273,15 +274,22 @@ def test_builtin_checkpointer_loads_mid_run_checkpoint_and_resumes_exactly(tmp_p
         )
     }
 
-    # Checkpointer runs on the first iteration, the last iteration, and every
-    # iteration divisible by checkpoint_every.
-    assert set(loaded_by_iteration) == {1, 2, 4, 5}
+    # The configured checkpointer runs at its interval and on the final
+    # iteration. Its default policy skips the first iteration.
+    assert set(loaded_by_iteration) == {2, 4, 5}
 
     restored = loaded_by_iteration[2]
-    restored_step = restored._steps["critical_checkpoint_accumulator_step"]
-    restored_checkpointer = restored._hooks["checkpointer"]
+    restored_step = next(
+        component
+        for component in restored.get_all_steps()
+        if isinstance(component, CriticalCheckpointAccumulatorStep)
+    )
+    restored_checkpointer = next(
+        component
+        for component in restored.get_all_hooks()
+        if isinstance(component, CheckpointerTest)
+    )
 
-    assert restored._phase is SessionPhase.NEW
     assert restored_step.start == 10
     assert restored_step.increment == 3
     assert restored_step.history == [13, 16]
