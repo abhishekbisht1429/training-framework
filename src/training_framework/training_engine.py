@@ -34,17 +34,23 @@ def load_session_for_worker(session_state, rank, session_update_params: dict | N
 
         # for processes with rank > 0, remove the non-parallel components (they should run only on rank 0)
         if rank > 0:
-            parallel_components = {
-                session.resolve_component_name(name)
-                for name in ddp_resource.parallel_components + ["ddp"]
-            }
-            for hook in session.get_all_hooks():
+            parallel_components = session._component_dependency_closure(
+                ddp_resource.parallel_components + ["ddp"]
+            )
+            # Snapshot every category before mutating the session. The sorted
+            # getters validate the complete dependency graph, so calling a
+            # later getter after removing one of its prerequisites can expose
+            # a transient, invalid graph during rank-specific pruning.
+            hooks = session.get_all_hooks()
+            resources = session.get_all_resources()
+            steps = session.get_all_steps()
+            for hook in hooks:
                 if hook.name not in parallel_components:
                     session.unregister_hook(hook.name)
-            for resource in session.get_all_resources():
+            for resource in resources:
                 if resource.name not in parallel_components:
                     session.unregister_resource(resource.name)
-            for step in session.get_all_steps():
+            for step in steps:
                 if step.name not in parallel_components:
                     session.remove_step(step.name)
 

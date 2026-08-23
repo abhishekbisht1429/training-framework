@@ -400,6 +400,39 @@ For reliable spawn and checkpoint behavior:
 - make the component package importable from a fresh Python interpreter; and
 - keep component names stable across checkpoint save and restore.
 
+### Selecting components
+
+A top-level component mapping both activates a component and supplies its
+constructor configuration. Existing mappings, including empty mappings, remain
+valid:
+
+```yaml
+train:
+  gradient_accumulation: 4
+metrics: {}
+```
+
+For components that need no configuration, list their names under the special
+`components` entry instead:
+
+```yaml
+components:
+  - model
+  - dataloader
+  - train
+```
+
+The list must contain unique, non-empty component names or virtual alias roles.
+Every name must resolve to a registered component. If a name appears in both
+places, its explicit mapping wins. The framework recursively activates
+resources, hooks, steps, and wrapped hooks required by the selected roots, using
+an empty configuration for each automatically activated component. Unrelated
+registered components stay inactive. If an automatically activated component
+requires constructor settings, add its top-level mapping.
+
+The built-in `logger` and `checkpointer` remain default roots. Both special
+entries and component dependencies support aliases.
+
 ### Component aliases
 
 Use the session-level `aliases` mapping to substitute a registered implementation
@@ -415,9 +448,11 @@ optimizer:
 
 The mapping direction is `expected_name: registered_name`. In this example,
 `my_custom_optimizer` must be registered, while `optimizer` may be either a
-registered name or a virtual role. Configuration remains under `optimizer`, and
-dependencies such as `@requires_step("optimizer")` resolve to
-`my_custom_optimizer`. The actual registered name is used in component state and
+registered name or a virtual role. When configuration is needed, it remains
+under `optimizer`; otherwise the role may be selected through `components`, a
+dependency, or a built-in default without a separate mapping. Dependencies such
+as `@requires_step("optimizer")` resolve to `my_custom_optimizer`. The actual
+registered name is used in component state and
 shown in the execution graph, which also includes an `ALIASES` section.
 
 Aliases are session-scoped and one-to-one. Alias chains, cycles, unknown or
@@ -481,10 +516,11 @@ relationships without a shared lifecycle phase; cadence mismatches; and cycles.
 The resulting order controls resource setup, hook callbacks, and step execution.
 Teardown and post-iteration hook callbacks use reverse order.
 
-A dependency or wrapping target being registered does not automatically add that
-component to a session. Include all required runtime components in the session
-YAML. For DDP, include them on secondary ranks in `ddp.parallel_components` as
-well.
+Selecting a component automatically activates its recursive dependency and
+wrapping-target closure with empty configurations. Activation follows dependency
+edges outward: selecting a wrapped hook alone does not select hooks that wrap it.
+For DDP, secondary ranks retain the same closure for each root named in
+`ddp.parallel_components`.
 
 ## Session lifecycle
 
@@ -700,10 +736,11 @@ sessions:
         - dataloader
         - train
 
-    model: {}
-    optimizer: {}
-    dataloader: {}
-    train: {}
+    components:
+      - model
+      - optimizer
+      - dataloader
+      - train
 
     logger:
       log_every: 10
@@ -719,10 +756,8 @@ sessions:
 The parent session contains a placeholder DDP resource with rank `-1`. In each child process, the framework replaces it with a resource configured for that worker's rank.
 
 - Rank 0 keeps every configured component.
-- Ranks greater than 0 keep only `ddp` and component names listed in `parallel_components`.
-- Non-parallel logging, checkpointing, and other rank-zero-only work can therefore remain off secondary ranks by omitting those names.
-
-Every resource, hook, and step required by a parallel component must also be listed when it is needed on secondary ranks.
+- Ranks greater than 0 keep `ddp`, roots listed in `parallel_components`, and their recursive dependency and wrapping-target closure.
+- Non-parallel logging, checkpointing, and other rank-zero-only work can therefore remain off secondary ranks by omitting those roots.
 
 ### What the DDP resource does
 
@@ -985,8 +1020,8 @@ Direct execution bypasses spawned-worker supervision, error pipes, heartbeat mon
 | `new_max_iters` | New iteration limit in extend mode |
 | `heartbeat_timeout` | Worker heartbeat deadline |
 | `process_timeout_on_join` | Graceful process-join timeout |
-| `get_component_config(session_index, key)` | Return a deep copy of one component mapping |
-| `get_all_component_configs(session_index)` | Return all component mappings, excluding `base_config` and `aliases` |
+| `get_component_config(session_index, key)` | Return a deep copy of one component mapping, or `{}` for a listed no-config component |
+| `get_all_component_configs(session_index)` | Return all selected component configs, excluding special entries |
 
 ### `TrainingEngine`
 
@@ -1084,7 +1119,7 @@ The current tests cover areas including:
 
 3. **DDP does not wrap models automatically.** Application resources must move models to `session.device` and construct `torch.nn.parallel.DistributedDataParallel` themselves.
 
-4. **Secondary-rank components are opt-in.** Ranks greater than zero retain only names in `ddp.parallel_components`, plus the DDP resource. Include every transitive runtime dependency required by those components.
+4. **Secondary-rank component roots are opt-in.** Ranks greater than zero retain roots in `ddp.parallel_components`, their recursive dependencies and wrapping targets, plus the DDP resource.
 
 5. **Component registration is global per interpreter.** Resource, hook, and step names share one namespace, so any duplicate decorator name fails. Test suites that reset registration must account for Python's module import cache before expecting decorators to run again.
 

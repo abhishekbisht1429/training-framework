@@ -223,11 +223,11 @@ def test_data_manager_runs_through_public_session_lifecycle(
     assert data_manager.data_iter is None
 
 
-def test_ddp_resource_reports_an_active_missing_dependency(tmp_path):
+def test_ddp_resource_activates_its_model_dependency(tmp_path):
     @resource("model")
     class UnconfiguredModel(Resource):
         def __init__(self, config):
-            pass
+            self.config = dict(config)
 
         def setup(self, session):
             pass
@@ -246,11 +246,12 @@ def test_ddp_resource_reports_an_active_missing_dependency(tmp_path):
         },
     })
 
-    with pytest.raises(
-            RuntimeError,
-            match="Resource 'model'.*not configured in this session",
-    ):
-        session.execution_graph()
+    model = session.get_resource("model")
+    assert model.config == {}
+    graph = session.execution_graph()
+    assert graph.index("Resource.model.setup()") < graph.index(
+        "Resource.ddp.setup()"
+    )
 
 
 def test_ddp_resource_and_optimizer_run_through_public_session_api(

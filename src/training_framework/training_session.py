@@ -113,7 +113,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._phase = SessionPhase.NEW
 
-        self._register_default_components()
         self._register_components()
 
     def _set_component_collections(
@@ -125,25 +124,14 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             aliases = self._config.get("aliases", {})
         self._components = SessionComponents(aliases=aliases)
 
-    def _register_default_components(self) -> None:
-        # Register logger
-        if self.resolve_component_name("logger") == "logger":
-            self.register_hook(
-                Logger({
-                    'log_every': 10
-                })
-            )
-
-        # Register Checkpointer
-        if self.resolve_component_name("checkpointer") == "checkpointer":
-            self.register_hook(
-                Checkpointer({
-                    'checkpoint_every': 100,
-                })
-            )
-
     def _register_components(self) -> None:
-        self._components.register_from_config(self._config)
+        self._components.register_from_config(
+            self._config,
+            default_configs={
+                "logger": {"log_every": 10},
+                "checkpointer": {"checkpoint_every": 100},
+            },
+        )
 
     # will contain only those attributes which need to be recreated after state load
     def _init_transient_infra(self):
@@ -324,6 +312,9 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def resolve_component_name(self, name: str) -> str:
         return self._components.resolve_name(name)
+
+    def _component_dependency_closure(self, names) -> set[str]:
+        return self._components.dependency_closure(names)
 
     def get_all_hooks(self):
         return list(self._components.hooks.values())

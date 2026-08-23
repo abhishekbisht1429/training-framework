@@ -185,17 +185,17 @@ def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
             components_package=COMPONENTS_PACKAGE,
         ),
         "aliases": {
-            "model_role": "it_3d45_model",
+            "model": "it_3d45_model",
             "train_role": "it_3d45_train",
         },
         "ddp": {
             "world_size": 2,
             "backend": "gloo",
-            "parallel_components": ["model_role", "train_role"],
+            "parallel_components": ["model", "train_role"],
             "master_addr": "localhost",
             "master_port": "12355",
         },
-        "model_role": {},
+        "model": {},
         "train_role": {},
         "it_3d45_rank0_resource": {},
         "it_3d45_rank0_step": {},
@@ -207,7 +207,7 @@ def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
         rank=1,
     )
 
-    assert rank_one.has_resource("model_role")
+    assert rank_one.has_resource("model")
     assert rank_one.has_resource("it_3d45_model")
     assert "it_3d45_train" in {
         component.name for component in rank_one.get_all_steps()
@@ -265,13 +265,6 @@ def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
             ValueError,
             "chains and cycles",
             id="alias-chain",
-        ),
-        pytest.param(
-            {"role": "target"},
-            {},
-            ValueError,
-            "requires a top-level",
-            id="missing-role-config",
         ),
         pytest.param(
             {"role": "target"},
@@ -344,25 +337,25 @@ def test_alias_dependency_must_resolve_to_the_required_category(tmp_path):
         def run(self, session):
             pass
 
-    session = TrainingSession({
-        "base_config": _base_config(tmp_path),
-        "aliases": {"virtual_step": "actual_hook"},
-        "virtual_step": {},
-        "consumer": {},
-    })
-
     with pytest.raises(RuntimeError, match="not registered as a Step"):
-        session.execution_graph()
+        TrainingSession({
+            "base_config": _base_config(tmp_path),
+            "aliases": {"virtual_step": "actual_hook"},
+            "virtual_step": {},
+            "consumer": {},
+        })
 
 
-def test_configurator_excludes_aliases_from_component_configs():
+def test_configurator_excludes_special_entries_from_component_configs():
     configurator = Configurator.__new__(Configurator)
     configurator._session_configs = [{
         "base_config": {"max_iterations": 1},
         "aliases": {"role": "target"},
+        "components": ["no_config"],
         "role": {"value": 3},
     }]
 
     assert configurator.get_all_component_configs(0) == {
-        "role": {"value": 3}
+        "no_config": {},
+        "role": {"value": 3},
     }

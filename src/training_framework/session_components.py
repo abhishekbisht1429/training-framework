@@ -1,3 +1,4 @@
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from training_framework.components import (
@@ -115,36 +116,190 @@ class SessionComponents:
             if isinstance(component, Step)
         }
 
-    def register_from_config(self, config: dict) -> None:
+    @staticmethod
+    def _selected_component_names(config: Mapping) -> list[str]:
+        selected = config.get("components", [])
+        if not isinstance(selected, list):
+            raise TypeError("'components' must be a list of component names")
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for name in selected:
+            if not isinstance(name, str):
+                raise TypeError("'components' entries must be strings")
+            if not name:
+                raise ValueError("'components' entries must not be empty")
+            if name in RESERVED_CONFIG_NAMES:
+                raise ValueError(
+                    f"'{name}' is a reserved configuration name and cannot "
+                    "select a component"
+                )
+            if name in seen:
+                raise ValueError(
+                    f"Component '{name}' appears more than once in 'components'"
+                )
+            seen.add(name)
+            names.append(name)
+        return names
+
+    @staticmethod
+    def _dependency_specs(
+            component_class: type[Component],
+    ) -> Iterable[tuple[str, type[Component]]]:
+        for name in getattr(component_class, "required_resources", ()):
+            yield name, Resource
+        for name in getattr(component_class, "required_hooks", ()):
+            yield name, Hook
+        for name in getattr(component_class, "required_steps", ()):
+            yield name, Step
+        if issubclass(component_class, Hook):
+            for name in getattr(component_class, "wrapped_hooks", ()):
+                yield name, Hook
+
+    def _registered_component_class(
+            self,
+            name: str,
+            expected_type: type[Component] | None = None,
+    ) -> tuple[str, type[Component]]:
+        resolved_name = self.resolve_name(name)
+        component_class = _COMPONENT_REGISTRY.get(resolved_name)
+        if component_class is None:
+            if expected_type is None:
+                raise ValueError(
+                    f"No step, hook or resource registered with name "
+                    f"'{resolved_name}'!"
+                )
+            raise RuntimeError(
+                f"unmet prerequisite! {expected_type.__name__} '{name}' "
+                f"resolves to '{resolved_name}', which is not registered as a "
+                f"{expected_type.__name__}."
+            )
+        if expected_type is not None and not issubclass(
+                component_class,
+                expected_type,
+        ):
+            raise RuntimeError(
+                f"unmet prerequisite! {expected_type.__name__} '{name}' "
+                f"resolves to '{resolved_name}', which is not registered as a "
+                f"{expected_type.__name__}."
+            )
+        return resolved_name, component_class
+
+    def _register_component_instance(self, component: Component) -> None:
+        component_type = _component_type(component)
+        if component_type is Step:
+            self.add_step(component, overwrite=True)
+        elif component_type is Hook:
+            self.register_hook(component, overwrite=True)
+        else:
+            self.register_resource(component, overwrite=True)
+
+    def register_from_config(
+            self,
+            config: Mapping,
+            *,
+            default_configs: Mapping[str, Mapping] | None = None,
+    ) -> None:
+        selected_names = self._selected_component_names(config)
         self.aliases.validate_config(config)
+
+        component_configs: dict[str, dict] = {}
+        explicitly_configured: set[str] = set()
+        configured_roots: list[str] = []
         for name, component_config in config.items():
             if name in RESERVED_CONFIG_NAMES:
                 continue
-            registered_name = self.resolve_name(name)
-            component_class = _COMPONENT_REGISTRY.get(registered_name)
-            if component_class is None:
+            if not isinstance(component_config, Mapping):
                 raise ValueError(
-                    f"No step, hook or resource registered with name "
-                    f"'{registered_name}'!"
+                    f"The value corresponding to the key '{name}' is not a mapping"
+                )
+            resolved_name = self.resolve_name(name)
+            component_configs[resolved_name] = dict(component_config)
+            explicitly_configured.add(resolved_name)
+            configured_roots.append(name)
+
+        roots: list[str] = []
+        for name, default_config in (default_configs or {}).items():
+            roots.append(name)
+            resolved_name = self.resolve_name(name)
+            if resolved_name not in component_configs:
+                component_configs[resolved_name] = (
+                    dict(default_config)
+                    if resolved_name == name
+                    else {}
                 )
 
-            component = component_class(component_config)
-            component_type = _component_type(component_class)
-            if component_type is Step:
-                self.add_step(
-                    component,
-                    overwrite=True,
+        for name in selected_names:
+            roots.append(name)
+            component_configs.setdefault(self.resolve_name(name), {})
+
+        roots.extend(configured_roots)
+        visiting: set[str] = set()
+
+        def activate(name: str) -> None:
+            resolved_name, component_class = self._registered_component_class(name)
+            if resolved_name in self.components or resolved_name in visiting:
+                return
+
+            visiting.add(resolved_name)
+            try:
+                for dependency_name, dependency_type in self._dependency_specs(
+                        component_class,
+                ):
+                    self._registered_component_class(
+                        dependency_name,
+                        dependency_type,
+                    )
+                    activate(dependency_name)
+
+                component_config = component_configs.get(resolved_name, {})
+                try:
+                    component = component_class(component_config)
+                except Exception as error:
+                    if (
+                            resolved_name not in explicitly_configured
+                            and not component_config
+                    ):
+                        raise RuntimeError(
+                            f"Failed to initialize auto-configured component "
+                            f"'{resolved_name}' with an empty config. Add a "
+                            f"top-level component mapping for its configuration."
+                        ) from error
+                    raise
+                self._register_component_instance(component)
+            finally:
+                visiting.discard(resolved_name)
+
+        for root in roots:
+            activate(root)
+
+    def dependency_closure(self, names: Iterable[str]) -> set[str]:
+        closure: set[str] = set()
+
+        def visit(name: str) -> None:
+            resolved_name, component_class = self._registered_component_class(name)
+            component = self.components.get(resolved_name)
+            if component is None:
+                raise RuntimeError(
+                    f"Component '{name}' resolves to '{resolved_name}', which "
+                    "is not configured in this session."
                 )
-            elif component_type is Hook:
-                self.register_hook(
-                    component,
-                    overwrite=True,
+            if resolved_name in closure:
+                return
+
+            closure.add(resolved_name)
+            for dependency_name, dependency_type in self._dependency_specs(
+                    component_class,
+            ):
+                self._registered_component_class(
+                    dependency_name,
+                    dependency_type,
                 )
-            else:
-                self.register_resource(
-                    component,
-                    overwrite=True,
-                )
+                visit(dependency_name)
+
+        for name in names:
+            visit(name)
+        return closure
 
     def register_resource(self, component: Resource, overwrite=False) -> str:
         self._validate_component(
