@@ -381,7 +381,77 @@ def test_wraps_rejects_hooks_without_a_shared_lifecycle_phase(tmp_path):
         session.execution_graph()
 
 
-def test_wraps_rejects_iteration_hooks_with_different_cadences(tmp_path):
+def test_wraps_allows_wrapper_to_run_less_often_than_wrapped_hook(tmp_path):
+    events = []
+
+    @hook("cadence_wrapper")
+    @wraps("cadence_target")
+    class Wrapper(IterationHook):
+        call_every = 4
+
+        def pre_iteration_callback(self, session):
+            events.append(("wrapper_pre", session.iteration))
+
+        def post_iteration_callback(self, session):
+            events.append(("wrapper_post", session.iteration))
+
+    @hook("cadence_target")
+    class Target(IterationHook):
+        call_every = 2
+
+        def pre_iteration_callback(self, session):
+            events.append(("target_pre", session.iteration))
+
+        def post_iteration_callback(self, session):
+            events.append(("target_post", session.iteration))
+
+    session = TrainingSession(_base_config(tmp_path, max_iterations=8))
+    _remove_default_hooks(session)
+    session.register_hook(Wrapper())
+    session.register_hook(Target())
+
+    with session:
+        list(session)
+
+    assert [
+        iteration for event, iteration in events if event == "wrapper_pre"
+    ] == [1, 4, 8]
+    assert [
+        iteration for event, iteration in events if event == "target_pre"
+    ] == [1, 2, 4, 6, 8]
+    for iteration in (1, 4, 8):
+        iteration_events = [
+            event for event, event_iteration in events
+            if event_iteration == iteration
+        ]
+        assert iteration_events == [
+            "wrapper_pre",
+            "target_pre",
+            "target_post",
+            "wrapper_post",
+        ]
+
+
+@pytest.mark.parametrize(
+    ("wrapper_cadence", "target_cadence"),
+    (
+        pytest.param(1, 2, id="wrapper-runs-more-often"),
+        pytest.param(3, 2, id="wrapper-schedule-is-not-contained"),
+        pytest.param(0, 2, id="wrapper-cadence-is-zero"),
+        pytest.param(2, 0, id="wrapped-cadence-is-zero"),
+        pytest.param(-2, 2, id="wrapper-cadence-is-negative"),
+        pytest.param(2, -2, id="wrapped-cadence-is-negative"),
+        pytest.param(True, 2, id="wrapper-cadence-is-boolean"),
+        pytest.param(2, False, id="wrapped-cadence-is-boolean"),
+        pytest.param(4.0, 2, id="wrapper-cadence-is-not-an-integer"),
+        pytest.param(4, 2.0, id="wrapped-cadence-is-not-an-integer"),
+    ),
+)
+def test_wraps_rejects_incompatible_iteration_cadences(
+        tmp_path,
+        wrapper_cadence,
+        target_cadence,
+):
     @hook("cadence_wrapper")
     @wraps("cadence_target")
     class Wrapper(IterationHook):
@@ -407,10 +477,10 @@ def test_wraps_rejects_iteration_hooks_with_different_cadences(tmp_path):
 
     session = TrainingSession(_base_config(tmp_path))
     _remove_default_hooks(session)
-    session.register_hook(Wrapper({"call_every": 1}))
-    session.register_hook(Target({"call_every": 2}))
+    session.register_hook(Wrapper({"call_every": wrapper_cadence}))
+    session.register_hook(Target({"call_every": target_cadence}))
 
-    with pytest.raises(RuntimeError, match="matching call_every values"):
+    with pytest.raises(RuntimeError, match="positive multiple"):
         session.execution_graph()
 
 

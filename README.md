@@ -506,8 +506,10 @@ class OuterHook(LifecycleHook):
 
 If `outer` wraps `inner`, setup and pre-iteration callbacks run outer
 then inner, while post-iteration callbacks and teardown run inner then outer.
-Wrapping names support session aliases. Hooks must share a lifecycle phase, and
-two iteration-capable hooks must have matching `call_every` values.
+Wrapping names support session aliases. Hooks must share a lifecycle phase. For
+two iteration-capable hooks, the wrapper's `call_every` must be a positive
+multiple of the wrapped hook's value. This lets the wrapper run less often while
+ensuring it never runs on an iteration where the wrapped hook does not run.
 
 The framework builds a registry-wide ordering graph and performs a topological
 sort. It rejects missing, incorrectly typed, or unconfigured targets; wrapping

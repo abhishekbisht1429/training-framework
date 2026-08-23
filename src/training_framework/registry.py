@@ -282,10 +282,19 @@ def _validate_wrapping_lifecycle(
     missing = object()
     wrapper_cadence = getattr(wrapper, "call_every", missing)
     wrapped_cadence = getattr(wrapped, "call_every", missing)
+    valid_cadences = (
+        isinstance(wrapper_cadence, int)
+        and not isinstance(wrapper_cadence, bool)
+        and wrapper_cadence > 0
+        and isinstance(wrapped_cadence, int)
+        and not isinstance(wrapped_cadence, bool)
+        and wrapped_cadence > 0
+    )
     if (
             wrapper_cadence is missing
             or wrapped_cadence is missing
-            or wrapper_cadence != wrapped_cadence
+            or not valid_cadences
+            or wrapper_cadence % wrapped_cadence != 0
     ):
         wrapper_value = (
             "<missing>" if wrapper_cadence is missing
@@ -297,7 +306,8 @@ def _validate_wrapping_lifecycle(
         )
         raise RuntimeError(
             f"Wrapping iteration hooks '{wrapper.name}' and '{wrapped.name}' "
-            "must have matching call_every values; "
+            "require the wrapper call_every to be a positive multiple of the "
+            "wrapped Hook call_every; "
             f"got {wrapper_value} and {wrapped_value}"
         )
 
