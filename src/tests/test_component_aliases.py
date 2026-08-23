@@ -307,7 +307,7 @@ def test_invalid_alias_mappings_are_rejected(
         TrainingSession(config)
 
 
-def test_alias_target_must_have_one_unambiguous_component_category(tmp_path):
+def test_alias_target_names_are_globally_unique_across_categories():
     @step("ambiguous")
     class AmbiguousStep(Step):
         def __init__(self, config):
@@ -316,23 +316,17 @@ def test_alias_target_must_have_one_unambiguous_component_category(tmp_path):
         def run(self, session):
             pass
 
-    @resource("ambiguous")
-    class AmbiguousResource(Resource):
-        def __init__(self, config):
-            pass
+    with pytest.raises(ValueError, match="already registered"):
+        @resource("ambiguous")
+        class AmbiguousResource(Resource):
+            def __init__(self, config):
+                pass
 
-        def setup(self, session):
-            pass
+            def setup(self, session):
+                pass
 
-        def teardown(self, session):
-            pass
-
-    with pytest.raises(ValueError, match="multiple component categories"):
-        TrainingSession({
-            "base_config": _base_config(tmp_path),
-            "aliases": {"role": "ambiguous"},
-            "role": {},
-        })
+            def teardown(self, session):
+                pass
 
 
 def test_alias_dependency_must_resolve_to_the_required_category(tmp_path):

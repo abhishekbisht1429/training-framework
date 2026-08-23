@@ -2,6 +2,7 @@ from collections import deque
 from collections.abc import Iterable, Mapping
 
 from training_framework.components import (
+    Component,
     Hook,
     IterationHook,
     Resource,
@@ -10,32 +11,72 @@ from training_framework.components import (
 )
 
 
-def make_registry(component_type):
-    registry = {}
+_COMPONENT_TYPES = (Resource, Hook, Step)
+_COMPONENT_REGISTRY: dict[str, type[Component]] = {}
 
-    def register(name: str, overwrite=False):
-        def wrapper(cls):
-            if not issubclass(cls, component_type):
-                raise TypeError(
-                    f"{cls.__name__} must be subclass of {component_type.__name__}"
-                )
-            if overwrite == False and name in registry:
+
+def _component_type(component: Component | type[Component]) -> type[Component]:
+    component_class = component if isinstance(component, type) else type(component)
+    matching_types = [
+        component_type
+        for component_type in _COMPONENT_TYPES
+        if issubclass(component_class, component_type)
+    ]
+    if len(matching_types) != 1:
+        categories = ", ".join(
+            component_type.__name__ for component_type in matching_types
+        ) or "none"
+        raise TypeError(
+            f"{component_class.__name__} must inherit exactly one component "
+            f"category (Resource, Hook, or Step); found {categories}"
+        )
+    return matching_types[0]
+
+
+def _component(name: str, *, expected_type=None, overwrite=False):
+    def wrapper(cls):
+        if not isinstance(cls, type) or not issubclass(cls, Component):
+            expected_name = (
+                expected_type.__name__ if expected_type is not None else "Component"
+            )
+            raise TypeError(
+                f"{getattr(cls, '__name__', type(cls).__name__)} must be "
+                f"subclass of {expected_name}"
+            )
+        if expected_type is not None and not issubclass(cls, expected_type):
+            raise TypeError(
+                f"{cls.__name__} must be subclass of {expected_type.__name__}"
+            )
+
+        registered_type = _component_type(cls)
+        if name in _COMPONENT_REGISTRY:
+            existing_type = _component_type(_COMPONENT_REGISTRY[name])
+            if not overwrite:
+                raise ValueError(f"Component with name '{name}' already registered")
+            if existing_type is not registered_type:
                 raise ValueError(
-                    f"{component_type} with name '{name}' already registered"
+                    f"Cannot overwrite {existing_type.__name__} '{name}' with "
+                    f"{registered_type.__name__} '{cls.__name__}'"
                 )
-            registry[name] = cls
-            cls.name = name
-            cls.id = f"{component_type.__name__}.{cls.name}"
-            return cls
 
-        return wrapper
+        _COMPONENT_REGISTRY[name] = cls
+        cls.name = name
+        cls.id = f"{registered_type.__name__}.{name}"
+        return cls
 
-    return registry, register
+    return wrapper
 
 
-HOOK_REGISTRY, hook = make_registry(Hook)
-RESOURCE_REGISTRY, resource = make_registry(Resource)
-STEP_REGISTRY, step = make_registry(Step)
+def hook(name: str, overwrite=False):
+    return _component(name, expected_type=Hook, overwrite=overwrite)
+
+
+def resource(name: str, overwrite=False):
+    return _component(name, expected_type=Resource, overwrite=overwrite)
+
+
+def step(name: str, overwrite=False):
+    return _component(name, expected_type=Step, overwrite=overwrite)
 
 RESERVED_CONFIG_NAMES = frozenset({"aliases", "base_config"})
 
@@ -54,8 +95,6 @@ class ComponentAliases:
 
     def _validate(self) -> None:
         targets = {}
-        registries = (STEP_REGISTRY, HOOK_REGISTRY, RESOURCE_REGISTRY)
-
         for expected_name, actual_name in self._aliases.items():
             if not isinstance(expected_name, str) or not isinstance(actual_name, str):
                 raise TypeError("'aliases' must be a mapping of strings to strings")
@@ -83,24 +122,16 @@ class ComponentAliases:
                     f"cannot both target '{actual_name}'"
                 )
 
-            matching_registries = [
-                registry for registry in registries if actual_name in registry
-            ]
-            if not matching_registries:
+            if actual_name not in _COMPONENT_REGISTRY:
                 raise ValueError(
                     f"Alias target '{actual_name}' is not a registered component"
                 )
-            if len(matching_registries) > 1:
-                raise ValueError(
-                    f"Alias target '{actual_name}' is registered in multiple "
-                    "component categories"
-                )
-
-            actual_registry = matching_registries[0]
-            expected_registries = [
-                registry for registry in registries if expected_name in registry
-            ]
-            if expected_registries and actual_registry not in expected_registries:
+            actual_type = _component_type(_COMPONENT_REGISTRY[actual_name])
+            if (
+                    expected_name in _COMPONENT_REGISTRY
+                    and _component_type(_COMPONENT_REGISTRY[expected_name])
+                    is not actual_type
+            ):
                 raise ValueError(
                     f"Alias '{expected_name}' -> '{actual_name}' changes the "
                     "component category"
@@ -206,11 +237,7 @@ def topological_sort_of_components(
     alias_resolver = _alias_resolver(aliases)
     session_scoped = components is not None
     if components is None:
-        components = (
-                list(STEP_REGISTRY.values())
-                + list(HOOK_REGISTRY.values())
-                + list(RESOURCE_REGISTRY.values())
-        )
+        components = list(_COMPONENT_REGISTRY.values())
     else:
         components = list(components)
 
@@ -218,71 +245,33 @@ def topological_sort_of_components(
         component.id: [] for component in components
     }
     for component in components:
-        for required_hook_name in getattr(component, "required_hooks", []):
-            resolved_name = alias_resolver.resolve(required_hook_name)
-            if resolved_name not in HOOK_REGISTRY:
-                raise RuntimeError(
-                    f"unmet prerequisite! Hook '{required_hook_name}' resolves "
-                    f"to '{resolved_name}', which is not registered as a Hook."
-                )
-            prerequisites_graph[component.id].append(
-                HOOK_REGISTRY[resolved_name].id
-            )
-            if (
-                    session_scoped
-                    and HOOK_REGISTRY[resolved_name].id
-                    not in prerequisites_graph
-            ):
-                raise RuntimeError(
-                    f"unmet prerequisite! Hook '{required_hook_name}' resolves "
-                    f"to '{resolved_name}', which is not configured in this "
-                    "session."
-                )
+        requirements = (
+            ("required_hooks", Hook),
+            ("required_steps", Step),
+            ("required_resources", Resource),
+        )
+        for attribute, required_type in requirements:
+            for required_name in getattr(component, attribute, []):
+                resolved_name = alias_resolver.resolve(required_name)
+                registered_class = _COMPONENT_REGISTRY.get(resolved_name)
+                if (
+                        registered_class is None
+                        or not issubclass(registered_class, required_type)
+                ):
+                    raise RuntimeError(
+                        f"unmet prerequisite! {required_type.__name__} "
+                        f"'{required_name}' resolves to '{resolved_name}', which "
+                        f"is not registered as a {required_type.__name__}."
+                    )
 
-        for required_step_name in getattr(component, "required_steps", []):
-            resolved_name = alias_resolver.resolve(required_step_name)
-            if resolved_name not in STEP_REGISTRY:
-                raise RuntimeError(
-                    f"unmet prerequisite! Step '{required_step_name}' resolves "
-                    f"to '{resolved_name}', which is not registered as a Step."
-                )
-            prerequisites_graph[component.id].append(
-                STEP_REGISTRY[resolved_name].id
-            )
-            if (
-                    session_scoped
-                    and STEP_REGISTRY[resolved_name].id
-                    not in prerequisites_graph
-            ):
-                raise RuntimeError(
-                    f"unmet prerequisite! Step '{required_step_name}' resolves "
-                    f"to '{resolved_name}', which is not configured in this "
-                    "session."
-                )
-
-        for required_resource_name in getattr(
-                component, "required_resources", []
-        ):
-            resolved_name = alias_resolver.resolve(required_resource_name)
-            if resolved_name not in RESOURCE_REGISTRY:
-                raise RuntimeError(
-                    f"unmet prerequisite! Resource '{required_resource_name}' "
-                    f"resolves to '{resolved_name}', which is not registered as "
-                    "a Resource."
-                )
-            prerequisites_graph[component.id].append(
-                RESOURCE_REGISTRY[resolved_name].id
-            )
-            if (
-                    session_scoped
-                    and RESOURCE_REGISTRY[resolved_name].id
-                    not in prerequisites_graph
-            ):
-                raise RuntimeError(
-                    f"unmet prerequisite! Resource '{required_resource_name}' "
-                    f"resolves to '{resolved_name}', which is not configured in "
-                    "this session."
-                )
+                prerequisite_id = registered_class.id
+                prerequisites_graph[component.id].append(prerequisite_id)
+                if session_scoped and prerequisite_id not in prerequisites_graph:
+                    raise RuntimeError(
+                        f"unmet prerequisite! {required_type.__name__} "
+                        f"'{required_name}' resolves to '{resolved_name}', which "
+                        "is not configured in this session."
+                    )
 
     dependents_graph: dict[str, list[str]] = {
         component_id: [] for component_id in prerequisites_graph

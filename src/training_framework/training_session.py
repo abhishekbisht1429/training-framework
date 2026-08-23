@@ -11,6 +11,7 @@ import torch
 
 from training_framework.builtin_components import Logger, Checkpointer
 from training_framework.components import (
+    Component,
     Hook,
     IterationHook,
     LifecycleHook,
@@ -26,13 +27,9 @@ from training_framework.components import (
     Step,
 )
 from training_framework.registry import (
-    HOOK_REGISTRY,
-    RESOURCE_REGISTRY,
-    STEP_REGISTRY,
     format_execution_graph,
     hook,
     topological_sort_of_components,
-    make_registry,
     requires_hook,
     requires_resource,
     requires_step,
@@ -43,9 +40,7 @@ from training_framework.session_components import SessionComponents
 from training_framework.session_config import SessionConfig, SessionPhase
 from training_framework.session_io import write_session_config
 from training_framework.session_state import (
-    capture_component_collection,
     capture_rng_state,
-    restore_component_collection,
     restore_rng_state,
 )
 from training_framework.util import (
@@ -57,13 +52,11 @@ from training_framework.util import (
 )
 
 __all__ = [
-    "HOOK_REGISTRY",
+    "Component",
     "Hook",
     "IterationHook",
     "LifecycleHook",
-    "RESOURCE_REGISTRY",
     "Resource",
-    "STEP_REGISTRY",
     "SessionConfig",
     "SessionHook",
     "SessionPhase",
@@ -77,7 +70,6 @@ __all__ = [
     "Step",
     "TrainingSession",
     "hook",
-    "make_registry",
     "requires_hook",
     "requires_resource",
     "requires_step",
@@ -125,22 +117,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     def _set_component_collections(
             self,
             *,
-            resources: dict[str, Resource] | None = None,
-            steps: dict[str, Step] | None = None,
-            hooks: dict[str, Hook] | None = None,
             aliases: dict[str, str] | None = None,
     ) -> None:
         if aliases is None:
             aliases = self._config.get("aliases", {})
-        self._components = SessionComponents(
-            resources=resources,
-            steps=steps,
-            hooks=hooks,
-            aliases=aliases,
-        )
-        self._resources = self._components.resources
-        self._steps = self._components.steps
-        self._hooks = self._components.hooks
+        self._components = SessionComponents(aliases=aliases)
 
     def _register_default_components(self) -> None:
         # Register logger
@@ -187,9 +168,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             "base_config": deepcopy(self._base_config),
             "session_config": self._session_config,
             "iteration": self._iteration,
-            "resources_state": capture_component_collection(self._resources),
-            "steps_state": capture_component_collection(self._steps),
-            "hooks_state": capture_component_collection(self._hooks),
+            "components_state": self._components.get_state(),
             "session_context": deepcopy(self._session_context),
             "init_args": self._init_args,
         }
@@ -215,6 +194,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @override
     def set_state(self, state):
+        if "components_state" not in state:
+            raise ValueError(
+                "Checkpoint uses an unsupported component state schema; "
+                "expected 'components_state'"
+            )
         (
             self._config,
             self._base_config,
@@ -223,20 +207,11 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._iteration = state["iteration"]
 
         self._init_transient_infra()
-        self._set_component_collections(
-            resources=restore_component_collection(
-                state["resources_state"],
-                RESOURCE_REGISTRY,
-            ),
-            steps=restore_component_collection(
-                state["steps_state"],
-                STEP_REGISTRY,
-            ),
-            hooks=restore_component_collection(
-                state["hooks_state"],
-                HOOK_REGISTRY,
-            ),
+        restored_components = SessionComponents(
+            aliases=self._config.get("aliases", {}),
         )
+        restored_components.set_state(state["components_state"])
+        self._components = restored_components
 
         self._session_context = state["session_context"]
         restore_rng_state(state)
@@ -296,6 +271,18 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         return self._components.ordered_hooks
 
     @property
+    def _hooks(self):
+        return self._components.hooks
+
+    @property
+    def _resources(self):
+        return self._components.resources
+
+    @property
+    def _steps(self):
+        return self._components.steps
+
+    @property
     def _sorted_resources(self):
         return self._components.ordered_resources
 
@@ -337,13 +324,13 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         return self._components.resolve_name(name)
 
     def get_all_hooks(self):
-        return list(self._hooks.values())
+        return list(self._components.hooks.values())
 
     def get_all_resources(self):
-        return list(self._resources.values())
+        return list(self._components.resources.values())
 
     def get_all_steps(self):
-        return list(self._steps.values())
+        return list(self._components.steps.values())
 
     def execution_graph(self) -> str:
         return format_execution_graph(

@@ -14,9 +14,7 @@ from collections.abc import Callable
 import pytest
 
 from training_framework.training_session import (
-    HOOK_REGISTRY,
-    RESOURCE_REGISTRY,
-    STEP_REGISTRY,
+    Component,
     Hook,
     Resource,
     Step,
@@ -28,6 +26,7 @@ from training_framework.training_session import (
     step,
     topological_sort_of_components,
 )
+from training_framework.registry import _COMPONENT_REGISTRY, _component
 
 
 ClassFactory = Callable[[str], type]
@@ -64,21 +63,18 @@ def make_step_class(class_name: str) -> type[Step]:
 COMPONENT_CASES = (
     pytest.param(
         resource,
-        RESOURCE_REGISTRY,
         make_resource_class,
         "Resource",
         id="resource",
     ),
     pytest.param(
         hook,
-        HOOK_REGISTRY,
         make_hook_class,
         "Hook",
         id="hook",
     ),
     pytest.param(
         step,
-        STEP_REGISTRY,
         make_step_class,
         "Step",
         id="step",
@@ -90,27 +86,22 @@ COMPONENT_CASES = (
 def isolated_component_registries():
     """Give every test a clean registry and restore prior state afterward."""
 
-    registries = (RESOURCE_REGISTRY, HOOK_REGISTRY, STEP_REGISTRY)
-    snapshots = tuple(dict(registry) for registry in registries)
-
-    for registry in registries:
-        registry.clear()
+    snapshot = dict(_COMPONENT_REGISTRY)
+    _COMPONENT_REGISTRY.clear()
 
     try:
         yield
     finally:
-        for registry, snapshot in zip(registries, snapshots, strict=True):
-            registry.clear()
-            registry.update(snapshot)
+        _COMPONENT_REGISTRY.clear()
+        _COMPONENT_REGISTRY.update(snapshot)
 
 
 @pytest.mark.parametrize(
-    ("decorator", "registry", "class_factory", "kind"),
+    ("decorator", "class_factory", "kind"),
     COMPONENT_CASES,
 )
 def test_component_decorator_registers_class_and_sets_metadata(
     decorator,
-    registry: dict[str, type],
     class_factory: ClassFactory,
     kind: str,
 ):
@@ -119,18 +110,17 @@ def test_component_decorator_registers_class_and_sets_metadata(
     decorated_class = decorator("registered_component")(component_class)
 
     assert decorated_class is component_class
-    assert registry == {"registered_component": component_class}
+    assert _COMPONENT_REGISTRY == {"registered_component": component_class}
     assert component_class.name == "registered_component"
     assert component_class.id == f"{kind}.registered_component"
 
 
 @pytest.mark.parametrize(
-    ("decorator", "registry", "class_factory", "kind"),
+    ("decorator", "class_factory", "kind"),
     COMPONENT_CASES,
 )
 def test_duplicate_component_name_is_rejected_without_overwriting_registry(
     decorator,
-    registry: dict[str, type],
     class_factory: ClassFactory,
     kind: str,
 ):
@@ -141,7 +131,7 @@ def test_duplicate_component_name_is_rejected_without_overwriting_registry(
     with pytest.raises(ValueError, match="already registered"):
         decorator("duplicate_name")(second_class)
 
-    assert registry == {"duplicate_name": first_class}
+    assert _COMPONENT_REGISTRY == {"duplicate_name": first_class}
 
 
 @pytest.mark.parametrize(
@@ -164,26 +154,52 @@ def test_component_decorator_rejects_wrong_component_type(
 
 
 
-def test_same_name_is_allowed_in_different_component_registries():
+def test_internal_component_decorator_rejects_missing_or_ambiguous_category():
+    class BareComponent(Component):
+        pass
+
+    class AmbiguousComponent(Resource, Step):
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+        def run(self, session):
+            pass
+
+    with pytest.raises(TypeError, match="exactly one component category"):
+        _component("bare_component")(BareComponent)
+    with pytest.raises(TypeError, match="abstract"):
+        BareComponent()
+    with pytest.raises(TypeError, match="found Resource, Step"):
+        _component("ambiguous_component")(AmbiguousComponent)
+
+
+def test_same_category_registration_can_be_overwritten_explicitly():
+    first_class = resource("replaceable")(
+        make_resource_class("FirstResource")
+    )
+    replacement_class = resource("replaceable", overwrite=True)(
+        make_resource_class("ReplacementResource")
+    )
+
+    assert replacement_class is not first_class
+    assert _COMPONENT_REGISTRY["replaceable"] is replacement_class
+    assert replacement_class.id == "Resource.replaceable"
+
+
+def test_component_names_are_unique_across_categories():
     shared_name = "shared_name"
 
     resource_class = resource(shared_name)(make_resource_class("SharedResource"))
-    hook_class = hook(shared_name)(make_hook_class("SharedHook"))
-    step_class = step(shared_name)(make_step_class("SharedStep"))
+    with pytest.raises(ValueError, match="already registered"):
+        hook(shared_name)(make_hook_class("SharedHook"))
+    with pytest.raises(ValueError, match="already registered"):
+        step(shared_name)(make_step_class("SharedStep"))
 
-    assert RESOURCE_REGISTRY[shared_name] is resource_class
-    assert HOOK_REGISTRY[shared_name] is hook_class
-    assert STEP_REGISTRY[shared_name] is step_class
-
-    assert {
-        resource_class.id,
-        hook_class.id,
-        step_class.id,
-    } == {
-        "Resource.shared_name",
-        "Hook.shared_name",
-        "Step.shared_name",
-    }
+    assert _COMPONENT_REGISTRY == {shared_name: resource_class}
+    assert resource_class.id == "Resource.shared_name"
 
 
 @pytest.mark.parametrize(
@@ -443,30 +459,16 @@ def test_prerequisite_name_must_exist_in_correct_registry(
 
 
 
-def test_topological_sort_uses_correct_registry_when_names_overlap():
+def test_overwrite_cannot_change_component_category():
     shared_name = "shared_dependency"
 
     shared_resource = resource(shared_name)(
         make_resource_class("SharedResource")
     )
-    shared_hook = hook(shared_name)(make_hook_class("SharedHook"))
-    shared_step = step(shared_name)(make_step_class("SharedStep"))
+    with pytest.raises(ValueError, match="Cannot overwrite Resource"):
+        hook(shared_name, overwrite=True)(make_hook_class("SharedHook"))
 
-    resource_consumer = step("resource_consumer")(
-        requires_resource(shared_name)(make_step_class("ResourceConsumer"))
-    )
-    hook_consumer = step("hook_consumer")(
-        requires_hook(shared_name)(make_step_class("HookConsumer"))
-    )
-    step_consumer = step("step_consumer")(
-        requires_step(shared_name)(make_step_class("StepConsumer"))
-    )
-
-    order = topological_sort_of_components()
-
-    assert order[shared_resource.id] < order[resource_consumer.id]
-    assert order[shared_hook.id] < order[hook_consumer.id]
-    assert order[shared_step.id] < order[step_consumer.id]
+    assert _COMPONENT_REGISTRY[shared_name] is shared_resource
 
 
 

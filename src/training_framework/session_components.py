@@ -1,16 +1,19 @@
+from typing import Any
+
 from training_framework.components import (
+    Component,
     Hook,
     IterationHook,
     Resource,
     SessionHook,
+    Stateful,
     Step,
 )
 from training_framework.registry import (
     ComponentAliases,
-    HOOK_REGISTRY,
     RESERVED_CONFIG_NAMES,
-    RESOURCE_REGISTRY,
-    STEP_REGISTRY,
+    _COMPONENT_REGISTRY,
+    _component_type,
     topological_sort_of_components,
 )
 
@@ -24,10 +27,93 @@ class SessionComponents:
             hooks: dict[str, Hook] | None = None,
             aliases: dict[str, str] | None = None,
     ):
-        self.resources = resources if resources is not None else {}
-        self.steps = steps if steps is not None else {}
-        self.hooks = hooks if hooks is not None else {}
+        self.components: dict[str, Component] = {}
+        self._merge_components(resources, Resource)
+        self._merge_components(hooks, Hook)
+        self._merge_components(steps, Step)
         self.aliases = ComponentAliases(aliases)
+
+    def get_state(self) -> dict[str, dict[str, Any]]:
+        return {
+            name: {
+                "component_type": _component_type(component).__name__,
+                "state": (
+                    component.get_state()
+                    if isinstance(component, Stateful)
+                    else None
+                ),
+                "init_args": getattr(component, "_init_args"),
+            }
+            for name, component in self.components.items()
+        }
+
+    def set_state(self, component_states: dict[str, dict[str, Any]]) -> None:
+        restored_components: dict[str, Component] = {}
+
+        for name, component_info in component_states.items():
+            component_class = _COMPONENT_REGISTRY.get(name)
+            if component_class is None:
+                raise ValueError(
+                    f"Checkpoint component '{name}' is not registered"
+                )
+
+            component_type = _component_type(component_class)
+            stored_type = component_info["component_type"]
+            if component_type.__name__ != stored_type:
+                raise ValueError(
+                    f"Checkpoint component '{name}' is stored as a "
+                    f"{stored_type}, but is now registered as a "
+                    f"{component_type.__name__}"
+                )
+
+            init_args = component_info["init_args"]
+            component: Component = component_class(
+                *init_args["args"],
+                **init_args["kwargs"],
+            )
+            if isinstance(component, Stateful):
+                component.set_state(component_info["state"])
+            restored_components[name] = component
+
+        self.components = restored_components
+
+    def _merge_components(self, components, expected_type) -> None:
+        for name, component in (components or {}).items():
+            if not isinstance(component, expected_type):
+                raise TypeError(
+                    f"Restored component '{name}' is not a "
+                    f"{expected_type.__name__}"
+                )
+            if name in self.components:
+                raise ValueError(
+                    f"Component name '{name}' appears in multiple checkpoint "
+                    "categories and cannot be restored with the unified registry"
+                )
+            self.components[name] = component
+
+    @property
+    def resources(self) -> dict[str, Resource]:
+        return {
+            name: component
+            for name, component in self.components.items()
+            if isinstance(component, Resource)
+        }
+
+    @property
+    def hooks(self) -> dict[str, Hook]:
+        return {
+            name: component
+            for name, component in self.components.items()
+            if isinstance(component, Hook)
+        }
+
+    @property
+    def steps(self) -> dict[str, Step]:
+        return {
+            name: component
+            for name, component in self.components.items()
+            if isinstance(component, Step)
+        }
 
     def register_from_config(self, config: dict) -> None:
         self.aliases.validate_config(config)
@@ -35,66 +121,62 @@ class SessionComponents:
             if name in RESERVED_CONFIG_NAMES:
                 continue
             registered_name = self.resolve_name(name)
-            if registered_name in STEP_REGISTRY:
-                self.add_step(
-                    STEP_REGISTRY[registered_name](component_config),
-                    overwrite=True,
-                )
-            elif registered_name in HOOK_REGISTRY:
-                self.register_hook(
-                    HOOK_REGISTRY[registered_name](component_config),
-                    overwrite=True,
-                )
-            elif registered_name in RESOURCE_REGISTRY:
-                self.register_resource(
-                    RESOURCE_REGISTRY[registered_name](component_config),
-                    overwrite=True,
-                )
-            else:
+            component_class = _COMPONENT_REGISTRY.get(registered_name)
+            if component_class is None:
                 raise ValueError(
                     f"No step, hook or resource registered with name "
                     f"'{registered_name}'!"
+                )
+
+            component = component_class(component_config)
+            component_type = _component_type(component_class)
+            if component_type is Step:
+                self.add_step(
+                    component,
+                    overwrite=True,
+                )
+            elif component_type is Hook:
+                self.register_hook(
+                    component,
+                    overwrite=True,
+                )
+            else:
+                self.register_resource(
+                    component,
+                    overwrite=True,
                 )
 
     def register_resource(self, component: Resource, overwrite=False) -> str:
         self._validate_component(
             component,
             Resource,
-            RESOURCE_REGISTRY,
-            self.resources,
             overwrite=overwrite
         )
-        self.resources[component.name] = component
+        self.components[component.name] = component
         return component.name
 
     def register_hook(self, component: Hook, overwrite=False) -> str:
         self._validate_component(
             component,
             Hook,
-            HOOK_REGISTRY,
-            self.hooks,
             overwrite=overwrite,
         )
-        self.hooks[component.name] = component
+        self.components[component.name] = component
         return component.name
 
     def add_step(self, component: Step, overwrite=False) -> str:
         self._validate_component(
             component,
             Step,
-            STEP_REGISTRY,
-            self.steps,
             overwrite=overwrite,
         )
-        self.steps[component.name] = component
+        self.components[component.name] = component
         return component.name
 
     def _validate_component(
             self,
             component,
             base_type,
-            registry,
-            collection,
             overwrite=False,
     ) -> None:
         if not isinstance(component, base_type):
@@ -103,10 +185,18 @@ class SessionComponents:
                 f"is not an instance of {base_type.__name__}!"
             )
 
-        if not hasattr(component, "name") or component.name not in registry:
+        if (
+                not hasattr(component, "name")
+                or component.name not in _COMPONENT_REGISTRY
+        ):
             raise ValueError(
                 f"{base_type.__name__} '{type(component).__name__}' "
-                f"not registered in {base_type.__name__.upper()}_REGISTRY!"
+                "is not registered as a component!"
+            )
+        if _component_type(_COMPONENT_REGISTRY[component.name]) is not base_type:
+            raise ValueError(
+                f"Component '{component.name}' is not registered as a "
+                f"{base_type.__name__}!"
             )
 
         if self.aliases.is_alias(component.name):
@@ -115,48 +205,57 @@ class SessionComponents:
                 f"'{self.resolve_name(component.name)}' in this session"
             )
 
-        if overwrite == False and component.name in collection:
+        existing = self.components.get(component.name)
+        if existing is not None and not isinstance(existing, base_type):
+            raise ValueError(
+                f"Cannot replace {type(existing).__name__} '{component.name}' "
+                f"with {base_type.__name__} '{type(component).__name__}'"
+            )
+        if overwrite == False and existing is not None:
             raise ValueError(
                 f"{base_type.__name__} '{component.name}' already registered!"
             )
 
     def remove_step(self, name: str) -> None:
-        self._remove_component(name, "Step", STEP_REGISTRY, self.steps)
+        self._remove_component(name, Step)
 
     def unregister_hook(self, name: str) -> None:
-        self._remove_component(name, "Hook", HOOK_REGISTRY, self.hooks)
+        self._remove_component(name, Hook)
 
     def unregister_resource(self, name: str) -> None:
-        self._remove_component(
-            name,
-            "Resource",
-            RESOURCE_REGISTRY,
-            self.resources,
-        )
+        self._remove_component(name, Resource)
 
-    def _remove_component(self, name, kind, registry, collection) -> None:
+    def _remove_component(self, name, component_type) -> None:
+        kind = component_type.__name__
         registered_name = self.resolve_name(name)
-        if registered_name not in registry:
+        registered_class = _COMPONENT_REGISTRY.get(registered_name)
+        if (
+                registered_class is None
+                or not issubclass(registered_class, component_type)
+        ):
             raise ValueError(
                 f"{kind} '{name}' resolves to '{registered_name}', which is not "
-                f"in {kind.upper()}_REGISTRY!"
+                f"registered as a {kind}!"
             )
-        if registered_name not in collection:
+        component = self.components.get(registered_name)
+        if component is None or not isinstance(component, component_type):
             if kind == "Step":
                 raise ValueError(f"Step '{name}' is not added to this session!")
             raise ValueError(
                 f"{kind} '{name}' not registered with current session!"
             )
-        del collection[registered_name]
+        del self.components[registered_name]
 
     def get_resource(self, name: str) -> Resource:
         registered_name = self.resolve_name(name)
-        if registered_name not in self.resources:
+        component = self.components.get(registered_name)
+        if not isinstance(component, Resource):
             raise KeyError(f"{name} not found in resources!")
-        return self.resources[registered_name]
+        return component
 
     def has_resource(self, name: str) -> bool:
-        return self.resolve_name(name) in self.resources
+        component = self.components.get(self.resolve_name(name))
+        return isinstance(component, Resource)
 
     def resolve_name(self, name: str) -> str:
         return self.aliases.resolve(name)
@@ -168,11 +267,7 @@ class SessionComponents:
     def _component_order(self) -> dict[str, int]:
         return topological_sort_of_components(
             self.aliases,
-            components=(
-                list(self.resources.values())
-                + list(self.hooks.values())
-                + list(self.steps.values())
-            ),
+            components=self.components.values(),
         )
 
     @property

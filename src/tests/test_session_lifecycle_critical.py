@@ -506,14 +506,12 @@ def test_hook_setup_failure_rolls_back_hooks_and_resources(tmp_path):
     assert getattr(session, "_active", False) is False
 
 
-def test_resource_and_hook_with_same_name_have_independent_setup_tracking(tmp_path):
-    shared_name = "critical_shared_lifecycle_name"
-
-    @resource(shared_name)
+def test_resource_and_hook_have_independent_setup_tracking(tmp_path):
+    @resource("critical_shared_lifecycle_resource")
     class CriticalSharedNameResource(TraceResourceBase):
         pass
 
-    @hook(shared_name)
+    @hook("critical_shared_lifecycle_hook")
     class CriticalSharedNameHook(TraceHookBase):
         def setup(self, session: TrainingSession):
             self.setup_calls += 1
