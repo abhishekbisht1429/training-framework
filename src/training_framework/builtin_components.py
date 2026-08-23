@@ -209,7 +209,8 @@ class DDPResource(Resource):
         os.environ["MASTER_PORT"] = self._master_port
 
         # Explicitly set the CUDA device for this process (1 process per GPU strategy)
-        if self._backend == "nccl" and torch.cuda.is_available():
+        uses_cuda = self._backend == "nccl" and torch.cuda.is_available()
+        if uses_cuda:
             torch.cuda.set_device(self._rank)
             session.set_device(torch.device("cuda", self._rank))
 
@@ -223,7 +224,10 @@ class DDPResource(Resource):
         try:
             # Wrap the model only after the process group is available.
             model = session.get_resource("model")
-            self._ddp_wrapped_model = DDP(model, device_ids=[self.rank])
+            if uses_cuda:
+                model.to(session.device)
+            device_ids = [self.rank] if uses_cuda else None
+            self._ddp_wrapped_model = DDP(model, device_ids=device_ids)
         except Exception:
             torch.distributed.destroy_process_group()
             raise
