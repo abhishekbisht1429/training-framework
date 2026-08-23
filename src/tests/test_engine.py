@@ -140,14 +140,15 @@ def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_p
             "device": "cpu",
             "components_package": COMPONENTS_PACKAGE,
         },
+        "aliases": {"model": "it_3d45_model"},
         "ddp": {
             "world_size": 2,
             "backend": "gloo",
-            "parallel_components": ["it_3d45_model", "it_3d45_train"],
+            "parallel_components": ["model", "it_3d45_train"],
             "master_addr": "localhost",
             "master_port": "12355"
         },
-        "it_3d45_model": {},
+        "model": {},
         "it_3d45_train": {},
         "it_3d45_rank0_resource": {},
         "it_3d45_rank0_step": {},

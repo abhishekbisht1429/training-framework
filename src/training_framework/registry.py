@@ -78,7 +78,7 @@ def resource(name: str, overwrite=False):
 def step(name: str, overwrite=False):
     return _component(name, expected_type=Step, overwrite=overwrite)
 
-RESERVED_CONFIG_NAMES = frozenset({"aliases", "base_config"})
+RESERVED_CONFIG_NAMES = frozenset({"aliases", "base_config", "components"})
 
 
 class ComponentAliases:
@@ -105,7 +105,7 @@ class ComponentAliases:
                     or actual_name in RESERVED_CONFIG_NAMES
             ):
                 raise ValueError(
-                    "'aliases' and 'base_config' are reserved component names"
+                    "'aliases', 'base_config', and 'components' are reserved component names"
                 )
             if expected_name == actual_name:
                 raise ValueError(
@@ -140,13 +140,9 @@ class ComponentAliases:
             targets[actual_name] = expected_name
 
     def validate_config(self, config: Mapping) -> None:
+        selected_components = config.get("components", ())
         for expected_name, actual_name in self._aliases.items():
-            if expected_name not in config:
-                raise ValueError(
-                    f"Alias '{expected_name}' requires a top-level "
-                    f"'{expected_name}' component configuration"
-                )
-            if actual_name in config:
+            if actual_name in config or actual_name in selected_components:
                 raise ValueError(
                     f"Configure alias '{expected_name}', not both "
                     f"'{expected_name}' and '{actual_name}'"

@@ -4,6 +4,9 @@ from typing import Mapping
 
 from omegaconf import OmegaConf
 
+from training_framework.registry import RESERVED_CONFIG_NAMES
+
+
 class Configurator:
     def __init__(self):
         self._parser = argparse.ArgumentParser()
@@ -45,25 +48,57 @@ class Configurator:
             raise KeyError("Cannot use this function in the current mode!")
         return self._session_configs[index]
 
+    @staticmethod
+    def _selected_component_names(session_config: Mapping) -> list[str]:
+        selected = session_config.get("components", [])
+        if not isinstance(selected, list):
+            raise TypeError("'components' must be a list of component names")
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for name in selected:
+            if not isinstance(name, str):
+                raise TypeError("'components' entries must be strings")
+            if not name:
+                raise ValueError("'components' entries must not be empty")
+            if name in RESERVED_CONFIG_NAMES:
+                raise ValueError(
+                    f"'{name}' is a reserved configuration name and cannot "
+                    "select a component"
+                )
+            if name in seen:
+                raise ValueError(
+                    f"Component '{name}' appears more than once in 'components'"
+                )
+            seen.add(name)
+            names.append(name)
+        return names
+
     def get_component_config(self, session_index: int, key: str):
         if not self._session_configs:
             raise KeyError("Cannot use this function in the current mode!")
         session_config = self._session_configs[session_index]
-        if key not in session_config:
-            raise KeyError(key)
-        if not isinstance(session_config[key], Mapping):
-            raise ValueError("The value corresponding to the key '{}' is not a mapping".format(key))
-        return deepcopy(session_config[key])
-
+        if key in session_config and key not in RESERVED_CONFIG_NAMES:
+            if not isinstance(session_config[key], Mapping):
+                raise ValueError(
+                    f"The value corresponding to the key '{key}' is not a mapping"
+                )
+            return deepcopy(session_config[key])
+        if key in self._selected_component_names(session_config):
+            return {}
+        raise KeyError(key)
 
     def get_all_component_configs(self, session_index):
         if not self._session_configs:
             raise KeyError("Cannot use this function in the current mode!")
-        component_configs = {}
         session_config = self._session_configs[session_index]
+        component_configs = {
+            name: {}
+            for name in self._selected_component_names(session_config)
+        }
 
         for key in session_config:
-            if key in {"aliases", "base_config"}:
+            if key in RESERVED_CONFIG_NAMES:
                 continue
             component_configs[key] = self.get_component_config(session_index, key)
 
