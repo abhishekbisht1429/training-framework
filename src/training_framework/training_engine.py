@@ -8,7 +8,7 @@ import time
 from typing import Iterator
 import os
 
-from training_framework.builtin_components import Checkpointer, DDPResource
+from training_framework.builtin_components import Checkpointer
 from training_framework.configurator import Configurator
 from training_framework.training_session import TrainingSession
 from training_framework.util import context_entry, context_exit, requires_context
@@ -24,8 +24,8 @@ def load_session_for_worker(session_state, rank, session_update_params: dict | N
             session.update_max_iters(session_update_params["max_iterations"])
 
     if session.has_resource("ddp"):
-        placeholder_ddp_resource: DDPResource = session.get_resource("ddp")
-        ddp_resource = DDPResource(
+        placeholder_ddp_resource = session.get_resource("ddp")
+        ddp_resource = type(placeholder_ddp_resource)(
             config=placeholder_ddp_resource.config,
             rank=rank
         )
@@ -34,7 +34,10 @@ def load_session_for_worker(session_state, rank, session_update_params: dict | N
 
         # for processes with rank > 0, remove the non-parallel components (they should run only on rank 0)
         if rank > 0:
-            parallel_components = set(ddp_resource.parallel_components + ["ddp"])
+            parallel_components = {
+                session.resolve_component_name(name)
+                for name in ddp_resource.parallel_components + ["ddp"]
+            }
             for hook in session.get_all_hooks():
                 if hook.name not in parallel_components:
                     session.unregister_hook(hook.name)

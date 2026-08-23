@@ -63,7 +63,7 @@ class Configurator:
         session_config = self._session_configs[session_index]
 
         for key in session_config:
-            if key == "base_config":
+            if key in {"aliases", "base_config"}:
                 continue
             component_configs[key] = self.get_component_config(session_index, key)
 

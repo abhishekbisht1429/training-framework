@@ -1,5 +1,5 @@
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from training_framework.components import (
     Hook,
@@ -36,6 +36,111 @@ def make_registry(component_type):
 HOOK_REGISTRY, hook = make_registry(Hook)
 RESOURCE_REGISTRY, resource = make_registry(Resource)
 STEP_REGISTRY, step = make_registry(Step)
+
+RESERVED_CONFIG_NAMES = frozenset({"aliases", "base_config"})
+
+
+class ComponentAliases:
+    """Resolve session-scoped component roles to registered implementations."""
+
+    def __init__(self, aliases: Mapping[str, str] | None = None):
+        if aliases is None:
+            aliases = {}
+        if not isinstance(aliases, Mapping):
+            raise TypeError("'aliases' must be a mapping of strings to strings")
+
+        self._aliases = dict(aliases)
+        self._validate()
+
+    def _validate(self) -> None:
+        targets = {}
+        registries = (STEP_REGISTRY, HOOK_REGISTRY, RESOURCE_REGISTRY)
+
+        for expected_name, actual_name in self._aliases.items():
+            if not isinstance(expected_name, str) or not isinstance(actual_name, str):
+                raise TypeError("'aliases' must be a mapping of strings to strings")
+            if not expected_name or not actual_name:
+                raise ValueError("Alias names must not be empty")
+            if (
+                    expected_name in RESERVED_CONFIG_NAMES
+                    or actual_name in RESERVED_CONFIG_NAMES
+            ):
+                raise ValueError(
+                    "'aliases' and 'base_config' are reserved component names"
+                )
+            if expected_name == actual_name:
+                raise ValueError(
+                    f"Alias '{expected_name}' must refer to a different component"
+                )
+            if actual_name in self._aliases:
+                raise ValueError(
+                    f"Alias chains and cycles are not supported: "
+                    f"'{expected_name}' resolves to alias '{actual_name}'"
+                )
+            if actual_name in targets:
+                raise ValueError(
+                    f"Aliases '{targets[actual_name]}' and '{expected_name}' "
+                    f"cannot both target '{actual_name}'"
+                )
+
+            matching_registries = [
+                registry for registry in registries if actual_name in registry
+            ]
+            if not matching_registries:
+                raise ValueError(
+                    f"Alias target '{actual_name}' is not a registered component"
+                )
+            if len(matching_registries) > 1:
+                raise ValueError(
+                    f"Alias target '{actual_name}' is registered in multiple "
+                    "component categories"
+                )
+
+            actual_registry = matching_registries[0]
+            expected_registries = [
+                registry for registry in registries if expected_name in registry
+            ]
+            if expected_registries and actual_registry not in expected_registries:
+                raise ValueError(
+                    f"Alias '{expected_name}' -> '{actual_name}' changes the "
+                    "component category"
+                )
+
+            targets[actual_name] = expected_name
+
+    def validate_config(self, config: Mapping) -> None:
+        for expected_name, actual_name in self._aliases.items():
+            if expected_name not in config:
+                raise ValueError(
+                    f"Alias '{expected_name}' requires a top-level "
+                    f"'{expected_name}' component configuration"
+                )
+            if actual_name in config:
+                raise ValueError(
+                    f"Configure alias '{expected_name}', not both "
+                    f"'{expected_name}' and '{actual_name}'"
+                )
+
+    def resolve(self, name: str) -> str:
+        return self._aliases.get(name, name)
+
+    def is_alias(self, name: str) -> bool:
+        return name in self._aliases
+
+    @property
+    def bindings(self) -> dict[str, str]:
+        return dict(self._aliases)
+
+    def __bool__(self) -> bool:
+        return bool(self._aliases)
+
+
+def _alias_resolver(
+        aliases: ComponentAliases | Mapping[str, str] | None,
+) -> ComponentAliases:
+    if isinstance(aliases, ComponentAliases):
+        return aliases
+    return ComponentAliases(aliases)
 
 
 def requires_step(step_name: str):
@@ -93,7 +198,10 @@ def requires_resource(resource_name: str):
     return wrapper
 
 
-def topological_sort_of_components() -> dict[str, int]:
+def topological_sort_of_components(
+        aliases: ComponentAliases | Mapping[str, str] | None = None,
+) -> dict[str, int]:
+    alias_resolver = _alias_resolver(aliases)
     components = (
             list(STEP_REGISTRY.values())
             + list(HOOK_REGISTRY.values())
@@ -105,32 +213,39 @@ def topological_sort_of_components() -> dict[str, int]:
     }
     for component in components:
         for required_hook_name in getattr(component, "required_hooks", []):
-            if required_hook_name not in HOOK_REGISTRY:
+            resolved_name = alias_resolver.resolve(required_hook_name)
+            if resolved_name not in HOOK_REGISTRY:
                 raise RuntimeError(
-                    f"unmet prerequisite! '{required_hook_name}' not registered."
+                    f"unmet prerequisite! Hook '{required_hook_name}' resolves "
+                    f"to '{resolved_name}', which is not registered as a Hook."
                 )
             prerequisites_graph[component.id].append(
-                HOOK_REGISTRY[required_hook_name].id
+                HOOK_REGISTRY[resolved_name].id
             )
 
         for required_step_name in getattr(component, "required_steps", []):
-            if required_step_name not in STEP_REGISTRY:
+            resolved_name = alias_resolver.resolve(required_step_name)
+            if resolved_name not in STEP_REGISTRY:
                 raise RuntimeError(
-                    f"unmet prerequisite! '{required_step_name}' not registered."
+                    f"unmet prerequisite! Step '{required_step_name}' resolves "
+                    f"to '{resolved_name}', which is not registered as a Step."
                 )
             prerequisites_graph[component.id].append(
-                STEP_REGISTRY[required_step_name].id
+                STEP_REGISTRY[resolved_name].id
             )
 
         for required_resource_name in getattr(
                 component, "required_resources", []
         ):
-            if required_resource_name not in RESOURCE_REGISTRY:
+            resolved_name = alias_resolver.resolve(required_resource_name)
+            if resolved_name not in RESOURCE_REGISTRY:
                 raise RuntimeError(
-                    f"unmet prerequisite! '{required_resource_name}' not registered."
+                    f"unmet prerequisite! Resource '{required_resource_name}' "
+                    f"resolves to '{resolved_name}', which is not registered as "
+                    "a Resource."
                 )
             prerequisites_graph[component.id].append(
-                RESOURCE_REGISTRY[required_resource_name].id
+                RESOURCE_REGISTRY[resolved_name].id
             )
 
     dependents_graph: dict[str, list[str]] = {
@@ -172,9 +287,11 @@ def format_execution_graph(
         hooks: Iterable[Hook],
         steps: Iterable[Step],
         max_iterations: int,
+        aliases: ComponentAliases | Mapping[str, str] | None = None,
 ) -> str:
     """Return the session's component lifecycle as a readable execution graph."""
-    order = topological_sort_of_components()
+    alias_resolver = _alias_resolver(aliases)
+    order = topological_sort_of_components(alias_resolver)
     ordered_resources = sorted(
         resources,
         key=lambda component: order[component.id],
@@ -203,16 +320,25 @@ def format_execution_graph(
         "TRAINING SESSION EXECUTION GRAPH",
         "================================",
         f"Max iterations: {max_iterations}",
+    ]
+    if alias_resolver:
+        lines.extend(["", "ALIASES"])
+        lines.extend(
+            f"  {expected_name} -> {actual_name}"
+            for expected_name, actual_name in alias_resolver.bindings.items()
+        )
+    lines.extend([
         "",
         "START",
         "  |",
         "  +-- SETUP",
-    ]
+    ])
     _append_execution_calls(
         lines,
         "  |   ",
         [(component, "setup") for component in ordered_resources]
         + [(component, "setup") for component in session_hooks],
+        alias_resolver,
     )
 
     lines.extend([
@@ -228,6 +354,7 @@ def format_execution_graph(
             (component, "pre_iteration_callback")
             for component in iteration_hooks
         ],
+        alias_resolver,
     )
 
     lines.extend([
@@ -238,6 +365,7 @@ def format_execution_graph(
         lines,
         "  |   |   ",
         [(component, "run") for component in ordered_steps],
+        alias_resolver,
     )
 
     lines.extend([
@@ -251,6 +379,7 @@ def format_execution_graph(
             (component, "post_iteration_callback")
             for component in reversed(iteration_hooks)
         ],
+        alias_resolver,
     )
 
     lines.extend([
@@ -262,6 +391,7 @@ def format_execution_graph(
         "      ",
         [(component, "teardown") for component in reversed(session_hooks)]
         + [(component, "teardown") for component in reversed(ordered_resources)],
+        alias_resolver,
     )
     lines.extend([
         "  |",
@@ -270,14 +400,14 @@ def format_execution_graph(
     return "\n".join(lines)
 
 
-def _append_execution_calls(lines, prefix, calls) -> None:
+def _append_execution_calls(lines, prefix, calls, alias_resolver) -> None:
     if not calls:
         lines.append(f"{prefix}(none)")
         return
 
     for index, (component, method_name) in enumerate(calls, start=1):
         annotations = []
-        requirements = _component_requirements(component)
+        requirements = _component_requirements(component, alias_resolver)
         if requirements:
             annotations.append(f"requires: {', '.join(requirements)}")
         if method_name in {
@@ -294,18 +424,22 @@ def _append_execution_calls(lines, prefix, calls) -> None:
         )
 
 
-def _component_requirements(component) -> list[str]:
+def _component_requirements(
+        component,
+        aliases: ComponentAliases | Mapping[str, str] | None = None,
+) -> list[str]:
+    alias_resolver = _alias_resolver(aliases)
     return (
         [
-            f"Resource.{name}"
+            f"Resource.{alias_resolver.resolve(name)}"
             for name in getattr(component, "required_resources", ())
         ]
         + [
-            f"Hook.{name}"
+            f"Hook.{alias_resolver.resolve(name)}"
             for name in getattr(component, "required_hooks", ())
         ]
         + [
-            f"Step.{name}"
+            f"Step.{alias_resolver.resolve(name)}"
             for name in getattr(component, "required_steps", ())
         ]
     )

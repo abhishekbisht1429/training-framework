@@ -103,8 +103,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             max_iterations=self._base_config['max_iterations'],
         )
 
-        self._set_component_collections()
-
         # session essentials
         self._iteration = 0
 
@@ -117,6 +115,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._session_context: dict[str, Any] = {}
 
         self._init_transient_infra()
+        self._set_component_collections()
 
         self._phase = SessionPhase.NEW
 
@@ -129,11 +128,15 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             resources: dict[str, Resource] | None = None,
             steps: dict[str, Step] | None = None,
             hooks: dict[str, Hook] | None = None,
+            aliases: dict[str, str] | None = None,
     ) -> None:
+        if aliases is None:
+            aliases = self._config.get("aliases", {})
         self._components = SessionComponents(
             resources=resources,
             steps=steps,
             hooks=hooks,
+            aliases=aliases,
         )
         self._resources = self._components.resources
         self._steps = self._components.steps
@@ -141,18 +144,20 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def _register_default_components(self) -> None:
         # Register logger
-        self.register_hook(
-            Logger({
-                'log_every': 10
-            })
-        )
+        if self.resolve_component_name("logger") == "logger":
+            self.register_hook(
+                Logger({
+                    'log_every': 10
+                })
+            )
 
         # Register Checkpointer
-        self.register_hook(
-            Checkpointer({
-                'checkpoint_every': 100,
-            })
-        )
+        if self.resolve_component_name("checkpointer") == "checkpointer":
+            self.register_hook(
+                Checkpointer({
+                    'checkpoint_every': 100,
+                })
+            )
 
     def _register_components(self) -> None:
         self._components.register_from_config(self._config)
@@ -217,6 +222,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         ) = self._configuration_from_state(state)
         self._iteration = state["iteration"]
 
+        self._init_transient_infra()
         self._set_component_collections(
             resources=restore_component_collection(
                 state["resources_state"],
@@ -233,7 +239,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         )
 
         self._session_context = state["session_context"]
-        self._init_transient_infra()
         restore_rng_state(state)
 
     def _prepare_for_state_restore(self, state) -> None:
@@ -322,7 +327,14 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         return self._components.get_resource(key)
 
     def has_resource(self, resource_name):
-        return resource_name in self._resources
+        return self._components.has_resource(resource_name)
+
+    @property
+    def component_aliases(self) -> dict[str, str]:
+        return self._components.alias_bindings
+
+    def resolve_component_name(self, name: str) -> str:
+        return self._components.resolve_name(name)
 
     def get_all_hooks(self):
         return list(self._hooks.values())
@@ -339,6 +351,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             hooks=self.get_all_hooks(),
             steps=self.get_all_steps(),
             max_iterations=self.session_config.max_iterations,
+            aliases=self._components.aliases,
         )
 
     def print_execution_graph(self, *, file=None) -> None:
@@ -478,7 +491,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
         if self._base_config.get("show-execution-graph", True):
             # print only for rank zero
-            if ddp_resource is None or ddp_resource.rank == 0:
+            if ddp_resource is None or cast(Any, ddp_resource).rank == 0:
                 self.print_execution_graph()
         self._successfully_setup_resource_names.clear()
         self._successfully_setup_hook_names.clear()
