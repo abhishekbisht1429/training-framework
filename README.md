@@ -404,6 +404,33 @@ For reliable spawn and checkpoint behavior:
 - make the component package importable from a fresh Python interpreter; and
 - keep component names stable across checkpoint save and restore.
 
+### Component aliases
+
+Use the session-level `aliases` mapping to substitute a registered implementation
+for the component name expected by configuration and dependency decorators:
+
+```yaml
+aliases:
+  optimizer: my_custom_optimizer
+
+optimizer:
+  learning_rate: 0.001
+```
+
+The mapping direction is `expected_name: registered_name`. In this example,
+`my_custom_optimizer` must be registered, while `optimizer` may be either a
+registered name or a virtual role. Configuration remains under `optimizer`, and
+dependencies such as `@requires_step("optimizer")` resolve to
+`my_custom_optimizer`. The actual registered name is used in component state and
+shown in the execution graph, which also includes an `ALIASES` section.
+
+Aliases are session-scoped and one-to-one. Alias chains, cycles, unknown or
+ambiguous targets, category changes, and configuring both names are rejected.
+Built-in defaults such as `logger` and `checkpointer` can be replaced through the
+same mechanism. `ddp.parallel_components` may contain either expected or actual
+names; an aliased DDP resource must support the same `config` and `rank`
+construction interface as the built-in resource.
+
 ## Component dependencies
 
 Dependencies are declared using registry names:
@@ -942,7 +969,7 @@ Direct execution bypasses spawned-worker supervision, error pipes, heartbeat mon
 | `heartbeat_timeout` | Worker heartbeat deadline |
 | `process_timeout_on_join` | Graceful process-join timeout |
 | `get_component_config(session_index, key)` | Return a deep copy of one component mapping |
-| `get_all_component_configs(session_index)` | Return all non-`base_config` component mappings |
+| `get_all_component_configs(session_index)` | Return all component mappings, excluding `base_config` and `aliases` |
 
 ### `TrainingEngine`
 
@@ -973,6 +1000,8 @@ The engine monitors workers while leaving the context.
 | `device` | Active `torch.device` |
 | `session_context` | Session-lifetime shared dictionary |
 | `iteration_context` | Current-iteration shared dictionary; context-only |
+| `component_aliases` | Copy of the session's expected-to-actual alias bindings |
+| `resolve_component_name(name)` | Resolve an expected or actual component name to its registered name |
 | `get_resource(name)` | Retrieve a configured resource |
 | `has_resource(name)` | Test whether a resource is present |
 | `get_all_resources()` | Return configured resources |

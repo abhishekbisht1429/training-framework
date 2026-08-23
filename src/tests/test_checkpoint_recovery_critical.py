@@ -116,7 +116,10 @@ def test_pickle_resume_matches_uninterrupted_run_and_preserves_rng_streams(tmp_p
     assert restored._phase is SessionPhase.NEW
     assert restored.iteration == 3
     assert restored_step.samples == expected_samples[:3]
-    with pytest.raises(RuntimeError, match="Use within"):
+    with pytest.raises(
+            RuntimeError,
+            match="This instance of TrainingSession is not initialized yet!",
+    ):
         _ = restored.iteration_context
 
     assert run_to_completion(restored) == [4, 5, 6]

@@ -1,0 +1,307 @@
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+import training_framework.builtin_components as builtin_components
+from training_framework.training_session import (
+    Resource,
+    StatefulResource,
+    Step,
+    TrainingSession,
+    requires_resource,
+    resource,
+    step,
+)
+
+
+class FakeDistributedDataParallel(nn.Module):
+    def __init__(self, module, device_ids):
+        super().__init__()
+        self.module = module
+        self.device_ids = device_ids
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+
+def _base_config(tmp_path, *, max_iterations=3):
+    return {
+        "rng_seed": 41,
+        "sessions_dir": str(tmp_path),
+        "max_iterations": max_iterations,
+        "device": "cpu",
+        "components_package": "training_framework.builtin_components",
+        "show-execution-graph": False,
+    }
+
+
+def _register_training_components():
+    @resource("public_test_model")
+    class PublicTestModel(nn.Module, StatefulResource):
+        def __init__(self, config):
+            nn.Module.__init__(self)
+            self.weight = nn.Parameter(
+                torch.tensor(float(config["initial_weight"]))
+            )
+
+        def forward(self, value):
+            return self.weight * value
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+        def get_state(self):
+            return {"weight": self.weight.detach().clone()}
+
+        def set_state(self, state):
+            with torch.no_grad():
+                self.weight.copy_(state["weight"])
+
+    @step("public_test_loss")
+    @requires_resource("ddp")
+    class PublicTestLoss(Step):
+        def __init__(self, config):
+            self.target = float(config["target"])
+
+        def run(self, session):
+            wrapped_model = session.get_resource("ddp").wrapped_model
+            prediction = wrapped_model(torch.tensor(1.0))
+            session.iteration_context["loss"] = (
+                prediction - self.target
+            ).square()
+
+
+def _training_config(tmp_path, *, max_iterations=3):
+    return {
+        "base_config": _base_config(
+            tmp_path,
+            max_iterations=max_iterations,
+        ),
+        "aliases": {
+            "model": "public_test_model",
+        },
+        "model": {"initial_weight": 1.0},
+        "ddp": {
+            "world_size": 1,
+            "backend": "gloo",
+            "parallel_components": [],
+            "master_addr": "localhost",
+            "master_port": "12355",
+        },
+        "optimizer": {
+            "learning_rate": 0.1,
+            "weight_decay": 0.0,
+            "warmup_iters": 1,
+        },
+        "public_test_loss": {"target": 0.0},
+    }
+
+
+def _patch_distributed_boundaries(monkeypatch):
+    calls = {
+        "initializations": [],
+        "destroy_count": 0,
+    }
+
+    def init_process_group(**kwargs):
+        calls["initializations"].append(kwargs)
+
+    def destroy_process_group():
+        calls["destroy_count"] += 1
+
+    monkeypatch.setattr(
+        builtin_components,
+        "DDP",
+        FakeDistributedDataParallel,
+    )
+    monkeypatch.setattr(
+        torch.distributed,
+        "init_process_group",
+        init_process_group,
+    )
+    monkeypatch.setattr(
+        torch.distributed,
+        "destroy_process_group",
+        destroy_process_group,
+    )
+    return calls
+
+
+def _remove_default_hooks(session):
+    session.unregister_hook("logger")
+    session.unregister_hook("checkpointer")
+
+
+def _optimizer_hook(session):
+    return next(
+        hook
+        for hook in session.get_all_hooks()
+        if hook.name == "optimizer"
+    )
+
+
+def test_optional_builtins_do_not_break_unrelated_sessions(tmp_path):
+    session = TrainingSession({
+        "base_config": _base_config(tmp_path, max_iterations=1),
+    })
+    _remove_default_hooks(session)
+
+    assert "TRAINING SESSION EXECUTION GRAPH" in session.execution_graph()
+    with session:
+        assert list(session) == [1]
+
+
+def test_ddp_resource_reports_an_active_missing_dependency(tmp_path):
+    @resource("model")
+    class UnconfiguredModel(Resource):
+        def __init__(self, config):
+            pass
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    session = TrainingSession({
+        "base_config": _base_config(tmp_path),
+        "ddp": {
+            "world_size": 1,
+            "backend": "gloo",
+            "parallel_components": [],
+            "master_addr": "localhost",
+            "master_port": "12355",
+        },
+    })
+
+    with pytest.raises(
+            RuntimeError,
+            match="Resource 'model'.*not configured in this session",
+    ):
+        session.execution_graph()
+
+
+def test_ddp_resource_and_optimizer_run_through_public_session_api(
+        tmp_path,
+        monkeypatch,
+):
+    _register_training_components()
+    distributed_calls = _patch_distributed_boundaries(monkeypatch)
+    session = TrainingSession(_training_config(tmp_path))
+    _remove_default_hooks(session)
+
+    ddp = session.get_resource("ddp")
+    model = session.get_resource("model")
+    optimizer = _optimizer_hook(session)
+    graph = session.execution_graph()
+
+    ddp_setup = graph.index("Resource.ddp.setup()")
+    assert graph.index("Resource.public_test_model.setup()") < ddp_setup
+    assert ddp_setup < graph.index("Hook.optimizer.setup()")
+    assert "requires: Resource.public_test_model" in graph
+    assert "requires: Resource.ddp" in graph
+
+    initial_weight = model.weight.detach().clone()
+    with session:
+        assert isinstance(
+            ddp.wrapped_model,
+            FakeDistributedDataParallel,
+        )
+        assert ddp.wrapped_model.module is model
+        assert ddp.wrapped_model.device_ids == [-1]
+        assert distributed_calls["initializations"] == [{
+            "backend": "gloo",
+            "rank": -1,
+            "world_size": 1,
+        }]
+        assert next(session) == 1
+
+        optimizer_state = optimizer.get_state()
+        assert optimizer_state["optimizer_state"]["state"]
+        assert optimizer_state["lr_scheduler_state"]["last_epoch"] == 1
+
+    assert not torch.equal(model.weight.detach(), initial_weight)
+    with pytest.raises(
+            RuntimeError,
+            match="This instance of DDPResource is not initialized yet!",
+    ):
+        _ = ddp.wrapped_model
+    assert distributed_calls["destroy_count"] == 1
+    assert optimizer.get_state()["optimizer_state"]["state"]
+
+
+def test_ddp_resource_cleans_up_when_model_wrapping_fails(
+        tmp_path,
+        monkeypatch,
+):
+    _register_training_components()
+    distributed_calls = _patch_distributed_boundaries(monkeypatch)
+
+    class FailingDistributedDataParallel:
+        def __init__(self, module, device_ids):
+            raise RuntimeError("could not wrap model")
+
+    monkeypatch.setattr(
+        builtin_components,
+        "DDP",
+        FailingDistributedDataParallel,
+    )
+    config = _training_config(tmp_path)
+    del config["optimizer"]
+    del config["public_test_loss"]
+    session = TrainingSession(config)
+    _remove_default_hooks(session)
+    ddp = session.get_resource("ddp")
+
+    with pytest.raises(RuntimeError, match="could not wrap model"):
+        with session:
+            pass
+
+    assert distributed_calls["destroy_count"] == 1
+    with pytest.raises(
+            RuntimeError,
+            match="This instance of DDPResource is not initialized yet!",
+    ):
+        _ = ddp.wrapped_model
+
+
+def test_optimizer_state_round_trip_matches_uninterrupted_training(
+        tmp_path,
+        monkeypatch,
+):
+    _register_training_components()
+    _patch_distributed_boundaries(monkeypatch)
+    config = _training_config(tmp_path, max_iterations=3)
+
+    uninterrupted = TrainingSession(config)
+    _remove_default_hooks(uninterrupted)
+    with uninterrupted:
+        assert list(uninterrupted) == [1, 2, 3]
+
+    paused = TrainingSession(config)
+    _remove_default_hooks(paused)
+    with paused:
+        assert next(paused) == 1
+
+    restored = TrainingSession.from_state(paused.get_state())
+    with restored:
+        assert list(restored) == [2, 3]
+
+    torch.testing.assert_close(
+        restored.get_resource("model").weight,
+        uninterrupted.get_resource("model").weight,
+    )
+    assert (
+        _optimizer_hook(restored).get_state()["lr_scheduler_state"][
+            "last_epoch"
+        ]
+        == _optimizer_hook(uninterrupted).get_state()[
+            "lr_scheduler_state"
+        ]["last_epoch"]
+        == 3
+    )
