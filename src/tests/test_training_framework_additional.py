@@ -20,9 +20,6 @@ from training_framework.configurator import Configurator
 from training_framework.dataloader import InfiniteSampler
 from training_framework.training_engine import TrainingEngine
 from training_framework.training_session import (
-    HOOK_REGISTRY,
-    RESOURCE_REGISTRY,
-    STEP_REGISTRY,
     TrainingSession,
     hook,
     resource,
@@ -190,9 +187,9 @@ def test_registry_decorators_register_classes_and_reject_duplicates():
     class AdditionalHook(AdditionalHookBase):
         pass
 
-    assert STEP_REGISTRY["test_additional_step"] is AdditionalStep
-    assert RESOURCE_REGISTRY["test_additional_resource"] is AdditionalResource
-    assert HOOK_REGISTRY["test_additional_hook"] is AdditionalHook
+    assert AdditionalStep.id == "Step.test_additional_step"
+    assert AdditionalResource.id == "Resource.test_additional_resource"
+    assert AdditionalHook.id == "Hook.test_additional_hook"
 
     with pytest.raises(ValueError):
         @step("test_additional_step")
@@ -313,13 +310,13 @@ def test_registration_validation_and_lookup(minimal_session_config_2):
         def set_state(self, state):
             pass
 
-    with pytest.raises(ValueError, match="STEP_REGISTRY"):
+    with pytest.raises(ValueError, match="not registered as a component"):
         session.add_step(UnregisteredStep())
 
-    with pytest.raises(ValueError, match="HOOK_REGISTRY"):
+    with pytest.raises(ValueError, match="not registered as a component"):
         session.register_hook(UnregisteredHook())
 
-    with pytest.raises(ValueError, match="RESOURCE_REGISTRY"):
+    with pytest.raises(ValueError, match="not registered as a component"):
         session.register_resource(UnregisteredResource())
 
     step_obj = AdditionalStep()

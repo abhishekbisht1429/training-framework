@@ -379,22 +379,18 @@ class OptimizerStep(Step):
     ...
 ```
 
-Registries are global within each Python interpreter:
-
-```python
-RESOURCE_REGISTRY
-HOOK_REGISTRY
-STEP_REGISTRY
-```
-
-A duplicate name in the same registry raises `ValueError`.
+Registration is global within each Python interpreter. Component names share
+one namespace across resources, hooks, and steps, so registering any duplicate
+name raises `ValueError`. The registry itself is private; application code
+should register components with the decorators above and interact with active
+instances through `TrainingSession`.
 
 `base_config.components_package` identifies the package that contains application components. During session initialization, the framework:
 
 1. imports that package;
 2. recursively discovers its submodules with `pkgutil.walk_packages()`;
 3. imports every discovered module; and
-4. relies on module-level decorators to populate the registries.
+4. relies on module-level decorators to populate the component registry.
 
 For reliable spawn and checkpoint behavior:
 
@@ -1068,7 +1064,7 @@ The current tests cover areas including:
 
 4. **Secondary-rank components are opt-in.** Ranks greater than zero retain only names in `ddp.parallel_components`, plus the DDP resource. Include every transitive runtime dependency required by those components.
 
-5. **Registries are global per interpreter.** Duplicate decorator names in one registry fail. Test suites that clear registries must account for Python's module import cache before expecting decorators to run again.
+5. **Component registration is global per interpreter.** Resource, hook, and step names share one namespace, so any duplicate decorator name fails. Test suites that reset registration must account for Python's module import cache before expecting decorators to run again.
 
 6. **Spawn requires importable and serializable definitions.** Define worker targets and component classes at module scope. Constructor arguments, state returned by `get_state()`, and checkpointed session-context values must be serializable.
 

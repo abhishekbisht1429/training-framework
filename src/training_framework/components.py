@@ -7,6 +7,19 @@ if TYPE_CHECKING:
     from training_framework.training_session import TrainingSession
 
 
+class Component(ABC, metaclass=CaptureInitMeta):
+    """Common base for every executable training-framework component."""
+
+    name: str
+    id: str
+
+    @classmethod
+    @abstractmethod
+    def _component_category_name(cls) -> str:
+        """Return the top-level lifecycle category implemented by the class."""
+        raise NotImplementedError
+
+
 class Stateful(ABC):
     @abstractmethod
     def get_state(self) -> Any:
@@ -23,9 +36,12 @@ class Stateful(ABC):
         self.set_state(state)
 
 
-class Hook(ABC, metaclass=CaptureInitMeta):
-    name: str
-    id: str
+class Hook(Component, ABC):
+    """Base category for session and iteration hooks."""
+
+    @classmethod
+    def _component_category_name(cls) -> str:
+        return "Hook"
 
 
 class SessionHook(Hook, ABC):
@@ -54,9 +70,11 @@ class LifecycleHook(SessionHook, IterationHook, ABC):
     """Wrap callbacks around a training iteration."""
 
 
-class Resource(ABC, metaclass=CaptureInitMeta):
-    name: str
-    id: str
+class Resource(Component, ABC):
+
+    @classmethod
+    def _component_category_name(cls) -> str:
+        return "Resource"
 
     @abstractmethod
     def setup(self, session: "TrainingSession") -> None:
@@ -67,9 +85,11 @@ class Resource(ABC, metaclass=CaptureInitMeta):
         pass
 
 
-class Step(ABC, metaclass=CaptureInitMeta):
-    name: str
-    id: str
+class Step(Component, ABC):
+
+    @classmethod
+    def _component_category_name(cls) -> str:
+        return "Step"
 
     @abstractmethod
     def run(self, session: "TrainingSession") -> None:

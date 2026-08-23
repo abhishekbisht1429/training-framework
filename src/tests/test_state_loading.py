@@ -2,6 +2,7 @@ import pickle
 import random
 
 import numpy as np
+import pytest
 import torch
 
 from tests.test_utils import make_config
@@ -34,6 +35,92 @@ class BaseInheritedResource(StatefulResource):
     def set_state(self, state):
         self.setup_calls = state["setup_calls"]
         self.teardown_calls = state["teardown_calls"]
+
+
+def test_checkpoint_uses_generic_component_state_schema(tmp_path):
+    session = TrainingSession(make_config(tmp_path / "generic-schema"))
+    state = session.get_state()
+
+    assert "components_state" in state
+    assert "resources_state" not in state
+    assert "hooks_state" not in state
+    assert "steps_state" not in state
+    assert state["components_state"]["logger"]["component_type"] == "Hook"
+
+
+def test_checkpoint_rejects_legacy_component_state_schema(tmp_path):
+    session = TrainingSession(make_config(tmp_path / "legacy-schema"))
+    state = session.get_state()
+    del state["components_state"]
+    state["resources_state"] = {}
+    state["hooks_state"] = {}
+    state["steps_state"] = {}
+
+    with pytest.raises(
+            ValueError,
+            match="unsupported component state schema.*components_state",
+    ):
+        TrainingSession.from_state(state)
+
+
+def test_checkpoint_rejects_component_category_changes(tmp_path):
+    session = TrainingSession(make_config(tmp_path / "category-change"))
+    state = session.get_state()
+    state["components_state"]["logger"]["component_type"] = "Step"
+
+    with pytest.raises(
+            ValueError,
+            match="logger.*stored as a Step.*registered as a Hook",
+    ):
+        TrainingSession.from_state(state)
+
+
+def test_checkpoint_rejects_unregistered_components(tmp_path):
+    session = TrainingSession(make_config(tmp_path / "missing-component"))
+    state = session.get_state()
+    state["components_state"]["missing_component"] = (
+        state["components_state"].pop("logger")
+    )
+
+    with pytest.raises(
+            ValueError,
+            match="missing_component.*not registered",
+    ):
+        TrainingSession.from_state(state)
+
+
+def test_failed_checkpoint_restore_preserves_existing_components(tmp_path):
+    session = TrainingSession(make_config(tmp_path / "atomic-restore"))
+    existing_components = {
+        component.name: component
+        for component in (
+            session.get_all_resources()
+            + session.get_all_hooks()
+            + session.get_all_steps()
+        )
+    }
+    state = session.get_state()
+    state["components_state"]["logger"]["component_type"] = "Step"
+
+    with pytest.raises(
+            ValueError,
+            match="logger.*stored as a Step.*registered as a Hook",
+    ):
+        session.set_state(state)
+
+    restored_components = {
+        component.name: component
+        for component in (
+            session.get_all_resources()
+            + session.get_all_hooks()
+            + session.get_all_steps()
+        )
+    }
+    assert restored_components == existing_components
+    assert all(
+        restored_components[name] is component
+        for name, component in existing_components.items()
+    )
 
 
 def test_checkpoint_pickle_round_trip_restores_resources_hooks_and_state(tmp_path):
