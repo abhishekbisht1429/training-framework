@@ -433,10 +433,14 @@ Dependencies are declared using registry names:
 
 ```python
 from training_framework.training_session import (
+    LifecycleHook,
+    Step,
+    hook,
     requires_hook,
     requires_resource,
     requires_step,
     step,
+    wraps,
 )
 
 
@@ -453,17 +457,34 @@ Supported dependency directions are:
 | Consumer | May require a resource | May require a hook | May require a step |
 |---|:---:|:---:|:---:|
 | Resource | Yes | No | No |
-| Hook | Yes | Yes | No |
+| Hook | Yes | No | No |
 | Step | Yes | Yes | Yes |
 
-The framework builds a registry-wide prerequisite graph and performs a topological sort. It raises an error when:
+A Hook declares nesting separately:
 
-- a named prerequisite has not been registered in the expected registry; or
-- the component graph contains a cycle.
+```python
+@hook("outer")
+@wraps("inner")
+class OuterHook(LifecycleHook):
+    ...
+```
 
-The resulting order controls resource setup, hook callbacks, and step execution. Teardown and post-iteration hook callbacks use reverse order.
+If `outer` wraps `inner`, setup and pre-iteration callbacks run outer
+then inner, while post-iteration callbacks and teardown run inner then outer.
+Wrapping names support session aliases. Hooks must share a lifecycle phase, and
+two iteration-capable hooks must have matching `call_every` values.
 
-A dependency name being registered does not automatically add that component to a session. Include all required runtime components in the session YAML. For DDP, include all dependencies needed on secondary ranks in `ddp.parallel_components` as well.
+The framework builds a registry-wide ordering graph and performs a topological
+sort. It rejects missing, incorrectly typed, or unconfigured targets; wrapping
+relationships without a shared lifecycle phase; cadence mismatches; and cycles.
+
+The resulting order controls resource setup, hook callbacks, and step execution.
+Teardown and post-iteration hook callbacks use reverse order.
+
+A dependency or wrapping target being registered does not automatically add that
+component to a session. Include all required runtime components in the session
+YAML. For DDP, include them on secondary ranks in `ddp.parallel_components` as
+well.
 
 ## Session lifecycle
 
@@ -1022,8 +1043,9 @@ The engine monitors workers while leaving the context.
 | `@hook(name)` | Register a `Hook` subclass |
 | `@step(name)` | Register a `Step` subclass |
 | `@requires_resource(name)` | Declare a resource prerequisite |
-| `@requires_hook(name)` | Declare a hook prerequisite |
-| `@requires_step(name)` | Declare a step prerequisite |
+| `@requires_hook(name)` | Declare a Hook prerequisite for a Step |
+| `@requires_step(name)` | Declare a Step prerequisite for a Step |
+| `@wraps(name)` | Declare that a Hook wraps another Hook |
 | `topological_sort_of_components()` | Validate and order the global component graph |
 
 ## Testing
