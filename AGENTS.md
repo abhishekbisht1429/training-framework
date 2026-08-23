@@ -1,5 +1,14 @@
 # Codex project instructions
 
+## Hand-off files
+- Hand off files are at `.codex/handoff`
+- Check the files here to get context.
+- When writing new handoff file always include a time stamp in it.
+
+## Intermediate results instructions
+- These instructions apply even for subagents or any other parallel agents.
+- If the detailed output log of any command is not required then always suppress it.
+
 ## Parallel test guardian
 
 - After every completed major change, the primary agent must spawn the project-scoped
