@@ -213,7 +213,7 @@ def test_ddp_resource_and_optimizer_run_through_public_session_api(
             FakeDistributedDataParallel,
         )
         assert ddp.wrapped_model.module is model
-        assert ddp.wrapped_model.device_ids == [-1]
+        assert ddp.wrapped_model.device_ids is None
         assert distributed_calls["initializations"] == [{
             "backend": "gloo",
             "rank": -1,
@@ -233,6 +233,66 @@ def test_ddp_resource_and_optimizer_run_through_public_session_api(
         _ = ddp.wrapped_model
     assert distributed_calls["destroy_count"] == 1
     assert optimizer.get_state()["optimizer_state"]["state"]
+
+
+
+def test_ddp_resource_moves_model_to_rank_local_cuda_before_wrapping(
+        tmp_path,
+        monkeypatch,
+):
+    _register_training_components()
+    _patch_distributed_boundaries(monkeypatch)
+    config = _training_config(tmp_path)
+    config["ddp"]["backend"] = "nccl"
+    config["ddp"]["world_size"] = 2
+    del config["optimizer"]
+    del config["public_test_loss"]
+
+    session = TrainingSession(config)
+    _remove_default_hooks(session)
+    model = session.get_resource("model")
+    placeholder_ddp = session.get_resource("ddp")
+    ranked_ddp = type(placeholder_ddp)(
+        config=placeholder_ddp.config,
+        rank=1,
+    )
+    session.unregister_resource("ddp")
+    session.register_resource(ranked_ddp)
+
+    events = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_device",
+        lambda rank: events.append(("set_device", rank)),
+    )
+
+    def move_model(model_instance, device):
+        events.append(("model_to", device))
+        return model_instance
+
+    monkeypatch.setattr(nn.Module, "to", move_model)
+
+    class RecordingDistributedDataParallel(FakeDistributedDataParallel):
+        def __init__(self, module, device_ids):
+            events.append(("ddp", list(device_ids)))
+            super().__init__(module, device_ids)
+
+    monkeypatch.setattr(
+        builtin_components,
+        "DDP",
+        RecordingDistributedDataParallel,
+    )
+
+    with session:
+        assert session.device == torch.device("cuda", 1)
+        assert ranked_ddp.wrapped_model.device_ids == [1]
+
+    assert events == [
+        ("set_device", 1),
+        ("model_to", torch.device("cuda", 1)),
+        ("ddp", [1]),
+    ]
 
 
 def test_ddp_resource_cleans_up_when_model_wrapping_fails(
