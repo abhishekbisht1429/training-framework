@@ -52,15 +52,21 @@ def test_full_spawned_ddp_training_flow(tmp_path, monkeypatch):
         },
         "aliases": {
             "model": "integration_ddp_model",
+            "dataset": "integration_dataset",
         },
         "model": {
             "initial_weight": 0.0,
+        },
+        "dataset": {
+            "dataset_size": 4,
         },
         "ddp": {
             "world_size": 2,
             "backend": "gloo",
             "parallel_components": [
                 "model",
+                "dataset",
+                "data_manager",
                 "integration_data",
                 "integration_train",
                 "integration_loss",
@@ -70,9 +76,12 @@ def test_full_spawned_ddp_training_flow(tmp_path, monkeypatch):
             "master_addr": "127.0.0.1",
             "master_port": str(_available_local_port()),
         },
-        "integration_data": {
-            "dataset_size": 4,
+        "data_manager": {
+            "batch_size": 2,
+            "num_workers": 0,
+            "pin_memory": False,
         },
+        "integration_data": {},
         "integration_train": {},
         "integration_loss": {},
         "optimizer": {
@@ -126,12 +135,22 @@ def test_full_spawned_ddp_training_flow(tmp_path, monkeypatch):
     assert [
         observation["iteration"] for observation in rank_one_observations
     ] == [1, 2, 3]
-    assert [
+    rank_zero_indices = [
         observation["sample_index"] for observation in rank_zero_observations
-    ] == [0, 2, 0]
-    assert [
+    ]
+    rank_one_indices = [
         observation["sample_index"] for observation in rank_one_observations
-    ] == [1, 3, 1]
+    ]
+    assert set(rank_zero_indices[:2]).isdisjoint(rank_one_indices[:2])
+    assert set(rank_zero_indices[:2] + rank_one_indices[:2]) == {0, 1, 2, 3}
+    assert all(
+        rank_zero_index != rank_one_index
+        for rank_zero_index, rank_one_index in zip(
+            rank_zero_indices,
+            rank_one_indices,
+            strict=True,
+        )
+    )
 
     for rank_observations in (
         rank_zero_observations,
