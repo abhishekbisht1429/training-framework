@@ -67,7 +67,7 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
             pass
 
     @step("consumer")
-    @requires_step("optimizer")
+    @requires_step("optimizer_step")
     class Consumer(Step):
         def __init__(self, config):
             pass
@@ -80,11 +80,11 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
         "aliases": {
             "model": "custom_model",
             "metrics": "custom_metrics",
-            "optimizer": "custom_optimizer",
+            "optimizer_step": "custom_optimizer",
         },
         "model": {"label": "primary"},
         "metrics": {"prefix": "train"},
-        "optimizer": {"learning_rate": 0.001},
+        "optimizer_step": {"learning_rate": 0.001},
         "consumer": {},
     }
 
@@ -97,18 +97,18 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
     assert session.has_resource("model")
     assert session.has_resource("custom_model")
     assert session.component_aliases == config["aliases"]
-    assert session.resolve_component_name("optimizer") == "custom_optimizer"
+    assert session.resolve_component_name("optimizer_step") == "custom_optimizer"
 
     hook_names = {component.name for component in session.get_all_hooks()}
     step_names = {component.name for component in session.get_all_steps()}
     assert "custom_metrics" in hook_names
     assert "metrics" not in hook_names
     assert {"custom_optimizer", "consumer"} <= step_names
-    assert "optimizer" not in step_names
+    assert "optimizer_step" not in step_names
 
     graph = session.execution_graph()
     assert "ALIASES" in graph
-    assert "optimizer -> custom_optimizer" in graph
+    assert "optimizer_step -> custom_optimizer" in graph
     assert "requires: Resource.custom_model" in graph
     assert "requires: Hook.custom_metrics" in graph
     assert "requires: Step.custom_optimizer" in graph
@@ -119,7 +119,7 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
         "Step.consumer.run()"
     )
 
-    session.remove_step("optimizer")
+    session.remove_step("optimizer_step")
     session.unregister_hook("metrics")
     session.unregister_resource("model")
     assert "custom_optimizer" not in {

@@ -165,14 +165,24 @@ class SessionComponents:
     def alias_bindings(self) -> dict[str, str]:
         return self.aliases.bindings
 
+    def _component_order(self) -> dict[str, int]:
+        return topological_sort_of_components(
+            self.aliases,
+            components=(
+                list(self.resources.values())
+                + list(self.hooks.values())
+                + list(self.steps.values())
+            ),
+        )
+
     @property
     def ordered_hooks(self) -> list[Hook]:
-        order = topological_sort_of_components(self.aliases)
+        order = self._component_order()
         return sorted(self.hooks.values(), key=lambda component: order[component.id])
 
     @property
     def ordered_resources(self) -> list[Resource]:
-        order = topological_sort_of_components(self.aliases)
+        order = self._component_order()
         return sorted(
             self.resources.values(),
             key=lambda component: order[component.id],
@@ -180,7 +190,7 @@ class SessionComponents:
 
     @property
     def ordered_steps(self) -> list[Step]:
-        order = topological_sort_of_components(self.aliases)
+        order = self._component_order()
         return sorted(self.steps.values(), key=lambda component: order[component.id])
 
     @property

@@ -26,8 +26,8 @@ def timestamp_str():
 
 def context_entry(func):
     @functools.wraps(func)
-    def wrapper(self):
-        res = func(self)
+    def wrapper(self, *args, **kwargs):
+        res = func(self, *args, **kwargs)
         self._active = True
         return res
     return wrapper
@@ -35,15 +35,17 @@ def context_entry(func):
 def context_exit(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
-        self._active = False
-        return func(self, *args, **kwargs)
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            self._active = False
     return wrapper
 
 def requires_context(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
         if not hasattr(self, "_active") or not self._active:
-            raise RuntimeError("Use within 'with'!")
+            raise RuntimeError(f"This instance of {self.__class__.__name__} is not initialized yet!")
         return func(self, *args, **kwargs)
     return wrapper
 

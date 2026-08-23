@@ -200,13 +200,19 @@ def requires_resource(resource_name: str):
 
 def topological_sort_of_components(
         aliases: ComponentAliases | Mapping[str, str] | None = None,
+        *,
+        components: Iterable | None = None,
 ) -> dict[str, int]:
     alias_resolver = _alias_resolver(aliases)
-    components = (
-            list(STEP_REGISTRY.values())
-            + list(HOOK_REGISTRY.values())
-            + list(RESOURCE_REGISTRY.values())
-    )
+    session_scoped = components is not None
+    if components is None:
+        components = (
+                list(STEP_REGISTRY.values())
+                + list(HOOK_REGISTRY.values())
+                + list(RESOURCE_REGISTRY.values())
+        )
+    else:
+        components = list(components)
 
     prerequisites_graph: dict[str, list[str]] = {
         component.id: [] for component in components
@@ -222,6 +228,16 @@ def topological_sort_of_components(
             prerequisites_graph[component.id].append(
                 HOOK_REGISTRY[resolved_name].id
             )
+            if (
+                    session_scoped
+                    and HOOK_REGISTRY[resolved_name].id
+                    not in prerequisites_graph
+            ):
+                raise RuntimeError(
+                    f"unmet prerequisite! Hook '{required_hook_name}' resolves "
+                    f"to '{resolved_name}', which is not configured in this "
+                    "session."
+                )
 
         for required_step_name in getattr(component, "required_steps", []):
             resolved_name = alias_resolver.resolve(required_step_name)
@@ -233,6 +249,16 @@ def topological_sort_of_components(
             prerequisites_graph[component.id].append(
                 STEP_REGISTRY[resolved_name].id
             )
+            if (
+                    session_scoped
+                    and STEP_REGISTRY[resolved_name].id
+                    not in prerequisites_graph
+            ):
+                raise RuntimeError(
+                    f"unmet prerequisite! Step '{required_step_name}' resolves "
+                    f"to '{resolved_name}', which is not configured in this "
+                    "session."
+                )
 
         for required_resource_name in getattr(
                 component, "required_resources", []
@@ -247,6 +273,16 @@ def topological_sort_of_components(
             prerequisites_graph[component.id].append(
                 RESOURCE_REGISTRY[resolved_name].id
             )
+            if (
+                    session_scoped
+                    and RESOURCE_REGISTRY[resolved_name].id
+                    not in prerequisites_graph
+            ):
+                raise RuntimeError(
+                    f"unmet prerequisite! Resource '{required_resource_name}' "
+                    f"resolves to '{resolved_name}', which is not configured in "
+                    "this session."
+                )
 
     dependents_graph: dict[str, list[str]] = {
         component_id: [] for component_id in prerequisites_graph
@@ -291,7 +327,13 @@ def format_execution_graph(
 ) -> str:
     """Return the session's component lifecycle as a readable execution graph."""
     alias_resolver = _alias_resolver(aliases)
-    order = topological_sort_of_components(alias_resolver)
+    resources = list(resources)
+    hooks = list(hooks)
+    steps = list(steps)
+    order = topological_sort_of_components(
+        alias_resolver,
+        components=resources + hooks + steps,
+    )
     ordered_resources = sorted(
         resources,
         key=lambda component: order[component.id],

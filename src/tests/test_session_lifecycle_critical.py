@@ -254,7 +254,10 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
         (iteration, ("A", "B")) for iteration in (1, 3, 5)
     ]
 
-    with pytest.raises(RuntimeError, match="Use within"):
+    with pytest.raises(
+            RuntimeError,
+            match="This instance of TrainingSession is not initialized yet!",
+    ):
         _ = session.iteration_context
 
 
