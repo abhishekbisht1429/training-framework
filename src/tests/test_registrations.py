@@ -25,6 +25,7 @@ from training_framework.training_session import (
     resource,
     step,
     topological_sort_of_components,
+    wraps,
 )
 from training_framework.registry import _COMPONENT_REGISTRY, _component
 
@@ -225,15 +226,15 @@ def test_component_names_are_unique_across_categories():
         ),
         pytest.param(
             requires_hook,
-            make_hook_class,
-            "required_hooks",
-            id="hook-requires-hook",
-        ),
-        pytest.param(
-            requires_hook,
             make_step_class,
             "required_hooks",
             id="step-requires-hook",
+        ),
+        pytest.param(
+            wraps,
+            make_hook_class,
+            "wrapped_hooks",
+            id="hook-wraps-hook",
         ),
         pytest.param(
             requires_step,
@@ -271,6 +272,26 @@ def test_dependency_decorator_records_valid_requirement(
         ),
         pytest.param(
             requires_hook,
+            make_hook_class,
+            id="hook-requires-hook",
+        ),
+        pytest.param(
+            wraps,
+            make_resource_class,
+            id="resource-wraps-hook",
+        ),
+        pytest.param(
+            wraps,
+            make_step_class,
+            id="step-wraps-hook",
+        ),
+        pytest.param(
+            wraps,
+            lambda name: type(name, (), {}),
+            id="plain-class-wraps-hook",
+        ),
+        pytest.param(
+            requires_hook,
             lambda name: type(name, (), {}),
             id="plain-class-requires-hook",
         ),
@@ -302,22 +323,40 @@ def test_dependency_decorator_rejects_invalid_consumer_type(
 
 
 @pytest.mark.parametrize(
-    ("dependency_decorator", "attribute"),
+    ("dependency_decorator", "class_factory", "attribute"),
     (
         pytest.param(
             requires_resource,
+            make_step_class,
             "required_resources",
             id="multiple-resources",
         ),
-        pytest.param(requires_hook, "required_hooks", id="multiple-hooks"),
-        pytest.param(requires_step, "required_steps", id="multiple-steps"),
+        pytest.param(
+            requires_hook,
+            make_step_class,
+            "required_hooks",
+            id="multiple-hooks",
+        ),
+        pytest.param(
+            requires_step,
+            make_step_class,
+            "required_steps",
+            id="multiple-steps",
+        ),
+        pytest.param(
+            wraps,
+            make_hook_class,
+            "wrapped_hooks",
+            id="multiple-wrapped-hooks",
+        ),
     ),
 )
 def test_multiple_requirements_preserve_decorator_application_order(
     dependency_decorator,
+    class_factory: ClassFactory,
     attribute: str,
 ):
-    component_class = make_step_class("Consumer")
+    component_class = class_factory("Consumer")
 
     component_class = dependency_decorator("first")(component_class)
     component_class = dependency_decorator("second")(component_class)
@@ -358,10 +397,7 @@ def test_topological_sort_orders_full_cross_category_dependency_chain():
         requires_hook("metrics")(make_step_class("BackwardStep"))
     )
     metrics = hook("metrics")(
-        requires_hook("base_hook")(make_hook_class("MetricsHook"))
-    )
-    base_hook = hook("base_hook")(
-        requires_resource("model")(make_hook_class("BaseHook"))
+        requires_resource("model")(make_hook_class("MetricsHook"))
     )
     model = resource("model")(
         requires_resource("config")(make_resource_class("ModelResource"))
@@ -372,7 +408,6 @@ def test_topological_sort_orders_full_cross_category_dependency_chain():
     dependency_chain = (
         config.id,
         model.id,
-        base_hook.id,
         metrics.id,
         backward.id,
         optimizer.id,

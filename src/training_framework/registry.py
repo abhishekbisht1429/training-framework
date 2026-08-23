@@ -194,17 +194,39 @@ def requires_step(step_name: str):
 
 def requires_hook(hook_name: str):
     def wrapper(cls):
-        if not issubclass(cls, (Step, Hook)):
+        if not issubclass(cls, Step):
             raise TypeError(
-                f"@requires_hook can only be applied to Step or Hook subclasses. "
-                f"'{cls.__name__}' is neither."
+                f"@requires_hook can only be applied to Step subclasses. "
+                f"'{cls.__name__}' is not a Step."
             )
 
         if "required_hooks" not in cls.__dict__:
-            cls.required_hooks = []
+            cls.required_hooks = list(getattr(cls, "required_hooks", ()))
 
         requirements: list[str] = cls.required_hooks
         requirements.append(hook_name)
+        return cls
+
+    return wrapper
+
+
+def wraps(hook_name: str):
+    def wrapper(cls):
+        if not issubclass(cls, Hook):
+            raise TypeError(
+                f"@wraps can only be applied to Hook subclasses. "
+                f"'{cls.__name__}' is not a Hook."
+            )
+
+        if "wrapped_hooks" not in cls.__dict__:
+            cls.wrapped_hooks = list(getattr(cls, "wrapped_hooks", ()))
+
+        wrapped_hooks: list[str] = cls.wrapped_hooks
+        if hook_name in wrapped_hooks:
+            raise ValueError(
+                f"Hook '{cls.__name__}' already wraps '{hook_name}'"
+            )
+        wrapped_hooks.append(hook_name)
         return cls
 
     return wrapper
@@ -229,6 +251,61 @@ def requires_resource(resource_name: str):
     return wrapper
 
 
+def _is_component_type(
+        component: Component | type[Component],
+        component_type: type[Component],
+) -> bool:
+    if isinstance(component, type):
+        return issubclass(component, component_type)
+    return isinstance(component, component_type)
+
+
+def _validate_wrapping_lifecycle(
+        wrapper: Component | type[Component],
+        wrapped: Component | type[Component],
+        *,
+        session_scoped: bool,
+) -> None:
+    shares_session_phase = (
+        _is_component_type(wrapper, SessionHook)
+        and _is_component_type(wrapped, SessionHook)
+    )
+    shares_iteration_phase = (
+        _is_component_type(wrapper, IterationHook)
+        and _is_component_type(wrapped, IterationHook)
+    )
+    if not shares_session_phase and not shares_iteration_phase:
+        raise RuntimeError(
+            f"Hook '{wrapper.name}' cannot wrap Hook '{wrapped.name}' because "
+            "they do not share a lifecycle phase"
+        )
+
+    if not session_scoped or not shares_iteration_phase:
+        return
+
+    missing = object()
+    wrapper_cadence = getattr(wrapper, "call_every", missing)
+    wrapped_cadence = getattr(wrapped, "call_every", missing)
+    if (
+            wrapper_cadence is missing
+            or wrapped_cadence is missing
+            or wrapper_cadence != wrapped_cadence
+    ):
+        wrapper_value = (
+            "<missing>" if wrapper_cadence is missing
+            else repr(wrapper_cadence)
+        )
+        wrapped_value = (
+            "<missing>" if wrapped_cadence is missing
+            else repr(wrapped_cadence)
+        )
+        raise RuntimeError(
+            f"Wrapping iteration hooks '{wrapper.name}' and '{wrapped.name}' "
+            "must have matching call_every values; "
+            f"got {wrapper_value} and {wrapped_value}"
+        )
+
+
 def topological_sort_of_components(
         aliases: ComponentAliases | Mapping[str, str] | None = None,
         *,
@@ -241,9 +318,14 @@ def topological_sort_of_components(
     else:
         components = list(components)
 
+    components_by_id = {
+        component.id: component
+        for component in components
+    }
     prerequisites_graph: dict[str, list[str]] = {
         component.id: [] for component in components
     }
+
     for component in components:
         requirements = (
             ("required_hooks", Hook),
@@ -264,6 +346,7 @@ def topological_sort_of_components(
                         f"is not registered as a {required_type.__name__}."
                     )
 
+                assert registered_class is not None
                 prerequisite_id = registered_class.id
                 prerequisites_graph[component.id].append(prerequisite_id)
                 if session_scoped and prerequisite_id not in prerequisites_graph:
@@ -272,6 +355,48 @@ def topological_sort_of_components(
                         f"'{required_name}' resolves to '{resolved_name}', which "
                         "is not configured in this session."
                     )
+
+    for wrapper in components:
+        if not _is_component_type(wrapper, Hook):
+            continue
+
+        resolved_targets = set()
+        for wrapped_name in getattr(wrapper, "wrapped_hooks", ()):
+            resolved_name = alias_resolver.resolve(wrapped_name)
+            registered_class = _COMPONENT_REGISTRY.get(resolved_name)
+            if registered_class is None or not issubclass(registered_class, Hook):
+                raise RuntimeError(
+                    f"invalid wraps target! Hook '{wrapped_name}' resolves to "
+                    f"'{resolved_name}', which is not registered as a Hook."
+                )
+
+            wrapped_id = registered_class.id
+            if wrapped_id == wrapper.id:
+                raise RuntimeError(
+                    f"Hook '{wrapper.name}' cannot wrap itself"
+                )
+            if wrapped_id in resolved_targets:
+                raise RuntimeError(
+                    f"Hook '{wrapper.name}' wraps Hook '{resolved_name}' "
+                    "more than once after alias resolution"
+                )
+            resolved_targets.add(wrapped_id)
+
+            if session_scoped and wrapped_id not in prerequisites_graph:
+                raise RuntimeError(
+                    f"invalid wraps target! Hook '{wrapped_name}' resolves to "
+                    f"'{resolved_name}', which is not configured in this session."
+                )
+
+            wrapped = components_by_id.get(wrapped_id, registered_class)
+            _validate_wrapping_lifecycle(
+                wrapper,
+                wrapped,
+                session_scoped=session_scoped,
+            )
+            # The wrapper must enter before the wrapped Hook. Reversing the
+            # ordered hooks for post callbacks and teardown closes it afterward.
+            prerequisites_graph[wrapped_id].append(wrapper.id)
 
     dependents_graph: dict[str, list[str]] = {
         component_id: [] for component_id in prerequisites_graph
@@ -304,7 +429,6 @@ def topological_sort_of_components(
         component_id: index
         for index, component_id in enumerate(sorted_components)
     }
-
 
 def format_execution_graph(
         *,
@@ -441,6 +565,9 @@ def _append_execution_calls(lines, prefix, calls, alias_resolver) -> None:
         requirements = _component_requirements(component, alias_resolver)
         if requirements:
             annotations.append(f"requires: {', '.join(requirements)}")
+        wrapped_hooks = _component_wrapped_hooks(component, alias_resolver)
+        if wrapped_hooks:
+            annotations.append(f"wraps: {', '.join(wrapped_hooks)}")
         if method_name in {
             "pre_iteration_callback",
             "post_iteration_callback",
@@ -474,6 +601,17 @@ def _component_requirements(
             for name in getattr(component, "required_steps", ())
         ]
     )
+
+
+def _component_wrapped_hooks(
+        component,
+        aliases: ComponentAliases | Mapping[str, str] | None = None,
+) -> list[str]:
+    alias_resolver = _alias_resolver(aliases)
+    return [
+        f"Hook.{alias_resolver.resolve(name)}"
+        for name in getattr(component, "wrapped_hooks", ())
+    ]
 
 
 def _hook_cadence(call_every: int) -> str:

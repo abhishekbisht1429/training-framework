@@ -35,6 +35,7 @@ from training_framework.registry import (
     requires_step,
     resource,
     step,
+    wraps,
 )
 from training_framework.session_components import SessionComponents
 from training_framework.session_config import SessionConfig, SessionPhase
@@ -74,7 +75,8 @@ __all__ = [
     "requires_resource",
     "requires_step",
     "resource",
-    "step"
+    "step",
+    "wraps",
 ]
 
 
