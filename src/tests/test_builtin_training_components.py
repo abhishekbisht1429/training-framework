@@ -156,6 +156,73 @@ def test_optional_builtins_do_not_break_unrelated_sessions(tmp_path):
         assert list(session) == [1]
 
 
+
+def test_data_manager_runs_through_public_session_lifecycle(
+        tmp_path,
+        monkeypatch,
+):
+    _register_training_components()
+    _patch_distributed_boundaries(monkeypatch)
+
+    @resource("public_test_dataset")
+    class PublicTestDataset(Resource):
+        def __init__(self, config):
+            self._size = int(config["size"])
+
+        def __len__(self):
+            return self._size
+
+        def __getitem__(self, index):
+            return torch.tensor([float(index), float(index + 10)])
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    config = _training_config(tmp_path)
+    config["aliases"]["dataset"] = "public_test_dataset"
+    config["dataset"] = {"size": 4}
+    config["data_manager"] = {
+        "batch_size": 4,
+        "num_workers": 0,
+        "pin_memory": False,
+    }
+    config["ddp"]["world_size"] = 2
+    del config["optimizer"]
+    del config["public_test_loss"]
+
+    session = TrainingSession(config)
+    _remove_default_hooks(session)
+    placeholder_ddp = session.get_resource("ddp")
+    ranked_ddp = type(placeholder_ddp)(
+        config=placeholder_ddp.config,
+        rank=0,
+    )
+    session.unregister_resource("ddp")
+    session.register_resource(ranked_ddp)
+
+    data_manager = session.get_resource("data_manager")
+    graph = session.execution_graph()
+    manager_setup = graph.index("Resource.data_manager.setup()")
+    assert graph.index("Resource.public_test_dataset.setup()") < manager_setup
+    assert graph.index("Resource.ddp.setup()") < manager_setup
+    assert data_manager.batch_size == 4
+    assert data_manager.data_iter is None
+
+    with session:
+        assert data_manager.data_iter is not None
+        batch = next(data_manager.data_iter)
+        assert batch.shape == (2, 2)
+        torch.testing.assert_close(
+            batch[:, 1] - batch[:, 0],
+            torch.full((2,), 10.0),
+        )
+
+    assert data_manager.data_iter is None
+
+
 def test_ddp_resource_reports_an_active_missing_dependency(tmp_path):
     @resource("model")
     class UnconfiguredModel(Resource):
