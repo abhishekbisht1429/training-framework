@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from training_framework.dataloader import DistributedInfiniteSampler
-from training_framework.registry import hook, resource, requires_resource
+from training_framework.registry import hook, resource, requires_resource, wraps
 from training_framework.components import Stateful, LifecycleHook, Resource, \
     StatefulResource, StatefulLifeCycleHook
 from training_framework.util import timestamp_str, context_entry, context_exit, requires_context
@@ -528,3 +528,29 @@ class DataManager(StatefulResource):
                 "Cannot restore DataManager state with a different batch_size"
             )
         self._sampler_state = deepcopy(state["sampler_state"])
+
+@wraps("optimizer")
+@hook("timer")
+class Timer(LifecycleHook):
+    def __init__(self, config) -> None:
+        self.call_every = config['call_every']
+
+        self._session_start = None
+        self._iter_start = None
+
+    def setup(self, session: "TrainingSession"):
+        self._session_start = time.time_ns()
+
+    def teardown(self, session: "TrainingSession"):
+        pass
+
+    def pre_iteration_callback(self, session: "TrainingSession") -> None:
+        self._iter_start = time.time_ns()
+
+    def post_iteration_callback(self, session: "TrainingSession") -> None:
+        iter_end = time.time_ns()
+        iter_duration = iter_end - self._iter_start
+        elapsed_time = iter_end - self._session_start
+        print(f"Time taken for the iteration {session.iteration}: {format_execution_time(iter_duration)}")
+        print(f"Elapsed time: {format_execution_time(elapsed_time)}")
+        print()
