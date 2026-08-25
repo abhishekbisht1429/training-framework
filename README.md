@@ -1149,7 +1149,13 @@ training-framework/
 ├── src/
 │   ├── training_framework/
 │   │   ├── __init__.py
-│   │   ├── builtin_components.py
+│   │   ├── builtin_components/
+│   │   │   ├── __init__.py
+│   │   │   ├── checkpointing.py
+│   │   │   ├── data.py
+│   │   │   ├── distributed.py
+│   │   │   ├── observability.py
+│   │   │   └── optimization.py
 │   │   ├── configurator.py
 │   │   ├── dataloader.py
 │   │   ├── training_engine.py

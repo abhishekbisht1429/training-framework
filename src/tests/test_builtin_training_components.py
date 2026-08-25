@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+import pickle
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
 
 import training_framework.builtin_components as builtin_components
+from training_framework.builtin_components import (
+    Checkpointer,
+    DataManager,
+    DDPResource,
+    Logger,
+    OptimizerHook,
+    Tensorboard,
+    Timer,
+)
+from training_framework.builtin_components import (
+    checkpointing,
+    data,
+    distributed,
+    observability,
+    optimization,
+)
 from training_framework.training_session import (
     Resource,
     StatefulResource,
@@ -115,7 +134,7 @@ def _patch_distributed_boundaries(monkeypatch):
         calls["destroy_count"] += 1
 
     monkeypatch.setattr(
-        builtin_components,
+        distributed,
         "DDP",
         FakeDistributedDataParallel,
     )
@@ -142,6 +161,55 @@ def _optimizer_hook(session):
         hook
         for hook in session.get_all_hooks()
         if hook.name == "optimizer"
+    )
+
+
+def test_builtin_component_facade_preserves_public_class_imports():
+    assert builtin_components.Checkpointer is Checkpointer
+    assert builtin_components.DataManager is DataManager
+    assert builtin_components.DDPResource is DDPResource
+    assert builtin_components.Logger is Logger
+    assert builtin_components.OptimizerHook is OptimizerHook
+    assert builtin_components.Tensorboard is Tensorboard
+    assert builtin_components.Timer is Timer
+
+    assert Checkpointer is checkpointing.Checkpointer
+    assert DataManager is data.DataManager
+    assert DDPResource is distributed.DDPResource
+    assert Logger is observability.Logger
+    assert OptimizerHook is optimization.OptimizerHook
+    assert Tensorboard is observability.Tensorboard
+    assert Timer is observability.Timer
+
+
+def test_builtin_component_facade_resolves_historical_pickle_paths():
+    historical_reference = (
+        b"ctraining_framework.builtin_components\nCheckpointer\n."
+    )
+
+    assert pickle.loads(historical_reference) is Checkpointer
+
+
+def test_timer_formats_iteration_and_elapsed_durations(
+        monkeypatch,
+        capsys,
+):
+    timestamps = iter((100, 130, 190))
+    monkeypatch.setattr(
+        observability.time,
+        "time_ns",
+        timestamps.__next__,
+    )
+    timer = Timer({"call_every": 1})
+    session = SimpleNamespace(iteration=2)
+
+    timer.setup(session)
+    timer.pre_iteration_callback(session)
+    timer.post_iteration_callback(session)
+
+    assert capsys.readouterr().out == (
+        "Time taken for the iteration 2: 60 ns\n"
+        "Elapsed time: 90 ns\n\n"
     )
 
 
@@ -347,7 +415,7 @@ def test_ddp_resource_moves_model_to_rank_local_cuda_before_wrapping(
             super().__init__(module, device_ids)
 
     monkeypatch.setattr(
-        builtin_components,
+        distributed,
         "DDP",
         RecordingDistributedDataParallel,
     )
@@ -375,7 +443,7 @@ def test_ddp_resource_cleans_up_when_model_wrapping_fails(
             raise RuntimeError("could not wrap model")
 
     monkeypatch.setattr(
-        builtin_components,
+        distributed,
         "DDP",
         FailingDistributedDataParallel,
     )
