@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 import torch
 
-from training_framework.training_engine import TrainingEngine
-from training_framework.training_session import TrainingSession
+from training_framework.engine import TrainingEngine
+from training_framework.session import TrainingSession
 from tests.test_utils import (
     iteration_events,
     register_test_components,

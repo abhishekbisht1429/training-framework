@@ -10,8 +10,8 @@ import pytest
 import torch
 import yaml
 
-from training_framework.configurator import Configurator
-from training_framework.training_engine import TrainingEngine
+from training_framework.engine import Configurator
+from training_framework.engine import TrainingEngine
 
 
 _COMPONENTS_PACKAGE = "tests.integration_training_components"

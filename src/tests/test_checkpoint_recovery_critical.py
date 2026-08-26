@@ -15,14 +15,13 @@ import numpy as np
 import pytest
 import torch
 
-from training_framework.builtin_components import Checkpointer
-from training_framework.training_session import (
-    SessionPhase,
-    TrainingSession,
+from training_framework.components.builtin import Checkpointer
+from training_framework.components import (
     hook,
     resource,
     step, Stateful, SessionHook, LifecycleHook, Resource, Step,
 )
+from training_framework.session import SessionPhase, TrainingSession
 
 from tests.test_utils import make_config
 
@@ -511,7 +510,7 @@ def test_from_state_does_not_repeat_normal_session_initialization(
     config_writes = []
 
     monkeypatch.setattr(
-        "training_framework.training_session.write_session_config",
+        "training_framework.session.base.write_session_config",
         lambda session_dir, config: config_writes.append((session_dir, config)),
     )
 

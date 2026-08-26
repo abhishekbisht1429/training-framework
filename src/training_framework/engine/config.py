@@ -4,7 +4,10 @@ from typing import Mapping
 
 from omegaconf import OmegaConf
 
-from training_framework.registry import RESERVED_CONFIG_NAMES
+from training_framework.components.config import (
+    RESERVED_CONFIG_NAMES,
+    selected_component_names,
+)
 
 
 class Configurator:
@@ -13,10 +16,18 @@ class Configurator:
 
         group = self._parser.add_mutually_exclusive_group(required=True)
         group.add_argument("--config", help="Path to config file")
+        group.add_argument(
+            "--analysis-config",
+            help="Path to analysis session config file",
+        )
         group.add_argument("--extend-session", nargs=2, help="Path to session checkpoint to extend")
         group.add_argument("--resume-session", help="Path to checkpoint to resume the session from")
 
         self._parser.add_argument('--override', type=str, nargs='*', default=None)
+        self._parser.add_argument(
+            "--model-checkpoint",
+            help="Training-session checkpoint to analyze",
+        )
         self._parser.add_argument('--heartbeat-timeout', type=float, default=30.0)
         self._parser.add_argument('--process_timeout_on_join', type=float, default=30.0)
         # self._parser.add_argument('--wait-time-after-interrupt', type=float, default=10.0)
@@ -25,21 +36,45 @@ class Configurator:
 
         self._session_configs = None
         self._checkpoint_path = None
+        self._model_checkpoint_path = None
         self._new_max_iters = None
         self._mode = None
 
         if self._args.config:
+            if self._args.model_checkpoint:
+                self._parser.error(
+                    "--model-checkpoint requires --analysis-config"
+                )
             self._mode = "new"
             config = OmegaConf.load(self._args.config)
             if self._args.override is not None:
                 # cli_config = OmegaConf.from_dotlist(self._args.override)
                 config.merge_with_dotlist(self._args.override)
             self._session_configs = OmegaConf.to_container(config)['sessions']
+        elif self._args.analysis_config:
+            if not self._args.model_checkpoint:
+                self._parser.error(
+                    "--analysis-config requires --model-checkpoint"
+                )
+            self._mode = "analysis"
+            self._model_checkpoint_path = self._args.model_checkpoint
+            config = OmegaConf.load(self._args.analysis_config)
+            if self._args.override is not None:
+                config.merge_with_dotlist(self._args.override)
+            self._session_configs = OmegaConf.to_container(config)['sessions']
         elif self._args.extend_session:
+            if self._args.model_checkpoint:
+                self._parser.error(
+                    "--model-checkpoint requires --analysis-config"
+                )
             self._mode = "extend"
             self._checkpoint_path = self._args.extend_session[0]
             self._new_max_iters = int(self._args.extend_session[1])
         elif self._args.resume_session:
+            if self._args.model_checkpoint:
+                self._parser.error(
+                    "--model-checkpoint requires --analysis-config"
+                )
             self._mode = "resume"
             self._checkpoint_path = self._args.resume_session
 
@@ -50,29 +85,7 @@ class Configurator:
 
     @staticmethod
     def _selected_component_names(session_config: Mapping) -> list[str]:
-        selected = session_config.get("components", [])
-        if not isinstance(selected, list):
-            raise TypeError("'components' must be a list of component names")
-
-        names: list[str] = []
-        seen: set[str] = set()
-        for name in selected:
-            if not isinstance(name, str):
-                raise TypeError("'components' entries must be strings")
-            if not name:
-                raise ValueError("'components' entries must not be empty")
-            if name in RESERVED_CONFIG_NAMES:
-                raise ValueError(
-                    f"'{name}' is a reserved configuration name and cannot "
-                    "select a component"
-                )
-            if name in seen:
-                raise ValueError(
-                    f"Component '{name}' appears more than once in 'components'"
-                )
-            seen.add(name)
-            names.append(name)
-        return names
+        return selected_component_names(session_config)
 
     def get_component_config(self, session_index: int, key: str):
         if not self._session_configs:
@@ -115,6 +128,12 @@ class Configurator:
         if not self._checkpoint_path:
             raise KeyError("Cannot use this property in the current mode!")
         return self._checkpoint_path
+
+    @property
+    def model_checkpoint_path(self):
+        if not self._model_checkpoint_path:
+            raise KeyError("Cannot use this property in the current mode!")
+        return self._model_checkpoint_path
 
     @property
     def new_max_iters(self):

@@ -10,13 +10,17 @@ from training_framework.components import (
     Stateful,
     Step,
 )
-from training_framework.registry import (
-    ComponentAliases,
+from training_framework.components.config import (
     RESERVED_CONFIG_NAMES,
-    _COMPONENT_REGISTRY,
+    selected_component_names,
+)
+from training_framework.components.registry import (
+    ComponentAliases,
     _component_type,
+    component_registry,
     topological_sort_of_components,
 )
+from training_framework.session.config import SessionMode, normalize_session_mode
 
 
 class SessionComponents:
@@ -27,12 +31,15 @@ class SessionComponents:
             steps: dict[str, Step] | None = None,
             hooks: dict[str, Hook] | None = None,
             aliases: dict[str, str] | None = None,
+            mode: SessionMode | str = SessionMode.TRAINING,
     ):
+        self.mode = normalize_session_mode(mode)
+        self.registry = component_registry(self.mode)
         self.components: dict[str, Component] = {}
         self._merge_components(resources, Resource)
         self._merge_components(hooks, Hook)
         self._merge_components(steps, Step)
-        self.aliases = ComponentAliases(aliases)
+        self.aliases = ComponentAliases(aliases, mode=self.mode)
 
     def get_state(self) -> dict[str, dict[str, Any]]:
         return {
@@ -52,7 +59,7 @@ class SessionComponents:
         restored_components: dict[str, Component] = {}
 
         for name, component_info in component_states.items():
-            component_class = _COMPONENT_REGISTRY.get(name)
+            component_class = self.registry.get(name)
             if component_class is None:
                 raise ValueError(
                     f"Checkpoint component '{name}' is not registered"
@@ -118,29 +125,7 @@ class SessionComponents:
 
     @staticmethod
     def _selected_component_names(config: Mapping) -> list[str]:
-        selected = config.get("components", [])
-        if not isinstance(selected, list):
-            raise TypeError("'components' must be a list of component names")
-
-        names: list[str] = []
-        seen: set[str] = set()
-        for name in selected:
-            if not isinstance(name, str):
-                raise TypeError("'components' entries must be strings")
-            if not name:
-                raise ValueError("'components' entries must not be empty")
-            if name in RESERVED_CONFIG_NAMES:
-                raise ValueError(
-                    f"'{name}' is a reserved configuration name and cannot "
-                    "select a component"
-                )
-            if name in seen:
-                raise ValueError(
-                    f"Component '{name}' appears more than once in 'components'"
-                )
-            seen.add(name)
-            names.append(name)
-        return names
+        return selected_component_names(config)
 
     @staticmethod
     def _dependency_specs(
@@ -162,7 +147,7 @@ class SessionComponents:
             expected_type: type[Component] | None = None,
     ) -> tuple[str, type[Component]]:
         resolved_name = self.resolve_name(name)
-        component_class = _COMPONENT_REGISTRY.get(resolved_name)
+        component_class = self.registry.get(resolved_name)
         if component_class is None:
             if expected_type is None:
                 raise ValueError(
@@ -342,13 +327,13 @@ class SessionComponents:
 
         if (
                 not hasattr(component, "name")
-                or component.name not in _COMPONENT_REGISTRY
+                or component.name not in self.registry
         ):
             raise ValueError(
                 f"{base_type.__name__} '{type(component).__name__}' "
                 "is not registered as a component!"
             )
-        if _component_type(_COMPONENT_REGISTRY[component.name]) is not base_type:
+        if _component_type(self.registry[component.name]) is not base_type:
             raise ValueError(
                 f"Component '{component.name}' is not registered as a "
                 f"{base_type.__name__}!"
@@ -383,7 +368,7 @@ class SessionComponents:
     def _remove_component(self, name, component_type) -> None:
         kind = component_type.__name__
         registered_name = self.resolve_name(name)
-        registered_class = _COMPONENT_REGISTRY.get(registered_name)
+        registered_class = self.registry.get(registered_name)
         if (
                 registered_class is None
                 or not issubclass(registered_class, component_type)
@@ -423,6 +408,7 @@ class SessionComponents:
         return topological_sort_of_components(
             self.aliases,
             components=self.components.values(),
+            mode=self.mode,
         )
 
     @property

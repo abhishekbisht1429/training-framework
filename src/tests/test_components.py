@@ -13,19 +13,19 @@ from typing import Any, override
 
 import torch
 
-from training_framework.training_session import (
+from training_framework.components import (
     LifecycleHook,
     Resource,
     StatefulLifeCycleHook,
     StatefulResource,
     StatefulStep,
     Step,
-    TrainingSession,
     hook,
     requires_resource,
     resource,
     step,
 )
+from training_framework.session import TrainingSession
 
 
 def _append_event(path: str | None, event: str, **payload: Any) -> None:

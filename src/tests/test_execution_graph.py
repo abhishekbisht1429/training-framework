@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from training_framework.training_session import (
+from training_framework.components import (
     LifecycleHook,
     Resource,
     Step,
-    TrainingSession,
     hook,
     requires_hook,
     requires_resource,
     resource,
     step,
 )
+from training_framework.session import TrainingSession
 
 
 def _config(tmp_path, *, show_execution_graph=None):
@@ -19,7 +19,7 @@ def _config(tmp_path, *, show_execution_graph=None):
         "sessions_dir": str(tmp_path),
         "max_iterations": 3,
         "device": "cpu",
-        "components_package": "training_framework.builtin_components",
+        "components_package": "training_framework.components.builtin",
     }
     if show_execution_graph is not None:
         base_config["show-execution-graph"] = show_execution_graph

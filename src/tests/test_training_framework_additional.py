@@ -16,15 +16,15 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from training_framework.configurator import Configurator
+from training_framework.engine import Configurator
 from training_framework.dataloader import InfiniteSampler
-from training_framework.training_engine import TrainingEngine
-from training_framework.training_session import (
-    TrainingSession,
+from training_framework.engine import TrainingEngine
+from training_framework.components import (
     hook,
     resource,
     step, Stateful, Hook, LifecycleHook, Resource, Step,
 )
+from training_framework.session import TrainingSession
 from training_framework.util import timestamp_str
 
 
@@ -145,7 +145,7 @@ def minimal_session_config_1(tmp_path):
             "sessions_dir": str(tmp_path / "sessions"),
             "device": "cpu",
             "rng_seed": 7,
-            "components_package": "training_framework.builtin_components",
+            "components_package": "training_framework.components.builtin",
         }
     }
 
@@ -159,7 +159,7 @@ def minimal_session_config_2(tmp_path):
             "sessions_dir": str(tmp_path / "sessions"),
             "device": "cpu",
             "rng_seed": 11,
-            "components_package": "training_framework.builtin_components",
+            "components_package": "training_framework.components.builtin",
         }
     }
 
@@ -678,7 +678,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
                     "sessions_dir": str(tmp_path / "s1"),
                     "device": "cpu",
                     "rng_seed": 1,
-                    "components_package": "training_framework.builtin_components",
+                    "components_package": "training_framework.components.builtin",
                 },
                 "tensorboard": {"host": "0.0.0.0", "port": 16050},
             },
@@ -689,7 +689,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
                     "sessions_dir": str(tmp_path / "s1"),
                     "device": "cpu",
                     "rng_seed": 1,
-                    "components_package": "training_framework.builtin_components",
+                    "components_package": "training_framework.components.builtin",
                 },
             },
         ]

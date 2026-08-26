@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Any, override
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from training_framework.components import Resource
-from training_framework.registry import requires_resource, resource
+from training_framework.components import Resource, requires_resource, resource
 from training_framework.util import (
     context_entry,
     context_exit,
@@ -16,7 +15,7 @@ from training_framework.util import (
 )
 
 if TYPE_CHECKING:
-    from training_framework.training_session import TrainingSession
+    from training_framework.session import Session
 
 
 @requires_resource("model")
@@ -60,7 +59,7 @@ class DDPResource(Resource):
 
     @context_entry
     @override
-    def setup(self, session: TrainingSession) -> Any:
+    def setup(self, session: Session) -> Any:
         os.environ["MASTER_ADDR"] = self._master_addr
         os.environ["MASTER_PORT"] = self._master_port
 

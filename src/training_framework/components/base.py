@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 from training_framework.util import CaptureInitMeta
 
 if TYPE_CHECKING:
-    from training_framework.training_session import TrainingSession
+    from training_framework.session.base import Session
 
 
 class Component(ABC, metaclass=CaptureInitMeta):
@@ -46,11 +46,11 @@ class Hook(Component, ABC):
 
 class SessionHook(Hook, ABC):
     @abstractmethod
-    def setup(self, session: "TrainingSession") -> None:
+    def setup(self, session: "Session") -> None:
         pass
 
     @abstractmethod
-    def teardown(self, session: "TrainingSession") -> None:
+    def teardown(self, session: "Session") -> None:
         pass
 
 
@@ -58,11 +58,11 @@ class IterationHook(Hook, ABC):
     call_every: int
 
     @abstractmethod
-    def pre_iteration_callback(self, session: "TrainingSession") -> None:
+    def pre_iteration_callback(self, session: "Session") -> None:
         pass
 
     @abstractmethod
-    def post_iteration_callback(self, session: "TrainingSession") -> None:
+    def post_iteration_callback(self, session: "Session") -> None:
         pass
 
 
@@ -77,11 +77,11 @@ class Resource(Component, ABC):
         return "Resource"
 
     @abstractmethod
-    def setup(self, session: "TrainingSession") -> None:
+    def setup(self, session: "Session") -> None:
         pass
 
     @abstractmethod
-    def teardown(self, session: "TrainingSession") -> None:
+    def teardown(self, session: "Session") -> None:
         pass
 
 
@@ -92,7 +92,7 @@ class Step(Component, ABC):
         return "Step"
 
     @abstractmethod
-    def run(self, session: "TrainingSession") -> None:
+    def run(self, session: "Session") -> None:
         pass
 
 

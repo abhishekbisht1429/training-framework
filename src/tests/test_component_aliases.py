@@ -5,14 +5,13 @@ import pickle
 import pytest
 
 from tests.test_utils import COMPONENTS_PACKAGE, register_test_components
-from training_framework.configurator import Configurator
-from training_framework.training_engine import load_session_for_worker
-from training_framework.training_session import (
+from training_framework.engine import Configurator
+from training_framework.engine import load_session_for_worker
+from training_framework.components import (
     Hook,
     Resource,
     SessionHook,
     Step,
-    TrainingSession,
     hook,
     requires_hook,
     requires_resource,
@@ -20,9 +19,10 @@ from training_framework.training_session import (
     resource,
     step,
 )
+from training_framework.session import TrainingSession
 
 
-def _base_config(tmp_path, *, components_package="training_framework.builtin_components"):
+def _base_config(tmp_path, *, components_package="training_framework.components.builtin"):
     return {
         "rng_seed": 17,
         "sessions_dir": str(tmp_path),

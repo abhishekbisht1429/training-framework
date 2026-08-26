@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from training_framework.training_session import (
+from training_framework.components import (
     Resource,
-    SessionPhase,
-    TrainingSession,
     resource,
 )
+from training_framework.session import SessionPhase, TrainingSession
 from tests.test_utils import read_events, register_test_components, session_config
 
 
@@ -124,7 +123,7 @@ def test_execution_graph_is_printed_only_for_ddp_rank_zero(
             "sessions_dir": str(tmp_path / f"rank-{rank}"),
             "max_iterations": 1,
             "device": "cpu",
-            "components_package": "training_framework.builtin_components",
+            "components_package": "training_framework.components.builtin",
             "show-execution-graph": True,
         },
         "ddp": {"rank": rank},

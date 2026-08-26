@@ -6,11 +6,11 @@ import pytest
 import torch
 
 from tests.test_utils import make_config
-from training_framework.training_session import (
-    TrainingSession,
+from training_framework.components import (
     hook,
     resource,
     step, Stateful, SessionHook, Step, StatefulResource, )
+from training_framework.session import TrainingSession
 
 
 class BaseInheritedResource(StatefulResource):

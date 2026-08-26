@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 import pytest
 
-from training_framework.training_session import (
+from training_framework.components import (
     Component,
     Hook,
     Resource,
@@ -27,7 +27,7 @@ from training_framework.training_session import (
     topological_sort_of_components,
     wraps,
 )
-from training_framework.registry import _COMPONENT_REGISTRY, _component
+from training_framework.components.registry import _COMPONENT_REGISTRY, _component
 
 
 ClassFactory = Callable[[str], type]
