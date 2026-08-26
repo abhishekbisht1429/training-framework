@@ -88,3 +88,20 @@ def import_all_modules(package_name: str) -> None:
         prefix=prefix,
     ):
         importlib.import_module(module_info.name)
+
+
+def format_execution_time(nanos: int) -> str:
+    if nanos < 1_000:
+        return f"{nanos} ns"
+    elif nanos < 1_000_000:
+        return f"{nanos / 1_000:.2f} µs"
+    elif nanos < 1_000_000_000:
+        return f"{nanos / 1_000_000:.2f} ms"
+    else:
+        seconds = nanos / 1_000_000_000
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{int(h)}h {int(m)}m {s:.2f}s"
+        return f"{int(m)}m {s:.2f}s"
+
