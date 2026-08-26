@@ -1,2 +1,2 @@
-# ensure that components are registered
-from . import builtin_components
+# Importing the public component package registers built-in components.
+from . import components

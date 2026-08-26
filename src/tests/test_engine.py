@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from training_framework.training_engine import (
+from training_framework.engine import (
     SessionProcessWrapper,
     TrainingEngine,
     load_session_for_worker,
 )
-from training_framework.training_session import TrainingSession
+from training_framework.session import TrainingSession
 from tests.test_utils import (
     COMPONENTS_PACKAGE,
     iteration_events,

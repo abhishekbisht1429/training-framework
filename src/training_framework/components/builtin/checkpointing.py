@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING, Any, override
 import torch
 
 from training_framework.components import LifecycleHook, Stateful
-from training_framework.registry import hook
+from training_framework.components import hook
 from training_framework.util import timestamp_str
 
 if TYPE_CHECKING:
-    from training_framework.training_session import TrainingSession
+    from training_framework.session import Session
 
 
 @hook("checkpointer")
@@ -22,7 +22,7 @@ class Checkpointer(LifecycleHook, Stateful):
         self.call_every = config["checkpoint_every"]
 
     @override
-    def setup(self, session: TrainingSession) -> Any:
+    def setup(self, session: Session) -> Any:
         if "checkpoints_dir" in self._config:
             self._checkpoints_dir = self._config["checkpoints_dir"]
         else:
@@ -37,11 +37,11 @@ class Checkpointer(LifecycleHook, Stateful):
         pass
 
     @override
-    def pre_iteration_callback(self, session: TrainingSession) -> None:
+    def pre_iteration_callback(self, session: Session) -> None:
         pass
 
     @override
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(self, session: Session) -> None:
         if (
                 session.iteration == 1
                 and session.session_config.max_iterations > 1
@@ -67,7 +67,7 @@ class Checkpointer(LifecycleHook, Stateful):
             cls,
             path,
             map_location="cpu",
-    ) -> TrainingSession:
+    ) -> Session:
         return torch.load(
             path,
             map_location=map_location,

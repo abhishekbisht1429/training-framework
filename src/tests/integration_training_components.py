@@ -10,18 +10,18 @@ from typing import override
 import torch
 from torch import nn
 from torch.utils.data import Dataset
-from training_framework.training_session import (
+from training_framework.components import (
     LifecycleHook,
     Resource,
     StatefulResource,
     Step,
-    TrainingSession,
     hook,
     requires_resource,
     requires_step,
     resource,
     step,
 )
+from training_framework.session import TrainingSession
 
 
 @resource("integration_ddp_model")

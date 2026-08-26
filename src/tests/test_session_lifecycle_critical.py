@@ -12,13 +12,12 @@ from typing import Any
 
 import pytest
 
-from training_framework.training_session import (
-    SessionPhase,
-    TrainingSession,
+from training_framework.components import (
     hook,
     resource,
     step, LifecycleHook, Resource, Step,
 )
+from training_framework.session import SessionPhase, TrainingSession
 from tests.test_utils import make_config
 
 class LifecycleSetupError(RuntimeError):

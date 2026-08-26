@@ -1,4 +1,5 @@
 import random
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -23,3 +24,21 @@ def restore_rng_state(state: dict[str, Any]) -> None:
     np.random.set_state(state["np_rng_state"])
 
 
+def configuration_from_state(
+        state: Mapping[str, Any],
+) -> tuple[dict, dict, Any]:
+    """Decode current and legacy session configuration state."""
+    if "session_config" in state:
+        return (
+            state["config"],
+            state["base_config"],
+            state["session_config"],
+        )
+
+    init_args = state["init_args"]
+    if init_args["args"]:
+        config = init_args["args"][0]
+    else:
+        config = init_args["kwargs"]["config"]
+
+    return config, state["config"], state["base_config"]

@@ -7,10 +7,10 @@ import torch
 from torch import nn, optim
 
 from training_framework.components import StatefulLifeCycleHook
-from training_framework.registry import hook, requires_resource
+from training_framework.components import hook, requires_resource
 
 if TYPE_CHECKING:
-    from training_framework.training_session import TrainingSession
+    from training_framework.session import Session
 
 
 @hook("optimizer")
@@ -43,7 +43,7 @@ class OptimizerHook(StatefulLifeCycleHook):
         )
 
     @override
-    def setup(self, session: TrainingSession):
+    def setup(self, session: Session):
         ddp_model: nn.Module = session.get_resource("ddp")
         self._optimizer = optim.AdamW(
             ddp_model.wrapped_model.parameters(),
@@ -71,18 +71,18 @@ class OptimizerHook(StatefulLifeCycleHook):
         self._restored_state = None
 
     @override
-    def pre_iteration_callback(self, session: TrainingSession) -> None:
+    def pre_iteration_callback(self, session: Session) -> None:
         self._optimizer.zero_grad()
 
     @override
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(self, session: Session) -> None:
         loss = session.iteration_context["loss"]
         loss.backward()
         self._optimizer.step()
         self._lr_scheduler.step()
 
     @override
-    def teardown(self, session: TrainingSession):
+    def teardown(self, session: Session):
         self._restored_state = self.get_state()
         self._optimizer = None
         self._lr_scheduler = None

@@ -8,10 +8,10 @@ from torch.utils.data import DataLoader
 
 from training_framework.components import StatefulResource
 from training_framework.dataloader import DistributedInfiniteSampler
-from training_framework.registry import requires_resource, resource
+from training_framework.components import requires_resource, resource
 
 if TYPE_CHECKING:
-    from training_framework.training_session import TrainingSession
+    from training_framework.session import Session
 
 
 class _ManagedDataIterator:
@@ -147,7 +147,7 @@ class DataManager(StatefulResource):
         self._sampler_state["index_within_epoch"] = index_within_epoch
 
     @override
-    def setup(self, session: TrainingSession):
+    def setup(self, session: Session):
         ddp = session.get_resource("ddp")
         dataset = session.get_resource("dataset")
         dataset_size = len(dataset)
@@ -181,7 +181,7 @@ class DataManager(StatefulResource):
         self._data_iter = _ManagedDataIterator(self, dataloader)
 
     @override
-    def teardown(self, session: TrainingSession):
+    def teardown(self, session: Session):
         try:
             if self._data_iter is not None:
                 self._data_iter.close()

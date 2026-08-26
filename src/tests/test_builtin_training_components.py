@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import pickle
 from types import SimpleNamespace
 
 import pytest
 import torch
 from torch import nn
 
-import training_framework.builtin_components as builtin_components
-from training_framework.builtin_components import (
+import training_framework.components.builtin as builtin_components
+from training_framework.components.builtin import (
     Checkpointer,
     DataManager,
     DDPResource,
@@ -17,22 +16,22 @@ from training_framework.builtin_components import (
     Tensorboard,
     Timer,
 )
-from training_framework.builtin_components import (
+from training_framework.components.builtin import (
     checkpointing,
     data,
     distributed,
     observability,
     optimization,
 )
-from training_framework.training_session import (
+from training_framework.components import (
     Resource,
     StatefulResource,
     Step,
-    TrainingSession,
     requires_resource,
     resource,
     step,
 )
+from training_framework.session import TrainingSession
 
 
 class FakeDistributedDataParallel(nn.Module):
@@ -51,7 +50,7 @@ def _base_config(tmp_path, *, max_iterations=3):
         "sessions_dir": str(tmp_path),
         "max_iterations": max_iterations,
         "device": "cpu",
-        "components_package": "training_framework.builtin_components",
+        "components_package": "training_framework.components.builtin",
         "show-execution-graph": False,
     }
 
@@ -164,7 +163,7 @@ def _optimizer_hook(session):
     )
 
 
-def test_builtin_component_facade_preserves_public_class_imports():
+def test_builtin_package_exports_public_component_classes():
     assert builtin_components.Checkpointer is Checkpointer
     assert builtin_components.DataManager is DataManager
     assert builtin_components.DDPResource is DDPResource
@@ -180,15 +179,6 @@ def test_builtin_component_facade_preserves_public_class_imports():
     assert OptimizerHook is optimization.OptimizerHook
     assert Tensorboard is observability.Tensorboard
     assert Timer is observability.Timer
-
-
-def test_builtin_component_facade_resolves_historical_pickle_paths():
-    historical_reference = (
-        b"ctraining_framework.builtin_components\nCheckpointer\n."
-    )
-
-    assert pickle.loads(historical_reference) is Checkpointer
-
 
 def test_timer_formats_iteration_and_elapsed_durations(
         monkeypatch,

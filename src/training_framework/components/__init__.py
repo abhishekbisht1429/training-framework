@@ -1,0 +1,68 @@
+"""Component base classes, registration decorators, and built-in components."""
+
+from training_framework.components.base import (
+    Component,
+    Hook,
+    IterationHook,
+    LifecycleHook,
+    Resource,
+    SessionHook,
+    Stateful,
+    StatefulIterationHook,
+    StatefulLifecycleHook,
+    StatefulLifeCycleHook,
+    StatefulResource,
+    StatefulSessionHook,
+    StatefulStep,
+    Step,
+)
+from training_framework.components.registry import (
+    ANALYSIS_MODE,
+    TRAINING_MODE,
+    ComponentAliases,
+    component_registry,
+    format_execution_graph,
+    hook,
+    normalize_component_mode,
+    requires_hook,
+    requires_resource,
+    requires_step,
+    resource,
+    step,
+    topological_sort_of_components,
+    wraps,
+)
+
+__all__ = [
+    "ANALYSIS_MODE",
+    "TRAINING_MODE",
+    "Component",
+    "ComponentAliases",
+    "Hook",
+    "IterationHook",
+    "LifecycleHook",
+    "Resource",
+    "SessionHook",
+    "Stateful",
+    "StatefulIterationHook",
+    "StatefulLifecycleHook",
+    "StatefulLifeCycleHook",
+    "StatefulResource",
+    "StatefulSessionHook",
+    "StatefulStep",
+    "Step",
+    "component_registry",
+    "format_execution_graph",
+    "hook",
+    "normalize_component_mode",
+    "requires_hook",
+    "requires_resource",
+    "requires_step",
+    "resource",
+    "step",
+    "topological_sort_of_components",
+    "wraps",
+]
+
+# Registration happens after the component API is fully initialized.
+from training_framework.components import builtin as builtin

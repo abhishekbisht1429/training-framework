@@ -1,7 +1,7 @@
 import os
 import random
-import time
-import traceback
+from abc import abstractmethod
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, cast, override
@@ -9,40 +9,36 @@ from typing import Any, cast, override
 import numpy as np
 import torch
 
-from training_framework.builtin_components import Logger, Checkpointer
 from training_framework.components import (
     Component,
     Hook,
-    IterationHook,
-    LifecycleHook,
     Resource,
-    SessionHook,
     Stateful,
-    StatefulIterationHook,
-    StatefulLifecycleHook,
-    StatefulLifeCycleHook,
-    StatefulResource,
-    StatefulSessionHook,
-    StatefulStep,
     Step,
 )
-from training_framework.registry import (
-    format_execution_graph,
-    hook,
-    topological_sort_of_components,
-    requires_hook,
-    requires_resource,
-    requires_step,
-    resource,
-    step,
-    wraps,
+from training_framework.components import format_execution_graph
+from training_framework.session.components import SessionComponents
+from training_framework.session.config import (
+    SessionConfig,
+    SessionMode,
+    SessionPhase,
+    normalize_session_mode,
 )
-from training_framework.session_components import SessionComponents
-from training_framework.session_config import SessionConfig, SessionPhase
-from training_framework.session_io import write_session_config
-from training_framework.session_state import (
+from training_framework.session.io import write_session_config
+from training_framework.session.state import (
     capture_rng_state,
+    configuration_from_state,
     restore_rng_state,
+)
+from training_framework.session.runtime import (
+    clear_iteration_state,
+    report_worker_exception,
+    run_iteration,
+    send_heartbeat as send_worker_heartbeat,
+    setup_resources,
+    setup_session_hooks,
+    teardown_resources,
+    teardown_session_hooks,
 )
 from training_framework.util import (
     CaptureInitMeta,
@@ -52,37 +48,10 @@ from training_framework.util import (
     requires_context,
 )
 
-__all__ = [
-    "Component",
-    "Hook",
-    "IterationHook",
-    "LifecycleHook",
-    "Resource",
-    "SessionConfig",
-    "SessionHook",
-    "SessionPhase",
-    "Stateful",
-    "StatefulIterationHook",
-    "StatefulLifeCycleHook",
-    "StatefulLifecycleHook",
-    "StatefulResource",
-    "StatefulSessionHook",
-    "StatefulStep",
-    "Step",
-    "TrainingSession",
-    "hook",
-    "requires_hook",
-    "requires_resource",
-    "requires_step",
-    "resource",
-    "step",
-    "wraps",
-]
-
-
-class TrainingSession(Stateful, metaclass=CaptureInitMeta):
+class Session(Stateful, metaclass=CaptureInitMeta):
 
     def __init__(self, config: dict):
+        self._mode = self._session_mode()
         self._config = config
         self._base_config = config["base_config"]
         self._base_config.setdefault("show-execution-graph", True)
@@ -115,6 +84,16 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         self._register_components()
 
+    @classmethod
+    @abstractmethod
+    def _session_mode(cls) -> SessionMode:
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def _default_component_configs(cls) -> Mapping[str, Mapping]:
+        raise NotImplementedError
+
     def _set_component_collections(
             self,
             *,
@@ -122,16 +101,35 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     ) -> None:
         if aliases is None:
             aliases = self._config.get("aliases", {})
-        self._components = SessionComponents(aliases=aliases)
+        self._components = SessionComponents(
+            aliases=aliases,
+            mode=self._mode,
+        )
 
     def _register_components(self) -> None:
         self._components.register_from_config(
             self._config,
-            default_configs={
-                "logger": {"log_every": 10},
-                "checkpointer": {"checkpoint_every": 100},
-            },
+            default_configs=self._default_component_configs(),
         )
+
+    def _get_mode_state(self) -> dict[str, Any]:
+        return {}
+
+    def _restore_mode_state(self, state: Mapping[str, Any]) -> None:
+        pass
+
+    def _restore_and_validate_mode(self, state: Mapping[str, Any]) -> None:
+        stored_mode = normalize_session_mode(
+            state.get("mode", SessionMode.TRAINING),
+        )
+        expected_mode = self._session_mode()
+        if stored_mode is not expected_mode:
+            raise ValueError(
+                f"{type(self).__name__} cannot restore "
+                f"{stored_mode.value}-mode state"
+            )
+        self._mode = stored_mode
+        self._restore_mode_state(state)
 
     # will contain only those attributes which need to be recreated after state load
     def _init_transient_infra(self):
@@ -154,6 +152,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @override
     def get_state(self):
         state = {
+            "mode": self._mode.value,
             "config": deepcopy(self._config),
             "base_config": deepcopy(self._base_config),
             "session_config": self._session_config,
@@ -162,25 +161,13 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             "session_context": deepcopy(self._session_context),
             "init_args": self._init_args,
         }
+        state.update(self._get_mode_state())
         state.update(capture_rng_state())
         return state
 
     @staticmethod
     def _configuration_from_state(state):
-        if "session_config" in state:
-            return (
-                state["config"],
-                state["base_config"],
-                state["session_config"],
-            )
-
-        init_args = state["init_args"]
-        if init_args["args"]:
-            config = init_args["args"][0]
-        else:
-            config = init_args["kwargs"]["config"]
-
-        return config, state["config"], state["base_config"]
+        return configuration_from_state(state)
 
     @override
     def set_state(self, state):
@@ -189,6 +176,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
                 "Checkpoint uses an unsupported component state schema; "
                 "expected 'components_state'"
             )
+        self._restore_and_validate_mode(state)
         (
             self._config,
             self._base_config,
@@ -199,6 +187,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._init_transient_infra()
         restored_components = SessionComponents(
             aliases=self._config.get("aliases", {}),
+            mode=self._mode,
         )
         restored_components.set_state(state["components_state"])
         self._components = restored_components
@@ -208,6 +197,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     def _prepare_for_state_restore(self, state) -> None:
         self._init_args = state["init_args"]
+        self._restore_and_validate_mode(state)
         (
             self._config,
             self._base_config,
@@ -224,7 +214,24 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @classmethod
     def from_state(cls, session_state):
-        obj = cls.__new__(cls)
+        mode = normalize_session_mode(
+            session_state.get("mode", SessionMode.TRAINING),
+        )
+        if cls is Session:
+            from training_framework.session.analysis import AnalysisSession
+            from training_framework.session.training import TrainingSession
+
+            target_cls = {
+                SessionMode.TRAINING: TrainingSession,
+                SessionMode.ANALYSIS: AnalysisSession,
+            }[mode]
+        else:
+            target_cls = cls
+        if target_cls._session_mode() is not mode:
+            raise ValueError(
+                f"{target_cls.__name__} cannot restore {mode.value}-mode state"
+            )
+        obj = target_cls.__new__(target_cls)
         obj.__setstate__(session_state)
         return obj
 
@@ -232,6 +239,10 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @property
     def full_config(self):
         return deepcopy(self._config)
+
+    @property
+    def mode(self) -> SessionMode:
+        return self._mode
 
     @property
     def session_config(self) -> SessionConfig:
@@ -298,7 +309,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @requires_context
     def _clear_iteration_state(self):
-        self._shared_state.clear()
+        clear_iteration_state(self)
 
     def get_resource(self, key: str):
         return self._components.get_resource(key)
@@ -332,6 +343,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
             steps=self.get_all_steps(),
             max_iterations=self.session_config.max_iterations,
             aliases=self._components.aliases,
+            mode=self._mode,
         )
 
     def print_execution_graph(self, *, file=None) -> None:
@@ -386,83 +398,19 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
     @requires_context
     def __next__(self):
         self._raise_if_new()
-
-        iteration_complete = False
-        try:
-            self._iteration += 1
-            self._phase = SessionPhase.RUNNING
-
-            if self._iteration > self.session_config.max_iterations:
-                self._phase = SessionPhase.FINISHED
-                raise StopIteration
-
-            # Execution order or callbacks A, B, C
-            # A_pre -> B_pre -> C_pre -> A -> B -> C -> C_post -> B_post -> A_post
-
-            # 1. Run pre iteration methods
-            for iter_hook in self._iteration_hooks:
-                if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
-                    self.send_heartbeat(f"Running {iter_hook.id}")
-                    iter_hook.pre_iteration_callback(self)
-
-            # 2. Run iteration components
-            for step in self._sorted_steps:
-                self.send_heartbeat(f"Running {step.id}")
-                step.run(self)
-
-            # 3. Run post iteration methods
-            for iter_hook in reversed(self._iteration_hooks):
-                if self._iteration == 1 or self._iteration == self.session_config.max_iterations or self._iteration % iter_hook.call_every == 0:
-                    self.send_heartbeat(f"Running {iter_hook.id}")
-                    iter_hook.post_iteration_callback(self)
-
-            iteration_complete = True
-        finally:
-            self._clear_iteration_state()
-
-            # rollback in case of failure
-            if not iteration_complete:
-                self._iteration -= 1
-
-        return self._iteration
+        return run_iteration(self)
 
     def _setup_resources(self) -> None:
-        for component in self._sorted_resources:
-            self.send_heartbeat(f"Running setup {component.id}")
-            component.setup(self)
-            self._successfully_setup_resource_names.add(component.name)
+        setup_resources(self)
 
     def _setup_session_hooks(self) -> None:
-        for component in self._session_hooks:
-            component.setup(self)
-            self.send_heartbeat(f"Running setup {component.id}")
-            self._successfully_setup_hook_names.add(component.name)
+        setup_session_hooks(self)
 
     def _teardown_resources(self, *, after_exception: bool = False) -> None:
-        stage_suffix = " after exception" if after_exception else ""
-        for component in reversed(self._sorted_resources):
-            if component.name not in self._successfully_setup_resource_names:
-                continue
-            try:
-                self.send_heartbeat(
-                    f"Running teardown {component.id}{stage_suffix}"
-                )
-                component.teardown(self)
-            except Exception as error:
-                print(f"Error releasing resource '{component.id}': {error}")
+        teardown_resources(self, after_exception=after_exception)
 
     def _teardown_session_hooks(self, *, after_exception: bool = False) -> None:
-        stage_suffix = " after exception" if after_exception else ""
-        for component in reversed(self._session_hooks):
-            if component.name not in self._successfully_setup_hook_names:
-                continue
-            try:
-                self.send_heartbeat(
-                    f"Running teardown {component.id}{stage_suffix}"
-                )
-                component.teardown(self)
-            except Exception as error:
-                print(f"Error running teardown '{component.name}': {error}")
+        teardown_session_hooks(self, after_exception=after_exception)
 
     @context_entry
     def __enter__(self):
@@ -505,15 +453,7 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._dist_manager_err_conn is not None and exc_type is not None:
-            self._dist_manager_err_conn.send({
-                "type": "error",
-                "rank": cast(Any, self.get_resource("ddp")).rank,
-                "pid": os.getpid(),
-                "exception_type": str(exc_type),
-                "message": str(exc_val),
-                "traceback": traceback.format_exc(),
-            })
+        report_worker_exception(self, exc_type, exc_val)
 
         self._teardown_session_hooks()
         self._teardown_resources()
@@ -526,13 +466,6 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
 
         return False
 
-    def update_max_iters(self, new_max_iters):
-        self._session_config = SessionConfig(
-            rng_seed=self.session_config.rng_seed,
-            session_dir=self.session_config.session_dir,
-            max_iterations=new_max_iters
-        )
-
     def set_dist_manager_err_conn(self, err_conn):
         self._dist_manager_err_conn = err_conn
 
@@ -540,12 +473,4 @@ class TrainingSession(Stateful, metaclass=CaptureInitMeta):
         self._heartbeat_interval = interval
 
     def send_heartbeat(self, stage):
-        if self._dist_manager_err_conn is not None:
-            if (time.monotonic() - self._last_heartbeat_time) >= self._heartbeat_interval:
-                self._dist_manager_err_conn.send({
-                    'type': 'heartbeat',
-                    'pid': os.getpid(),
-                    'iteration': self._iteration,
-                    'stage': stage,
-                })
-                self._last_heartbeat_time = time.monotonic()
+        send_worker_heartbeat(self, stage)

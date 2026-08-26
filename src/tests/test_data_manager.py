@@ -8,7 +8,7 @@ import time
 import pytest
 import torch
 
-from training_framework.training_session import TrainingSession
+from training_framework.session import TrainingSession
 
 
 _COMPONENTS_PACKAGE = "tests.integration_training_components"

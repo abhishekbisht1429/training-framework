@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from training_framework.components import SessionHook
-from training_framework.registry import hook
+from training_framework.components import hook
 
 if TYPE_CHECKING:
-    from training_framework.training_session import TrainingSession
+    from training_framework.session.base import Session
 
 
 def write_session_config(session_dir: str, config: dict[str, Any]) -> None:
@@ -19,11 +19,11 @@ def write_session_config(session_dir: str, config: dict[str, Any]) -> None:
 
 @hook("config_dumper")
 class ConfigDumper(SessionHook):
-    def setup(self, session: "TrainingSession") -> None:
+    def setup(self, session: "Session") -> None:
         write_session_config(
             session.session_config.session_dir,
             session.full_config,
         )
 
-    def teardown(self, session: "TrainingSession") -> None:
+    def teardown(self, session: "Session") -> None:
         pass

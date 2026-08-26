@@ -8,12 +8,17 @@ from typing import TYPE_CHECKING, Any
 
 from torch.utils.tensorboard import SummaryWriter
 
-from training_framework.components import LifecycleHook, Resource
-from training_framework.registry import hook, resource, wraps
+from training_framework.components import (
+    LifecycleHook,
+    Resource,
+    hook,
+    resource,
+    wraps,
+)
 from training_framework.util import format_execution_time
 
 if TYPE_CHECKING:
-    from training_framework.training_session import TrainingSession
+    from training_framework.session import Session
 
 
 @hook("logger")
@@ -24,7 +29,7 @@ class Logger(LifecycleHook):
         self.call_every = config["log_every"]
         self._log_file = config.get("log_file", sys.stdout)
 
-    def setup(self, session: TrainingSession) -> Any:
+    def setup(self, session: Session) -> Any:
         if self._log_file is not sys.stdout:
             try:
                 self._log_file = open(self._config["log_file"], "w")
@@ -41,13 +46,13 @@ class Logger(LifecycleHook):
     def print(self, *args, **kwargs):
         print(*args, **kwargs, file=self._log_file)
 
-    def pre_iteration_callback(self, session: TrainingSession) -> None:
+    def pre_iteration_callback(self, session: Session) -> None:
         self.print(
             f"Iteration {session.iteration}/"
             f"{session.session_config.max_iterations}"
         )
 
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(self, session: Session) -> None:
         pass
 
     def __getstate__(self) -> Any:
@@ -70,7 +75,7 @@ class Tensorboard(Resource):
     def summary_writer(self):
         return self._tb_summary_writer
 
-    def setup(self, session: TrainingSession):
+    def setup(self, session: Session):
         logdir = self._config.get(
             "logdir",
             session.session_config.session_dir,
@@ -117,13 +122,13 @@ class Timer(LifecycleHook):
     def setup(self, session: TrainingSession):
         self._session_start = time.time_ns()
 
-    def teardown(self, session: TrainingSession):
+    def teardown(self, session: Session):
         pass
 
-    def pre_iteration_callback(self, session: TrainingSession) -> None:
+    def pre_iteration_callback(self, session: Session) -> None:
         self._iter_start = time.time_ns()
 
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(self, session: Session) -> None:
         iter_end = time.time_ns()
         iter_duration = iter_end - self._iter_start
         elapsed_time = iter_end - self._session_start

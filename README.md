@@ -146,16 +146,16 @@ The package containing decorated components must be importable by both the paren
 Create `my_project/components/demo.py`:
 
 ```python
-from training_framework.training_session import (
+from training_framework.components import (
     LifecycleHook,
     StatefulResource,
     Step,
-    TrainingSession,
     hook,
     requires_resource,
     resource,
     step,
 )
+from training_framework.session import TrainingSession
 
 
 @resource("counter")
@@ -246,8 +246,8 @@ Every top-level key inside a session, other than `base_config`, must match a reg
 Create `my_project/train.py`:
 
 ```python
-from training_framework.configurator import Configurator
-from training_framework.training_engine import TrainingEngine
+from training_framework.engine import Configurator
+from training_framework.engine import TrainingEngine
 
 
 def main() -> None:
@@ -280,7 +280,8 @@ The parent process creates the session and worker configuration. The worker proc
 A resource owns an object or service whose lifecycle follows the session context.
 
 ```python
-from training_framework.training_session import Resource, TrainingSession, resource
+from training_framework.components import Resource, resource
+from training_framework.session import TrainingSession
 
 
 @resource("dataset")
@@ -321,7 +322,8 @@ The first and final iterations therefore invoke every iteration hook, regardless
 A step performs one unit of work during every iteration:
 
 ```python
-from training_framework.training_session import Step, TrainingSession, step
+from training_framework.components import Step, step
+from training_framework.session import TrainingSession
 
 
 @step("train")
@@ -467,7 +469,7 @@ construction interface as the built-in resource.
 Dependencies are declared using registry names:
 
 ```python
-from training_framework.training_session import (
+from training_framework.components import (
     LifecycleHook,
     Step,
     hook,
@@ -651,7 +653,7 @@ python -m my_project.train \
   'sessions[0].logger.log_every=25'
 ```
 
-Overrides are applied only in `--config` mode.
+Overrides are applied in `--config` and `--analysis-config` modes.
 
 ### Resume a checkpoint
 
@@ -668,6 +670,57 @@ To restore a checkpoint and replace its maximum iteration count:
 python -m my_project.train \
   --extend-session ./runs/session_.../checkpoints/<checkpoint-name> 5000
 ```
+
+### Analyze a trained model
+
+Analysis sessions use the same resource, hook, step, and iteration lifecycle,
+but resolve components from an analysis-only registry. Register analysis
+components by passing `mode=SessionMode.ANALYSIS`:
+
+```python
+from training_framework.components import Step, step
+from training_framework.session import SessionMode
+
+
+@step("report", mode=SessionMode.ANALYSIS)
+class ReportStep(Step):
+    def __init__(self, config):
+        self.output_path = config["output_path"]
+
+    def run(self, session):
+        model = session.get_resource("trained_model").model
+        # Analyze the model and write the configured report.
+        ...
+```
+
+For direct execution, construct the concrete analysis subclass:
+
+```python
+from training_framework.session import AnalysisSession
+
+
+session = AnalysisSession(
+    analysis_config,
+    model_checkpoint_path="./runs/session_.../checkpoints/<checkpoint-name>",
+)
+```
+
+Run an analysis configuration against a checkpoint created by the built-in
+training checkpointer:
+
+```bash
+python -m my_project.train \
+  --analysis-config my_project/analysis.yaml \
+  --model-checkpoint ./runs/session_.../checkpoints/<checkpoint-name>
+```
+
+The source training session must expose its model through the `model` resource
+role, directly or through an alias. Analysis defaults to the `trained_model`
+resource and an analysis-specific `logger`; it does not activate the training
+checkpointer. The recovered model is moved to the analysis device and placed in
+evaluation mode, but gradients remain enabled for attribution-style analyses.
+Only load trusted checkpoints because session loading uses unrestricted Python
+deserialization.
 
 ### Process-monitoring options
 
@@ -994,7 +1047,7 @@ For single-process development or unit tests, a session can be driven without `T
 
 ```python
 import yaml
-from training_framework.training_session import TrainingSession
+from training_framework.session import TrainingSession
 
 
 with open("my_project/config.yaml") as config_file:
@@ -1016,9 +1069,10 @@ Direct execution bypasses spawned-worker supervision, error pipes, heartbeat mon
 | Member | Purpose |
 |---|---|
 | `Configurator()` | Parse command-line mode and options |
-| `mode` | `new`, `resume`, or `extend` |
-| `session_configs` | Deep copy of parsed YAML session configurations in new mode |
+| `mode` | `new`, `analysis`, `resume`, or `extend` |
+| `session_configs` | Deep copy of parsed YAML session configurations in new or analysis mode |
 | `checkpoint_path` | Checkpoint path in resume or extend mode |
+| `model_checkpoint_path` | Source training checkpoint in analysis mode |
 | `new_max_iters` | New iteration limit in extend mode |
 | `heartbeat_timeout` | Worker heartbeat deadline |
 | `process_timeout_on_join` | Graceful process-join timeout |
@@ -1031,7 +1085,7 @@ Direct execution bypasses spawned-worker supervision, error pipes, heartbeat mon
 |---|---|
 | `TrainingEngine(configurator)` | Create a process manager from CLI configuration |
 | `start_session()` | Start all worker ranks for the active session; requires engine context |
-| `register_session(config)` | Construct a new parent session and worker wrappers |
+| `register_session(config, *, session_mode=..., model_checkpoint_path=None)` | Construct training or analysis parent sessions and worker wrappers |
 | `load_session(path, session_update_params=None)` | Load a checkpoint and prepare worker wrappers |
 | `request_stop_all()` | Request cooperative shutdown of started workers |
 
@@ -1044,11 +1098,15 @@ with TrainingEngine(Configurator()) as engine:
 
 The engine monitors workers while leaving the context.
 
-### `TrainingSession`
+### `Session`, `TrainingSession`, and `AnalysisSession`
 
 | Member | Purpose |
 |---|---|
-| `TrainingSession(config)` | Import components, construct a session, seed RNGs, and dump configuration |
+| `Session` | Abstract base implementing the shared component and iteration lifecycle |
+| `TrainingSession(config)` | Concrete training session with logger/checkpointer defaults and extension support |
+| `AnalysisSession(config, *, model_checkpoint_path)` | Concrete analysis session with trained-model/logger defaults |
+| `mode` | Active `SessionMode` (`training` or `analysis`) |
+| `AnalysisSession.model_checkpoint_path` | Source training checkpoint used by analysis |
 | `session_config` | Frozen `SessionConfig` containing seed, directory, and max iterations |
 | `iteration` | Current completed/in-progress iteration counter |
 | `device` | Active `torch.device` |
@@ -1069,16 +1127,16 @@ The engine monitors workers while leaving the context.
 | `remove_step(name)` | Remove a step from the session |
 | `get_state()` | Capture serializable session state |
 | `set_state(state)` | Restore state into a session |
-| `TrainingSession.from_state(state)` | Reconstruct a session from captured state |
-| `update_max_iters(value)` | Replace the session's maximum iteration count |
+| `Session.from_state(state)` | Reconstruct and dispatch to the concrete session class recorded in state |
+| `TrainingSession.update_max_iters(value)` | Replace a training session's maximum iteration count |
 
 ### Registration decorators
 
 | API | Purpose |
 |---|---|
-| `@resource(name)` | Register a `Resource` subclass |
-| `@hook(name)` | Register a `Hook` subclass |
-| `@step(name)` | Register a `Step` subclass |
+| `@resource(name, mode=...)` | Register a `Resource` subclass; mode defaults to training |
+| `@hook(name, mode=...)` | Register a `Hook` subclass; mode defaults to training |
+| `@step(name, mode=...)` | Register a `Step` subclass; mode defaults to training |
 | `@requires_resource(name)` | Declare a resource prerequisite |
 | `@requires_hook(name)` | Declare a Hook prerequisite for a Step |
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
@@ -1151,6 +1209,7 @@ training-framework/
 │   │   ├── __init__.py
 │   │   ├── builtin_components/
 │   │   │   ├── __init__.py
+│   │   │   ├── analysis.py
 │   │   │   ├── checkpointing.py
 │   │   │   ├── data.py
 │   │   │   ├── distributed.py

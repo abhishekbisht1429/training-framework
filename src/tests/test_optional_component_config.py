@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from training_framework.configurator import Configurator
-from training_framework.training_engine import load_session_for_worker
-from training_framework.training_session import (
+from training_framework.engine import Configurator
+from training_framework.engine import load_session_for_worker
+from training_framework.components import (
     Hook,
     LifecycleHook,
     Resource,
     Step,
-    TrainingSession,
     hook,
     requires_hook,
     requires_resource,
@@ -18,6 +17,7 @@ from training_framework.training_session import (
     step,
     wraps,
 )
+from training_framework.session import TrainingSession
 
 
 def _base_config(tmp_path):
@@ -26,7 +26,7 @@ def _base_config(tmp_path):
         "sessions_dir": str(tmp_path),
         "max_iterations": 1,
         "device": "cpu",
-        "components_package": "training_framework.builtin_components",
+        "components_package": "training_framework.components.builtin",
         "show-execution-graph": False,
     }
 
