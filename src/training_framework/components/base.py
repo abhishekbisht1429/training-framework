@@ -1,17 +1,33 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from training_framework.util import CaptureInitMeta
+from training_framework.util import CaptureInitMeta, context_entry, context_exit
 
 if TYPE_CHECKING:
     from training_framework.session.base import Session
 
 
-class Component(ABC, metaclass=CaptureInitMeta):
+class ComponentMeta(CaptureInitMeta):
+    """Apply component lifecycle behavior to class-local overrides."""
+
+    def __new__(mcls, name, bases, namespace):
+        cls = super().__new__(mcls, name, bases, namespace)
+
+        if getattr(cls, "_context_managed_lifecycle", False):
+            if "setup" in namespace:
+                cls.setup = context_entry(namespace["setup"])
+            if "teardown" in namespace:
+                cls.teardown = context_exit(namespace["teardown"])
+
+        return cls
+
+
+class Component(ABC, metaclass=ComponentMeta):
     """Common base for every executable training-framework component."""
 
     name: str
     id: str
+    _context_managed_lifecycle = False
 
     @classmethod
     @abstractmethod
@@ -38,6 +54,8 @@ class Stateful(ABC):
 
 class Hook(Component, ABC):
     """Base category for session and iteration hooks."""
+
+    _context_managed_lifecycle = True
 
     @classmethod
     def _component_category_name(cls) -> str:
@@ -71,6 +89,8 @@ class LifecycleHook(SessionHook, IterationHook, ABC):
 
 
 class Resource(Component, ABC):
+
+    _context_managed_lifecycle = True
 
     @classmethod
     def _component_category_name(cls) -> str:
