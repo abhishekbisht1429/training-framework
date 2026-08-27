@@ -20,7 +20,7 @@ from training_framework.components.registry import (
     component_registry,
     topological_sort_of_components,
 )
-from training_framework.session.config import SessionMode, normalize_session_mode
+from training_framework.session.config import TRAINING_SESSION_TYPE, normalize_session_type
 
 
 class SessionComponents:
@@ -31,15 +31,15 @@ class SessionComponents:
             steps: dict[str, Step] | None = None,
             hooks: dict[str, Hook] | None = None,
             aliases: dict[str, str] | None = None,
-            mode: SessionMode | str = SessionMode.TRAINING,
+            session_type: str = TRAINING_SESSION_TYPE,
     ):
-        self.mode = normalize_session_mode(mode)
-        self.registry = component_registry(self.mode)
+        self.session_type = normalize_session_type(session_type)
+        self.registry = component_registry(self.session_type)
         self.components: dict[str, Component] = {}
         self._merge_components(resources, Resource)
         self._merge_components(hooks, Hook)
         self._merge_components(steps, Step)
-        self.aliases = ComponentAliases(aliases, mode=self.mode)
+        self.aliases = ComponentAliases(aliases, session_type=self.session_type)
 
     def get_state(self) -> dict[str, dict[str, Any]]:
         return {
@@ -408,7 +408,7 @@ class SessionComponents:
         return topological_sort_of_components(
             self.aliases,
             components=self.components.values(),
-            mode=self.mode,
+            session_type=self.session_type,
         )
 
     @property

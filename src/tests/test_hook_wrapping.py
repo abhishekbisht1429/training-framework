@@ -17,15 +17,15 @@ from training_framework.components import (
 from training_framework.session import TrainingSession
 
 
-def _base_config(tmp_path, *, max_iterations=1):
+def _session_config(tmp_path, *, max_iterations=1):
     return {
-        "base_config": {
+        "session_config": {
             "rng_seed": 31,
             "sessions_dir": str(tmp_path),
             "max_iterations": max_iterations,
             "device": "cpu",
             "components_package": "training_framework.components.builtin",
-            "show-execution-graph": False,
+            "show_execution_graph": False,
         },
     }
 
@@ -85,7 +85,7 @@ def test_wraps_orders_every_shared_lifecycle_phase(tmp_path):
         def run(self, session):
             events.append("step.run")
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     # Register inner first to prove wrapping, rather than insertion order,
     # determines the outer-to-inner lifecycle.
@@ -150,7 +150,7 @@ def test_wraps_supports_chains_and_multiple_wrappers(tmp_path):
     second = iteration_hook("second", "shared_inner")
     shared_inner = iteration_hook("shared_inner")
 
-    chain_session = TrainingSession(_base_config(tmp_path / "chain"))
+    chain_session = TrainingSession(_session_config(tmp_path / "chain"))
     _remove_default_hooks(chain_session)
     for hook_instance in (inner({}), middle({}), outer({})):
         chain_session.register_hook(hook_instance)
@@ -167,7 +167,7 @@ def test_wraps_supports_chains_and_multiple_wrappers(tmp_path):
         < chain_graph.index("Hook.outer.post_iteration_callback()")
     )
 
-    multiple_session = TrainingSession(_base_config(tmp_path / "multiple"))
+    multiple_session = TrainingSession(_session_config(tmp_path / "multiple"))
     _remove_default_hooks(multiple_session)
     for hook_instance in (first({}), second({}), shared_inner({})):
         multiple_session.register_hook(hook_instance)
@@ -208,7 +208,7 @@ def test_wraps_resolves_session_aliases(tmp_path):
         def post_iteration_callback(self, session):
             pass
 
-    config = _base_config(tmp_path)
+    config = _session_config(tmp_path)
     config.update({
         "aliases": {"inner_role": "actual_inner"},
         "inner_role": {"call_every": 2},
@@ -267,7 +267,7 @@ def test_wraps_rejects_missing_hook_target(tmp_path):
         def post_iteration_callback(self, session):
             pass
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     session.register_hook(Wrapper())
 
@@ -301,7 +301,7 @@ def test_wraps_rejects_non_hook_target(tmp_path):
         def post_iteration_callback(self, session):
             pass
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     session.register_resource(NotAHook())
     session.register_hook(Wrapper())
@@ -338,7 +338,7 @@ def test_wraps_rejects_unconfigured_hook_target(tmp_path):
         def post_iteration_callback(self, session):
             pass
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     session.register_hook(Wrapper({}))
 
@@ -372,7 +372,7 @@ def test_wraps_rejects_hooks_without_a_shared_lifecycle_phase(tmp_path):
         def post_iteration_callback(self, session):
             pass
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     session.register_hook(Wrapper({}))
     session.register_hook(Target({}))
@@ -405,7 +405,7 @@ def test_wraps_allows_wrapper_to_run_less_often_than_wrapped_hook(tmp_path):
         def post_iteration_callback(self, session):
             events.append(("target_post", session.iteration))
 
-    session = TrainingSession(_base_config(tmp_path, max_iterations=8))
+    session = TrainingSession(_session_config(tmp_path, max_iterations=8))
     _remove_default_hooks(session)
     session.register_hook(Wrapper())
     session.register_hook(Target())
@@ -475,7 +475,7 @@ def test_wraps_rejects_incompatible_iteration_cadences(
         def post_iteration_callback(self, session):
             pass
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     session.register_hook(Wrapper({"call_every": wrapper_cadence}))
     session.register_hook(Target({"call_every": target_cadence}))
@@ -496,7 +496,7 @@ def test_wraps_rejects_self_wrapping(tmp_path):
         def post_iteration_callback(self, session):
             pass
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     session.register_hook(SelfWrapper())
 
@@ -527,7 +527,7 @@ def test_wraps_rejects_cycles(tmp_path):
         def post_iteration_callback(self, session):
             pass
 
-    session = TrainingSession(_base_config(tmp_path))
+    session = TrainingSession(_session_config(tmp_path))
     _remove_default_hooks(session)
     session.register_hook(CycleA())
     session.register_hook(CycleB())

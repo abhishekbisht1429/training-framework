@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from training_framework.session import Session
 
 
-@hook("optimizer")
+@hook("optimizer", session_type="training")
 @requires_resource("ddp")
 class OptimizerHook(StatefulLifeCycleHook):
 

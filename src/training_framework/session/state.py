@@ -1,9 +1,12 @@
 import random
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
 import torch
+
+from training_framework.session.config import normalize_session_config
 
 
 def capture_rng_state() -> dict[str, Any]:
@@ -27,18 +30,15 @@ def restore_rng_state(state: dict[str, Any]) -> None:
 def configuration_from_state(
         state: Mapping[str, Any],
 ) -> tuple[dict, dict, Any]:
-    """Decode current and legacy session configuration state."""
-    if "session_config" in state:
-        return (
-            state["config"],
-            state["base_config"],
-            state["session_config"],
+    if "config" not in state or "session_config" not in state:
+        raise ValueError(
+            "Checkpoint uses an unsupported configuration state schema"
         )
-
-    init_args = state["init_args"]
-    if init_args["args"]:
-        config = init_args["args"][0]
-    else:
-        config = init_args["kwargs"]["config"]
-
-    return config, state["config"], state["base_config"]
+    config = deepcopy(state["config"])
+    if "session_config" not in config:
+        raise ValueError(
+            "Checkpoint config does not contain the required 'session_config'"
+        )
+    session_settings = normalize_session_config(config["session_config"])
+    config["session_config"] = deepcopy(session_settings)
+    return config, session_settings, state["session_config"]

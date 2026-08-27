@@ -20,14 +20,14 @@ from training_framework.components import (
 from training_framework.session import TrainingSession
 
 
-def _base_config(tmp_path):
+def _session_config(tmp_path):
     return {
         "rng_seed": 23,
         "sessions_dir": str(tmp_path),
         "max_iterations": 1,
         "device": "cpu",
         "components_package": "training_framework.components.builtin",
-        "show-execution-graph": False,
+        "show_execution_graph": False,
     }
 
 
@@ -49,7 +49,7 @@ def test_components_list_activates_empty_config_and_mapping_wins(tmp_path):
             pass
 
     session = TrainingSession({
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "components": ["optional_config_step"],
         "optional_config_step": {"value": 7},
     })
@@ -146,7 +146,7 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
             pass
 
     session = TrainingSession({
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "components": ["closure_root"],
     })
 
@@ -203,7 +203,7 @@ def test_alias_can_be_activated_only_through_a_dependency(tmp_path):
             pass
 
     session = TrainingSession({
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "aliases": {
             "alias_resource_role": "alias_actual_resource",
             "unused_resource_role": "unused_alias_actual",
@@ -224,7 +224,7 @@ def test_aliased_default_is_activated_with_empty_config(tmp_path):
             self.config = dict(config)
 
     session = TrainingSession({
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "aliases": {"logger": "empty_config_logger"},
     })
 
@@ -241,7 +241,7 @@ def test_aliased_default_is_activated_with_empty_config(tmp_path):
         pytest.param([1], TypeError, "entries must be strings", id="non-string"),
         pytest.param([""], ValueError, "must not be empty", id="empty-name"),
         pytest.param(
-            ["base_config"],
+            ["session_config"],
             ValueError,
             "reserved configuration name",
             id="reserved-name",
@@ -276,7 +276,7 @@ def test_invalid_components_lists_are_rejected(
 
     with pytest.raises(error_type, match=match):
         TrainingSession({
-            "base_config": _base_config(tmp_path),
+            "session_config": _session_config(tmp_path),
             "components": components,
         })
 
@@ -292,7 +292,7 @@ def test_alias_target_cannot_be_selected_directly(tmp_path):
 
     with pytest.raises(ValueError, match="not both"):
         TrainingSession({
-            "base_config": _base_config(tmp_path),
+            "session_config": _session_config(tmp_path),
             "aliases": {"virtual_step": "direct_alias_target"},
             "components": ["direct_alias_target"],
         })
@@ -312,7 +312,7 @@ def test_auto_configured_constructor_failure_requests_mapping(tmp_path):
         match="auto-configured component 'configuration_required_step'.*top-level",
     ):
         TrainingSession({
-            "base_config": _base_config(tmp_path),
+            "session_config": _session_config(tmp_path),
             "components": ["configuration_required_step"],
         })
 
@@ -320,7 +320,7 @@ def test_auto_configured_constructor_failure_requests_mapping(tmp_path):
 def test_configurator_unifies_list_and_mapping_components():
     configurator = Configurator.__new__(Configurator)
     configurator._session_configs = [{
-        "base_config": {"max_iterations": 1},
+        "session_config": {"max_iterations": 1},
         "components": ["empty_component", "configured_component"],
         "configured_component": {"value": 11},
     }]
@@ -395,7 +395,7 @@ def test_secondary_rank_keeps_parallel_component_dependency_closure(tmp_path):
             pass
 
     config = {
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "aliases": {"ddp": "closure_ddp"},
         "components": ["parallel_root", "rank_zero_only"],
         "ddp": {

@@ -1,15 +1,13 @@
 from collections.abc import Mapping
 
 from training_framework.session.base import Session
-from training_framework.session.config import SessionConfig, SessionMode
+from training_framework.session.config import SessionConfig, TRAINING_SESSION_TYPE
+from training_framework.session.registry import register_session_type
 
 
+@register_session_type(TRAINING_SESSION_TYPE)
 class TrainingSession(Session):
     """Training workflow with training-specific defaults and extension support."""
-
-    @classmethod
-    def _session_mode(cls) -> SessionMode:
-        return SessionMode.TRAINING
 
     @classmethod
     def _default_component_configs(cls) -> Mapping[str, Mapping]:

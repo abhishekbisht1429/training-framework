@@ -47,7 +47,7 @@ class _ManagedDataIterator:
 
 @requires_resource("ddp")
 @requires_resource("dataset")
-@resource("data_manager")
+@resource("data_manager", session_type="training")
 class DataManager(StatefulResource):
 
     def __init__(self, config):

@@ -22,14 +22,14 @@ from training_framework.components import (
 from training_framework.session import TrainingSession
 
 
-def _base_config(tmp_path, *, components_package="training_framework.components.builtin"):
+def _session_config(tmp_path, *, components_package="training_framework.components.builtin"):
     return {
         "rng_seed": 17,
         "sessions_dir": str(tmp_path),
         "max_iterations": 2,
         "device": "cpu",
         "components_package": components_package,
-        "show-execution-graph": False,
+        "show_execution_graph": False,
     }
 
 
@@ -76,7 +76,7 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
             pass
 
     config = {
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "aliases": {
             "model": "custom_model",
             "metrics": "custom_metrics",
@@ -135,7 +135,7 @@ def test_alias_replaces_a_default_component_without_duplicate(tmp_path):
             self.destination = config["destination"]
 
     session = TrainingSession({
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "aliases": {"logger": "custom_logger"},
         "logger": {"destination": "memory"},
     })
@@ -156,7 +156,7 @@ def test_aliases_survive_pickle_and_state_round_trips(tmp_path):
             pass
 
     config = {
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "aliases": {"checkpoint_role": "checkpoint_actual"},
         "checkpoint_role": {"label": "restored"},
     }
@@ -180,7 +180,7 @@ def test_aliases_survive_pickle_and_state_round_trips(tmp_path):
 def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
     register_test_components()
     config = {
-        "base_config": _base_config(
+        "session_config": _session_config(
             tmp_path,
             components_package=COMPONENTS_PACKAGE,
         ),
@@ -246,7 +246,7 @@ def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
             id="no-op",
         ),
         pytest.param(
-            {"base_config": "target"},
+            {"session_config": "target"},
             {},
             ValueError,
             "reserved",
@@ -291,7 +291,7 @@ def test_invalid_alias_mappings_are_rejected(
             pass
 
     config = {
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "aliases": aliases,
         **component_configs,
     }
@@ -339,7 +339,7 @@ def test_alias_dependency_must_resolve_to_the_required_category(tmp_path):
 
     with pytest.raises(RuntimeError, match="not registered as a Step"):
         TrainingSession({
-            "base_config": _base_config(tmp_path),
+            "session_config": _session_config(tmp_path),
             "aliases": {"virtual_step": "actual_hook"},
             "virtual_step": {},
             "consumer": {},
@@ -349,7 +349,7 @@ def test_alias_dependency_must_resolve_to_the_required_category(tmp_path):
 def test_configurator_excludes_special_entries_from_component_configs():
     configurator = Configurator.__new__(Configurator)
     configurator._session_configs = [{
-        "base_config": {"max_iterations": 1},
+        "session_config": {"max_iterations": 1},
         "aliases": {"role": "target"},
         "components": ["no_config"],
         "role": {"value": 3},

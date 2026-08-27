@@ -15,16 +15,17 @@ from training_framework.components import (
     Resource,
     Stateful,
     Step,
+    format_execution_graph,
 )
-from training_framework.components import format_execution_graph
 from training_framework.session.components import SessionComponents
 from training_framework.session.config import (
     SessionConfig,
-    SessionMode,
     SessionPhase,
-    normalize_session_mode,
+    normalize_session_config,
+    normalize_session_type,
 )
 from training_framework.session.io import write_session_config
+from training_framework.session.registry import session_class_for_type
 from training_framework.session.state import (
     capture_rng_state,
     configuration_from_state,
@@ -48,25 +49,39 @@ from training_framework.util import (
     requires_context,
 )
 
+
 class Session(Stateful, metaclass=CaptureInitMeta):
+    _registered_session_type: str | None = None
 
     def __init__(self, config: dict):
-        self._mode = self._session_mode()
-        self._config = config
-        self._base_config = config["base_config"]
-        self._base_config.setdefault("show-execution-graph", True)
+        registered_type = type(self)._registered_session_type
+        if registered_type is None:
+            raise TypeError(
+                f"{type(self).__name__} is not registered with "
+                "@register_session_type"
+            )
+        if not isinstance(config, Mapping):
+            raise TypeError("config must be a mapping")
+        if "session_config" not in config:
+            raise ValueError("config must contain 'session_config'")
+
+        self._session_type = registered_type
+        self._config = deepcopy(dict(config))
+        self._session_settings = normalize_session_config(
+            self._config["session_config"],
+        )
+        self._config["session_config"] = deepcopy(self._session_settings)
 
         session_dir = os.path.join(
-            self._base_config['sessions_dir'],
-            f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            self._session_settings["sessions_dir"],
+            f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         )
         self._session_config = SessionConfig(
-            rng_seed=self._base_config['rng_seed'],
+            rng_seed=self._session_settings["rng_seed"],
             session_dir=session_dir,
-            max_iterations=self._base_config['max_iterations'],
+            max_iterations=self._session_settings["max_iterations"],
         )
 
-        # session essentials
         self._iteration = 0
 
         torch.manual_seed(self._session_config.rng_seed)
@@ -74,20 +89,13 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         torch.cuda.manual_seed(self._session_config.rng_seed)
         np.random.seed(self._session_config.rng_seed)
 
-        # shared session context
         self._session_context: dict[str, Any] = {}
 
         self._init_transient_infra()
         self._set_component_collections()
 
         self._phase = SessionPhase.NEW
-
         self._register_components()
-
-    @classmethod
-    @abstractmethod
-    def _session_mode(cls) -> SessionMode:
-        raise NotImplementedError
 
     @classmethod
     @abstractmethod
@@ -103,7 +111,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             aliases = self._config.get("aliases", {})
         self._components = SessionComponents(
             aliases=aliases,
-            mode=self._mode,
+            session_type=self._session_type,
         )
 
     def _register_components(self) -> None:
@@ -112,35 +120,34 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             default_configs=self._default_component_configs(),
         )
 
-    def _get_mode_state(self) -> dict[str, Any]:
+    def _get_session_type_state(self) -> dict[str, Any]:
         return {}
 
-    def _restore_mode_state(self, state: Mapping[str, Any]) -> None:
+    def _restore_session_type_state(self, state: Mapping[str, Any]) -> None:
         pass
 
-    def _restore_and_validate_mode(self, state: Mapping[str, Any]) -> None:
-        stored_mode = normalize_session_mode(
-            state.get("mode", SessionMode.TRAINING),
-        )
-        expected_mode = self._session_mode()
-        if stored_mode is not expected_mode:
+    def _restore_and_validate_session_type(
+            self,
+            state: Mapping[str, Any],
+    ) -> None:
+        if "session_type" not in state:
+            raise ValueError(
+                "Checkpoint does not contain the required 'session_type'"
+            )
+        stored_session_type = normalize_session_type(state["session_type"])
+        expected_session_type = type(self)._registered_session_type
+        if stored_session_type != expected_session_type:
             raise ValueError(
                 f"{type(self).__name__} cannot restore "
-                f"{stored_mode.value}-mode state"
+                f"{stored_session_type} session-type state"
             )
-        self._mode = stored_mode
-        self._restore_mode_state(state)
+        self._session_type = stored_session_type
+        self._restore_session_type_state(state)
 
-    # will contain only those attributes which need to be recreated after state load
     def _init_transient_infra(self):
-        # TODO: should we use default device if requested device is not available ?
         self._device = self._check_and_get_device()
-
-        # shared state for a single iteration
         self._shared_state: dict[str, Any] = {}
-
-        # import all component modules
-        import_all_modules(self._base_config['components_package'])
+        import_all_modules(self._session_settings["components_package"])
 
         self._successfully_setup_resource_names = set()
         self._successfully_setup_hook_names = set()
@@ -152,16 +159,15 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     @override
     def get_state(self):
         state = {
-            "mode": self._mode.value,
+            "session_type": self._session_type,
             "config": deepcopy(self._config),
-            "base_config": deepcopy(self._base_config),
             "session_config": self._session_config,
             "iteration": self._iteration,
             "components_state": self._components.get_state(),
             "session_context": deepcopy(self._session_context),
             "init_args": self._init_args,
         }
-        state.update(self._get_mode_state())
+        state.update(self._get_session_type_state())
         state.update(capture_rng_state())
         return state
 
@@ -176,10 +182,10 @@ class Session(Stateful, metaclass=CaptureInitMeta):
                 "Checkpoint uses an unsupported component state schema; "
                 "expected 'components_state'"
             )
-        self._restore_and_validate_mode(state)
+        self._restore_and_validate_session_type(state)
         (
             self._config,
-            self._base_config,
+            self._session_settings,
             self._session_config,
         ) = self._configuration_from_state(state)
         self._iteration = state["iteration"]
@@ -187,7 +193,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._init_transient_infra()
         restored_components = SessionComponents(
             aliases=self._config.get("aliases", {}),
-            mode=self._mode,
+            session_type=self._session_type,
         )
         restored_components.set_state(state["components_state"])
         self._components = restored_components
@@ -197,15 +203,15 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     def _prepare_for_state_restore(self, state) -> None:
         self._init_args = state["init_args"]
-        self._restore_and_validate_mode(state)
+        self._restore_and_validate_session_type(state)
         (
             self._config,
-            self._base_config,
+            self._session_settings,
             self._session_config,
         ) = self._configuration_from_state(state)
         self._session_context = {}
         self._phase = SessionPhase.NEW
-        import_all_modules(self._base_config["components_package"])
+        import_all_modules(self._session_settings["components_package"])
 
     @override
     def __setstate__(self, state):
@@ -214,35 +220,37 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     @classmethod
     def from_state(cls, session_state):
-        mode = normalize_session_mode(
-            session_state.get("mode", SessionMode.TRAINING),
-        )
-        if cls is Session:
-            from training_framework.session.analysis import AnalysisSession
-            from training_framework.session.training import TrainingSession
-
-            target_cls = {
-                SessionMode.TRAINING: TrainingSession,
-                SessionMode.ANALYSIS: AnalysisSession,
-            }[mode]
-        else:
-            target_cls = cls
-        if target_cls._session_mode() is not mode:
+        if "session_type" not in session_state:
             raise ValueError(
-                f"{target_cls.__name__} cannot restore {mode.value}-mode state"
+                "Checkpoint does not contain the required 'session_type'"
+            )
+        session_type = normalize_session_type(session_state["session_type"])
+        target_cls = (
+            session_class_for_type(session_type)
+            if cls is Session
+            else cls
+        )
+        if target_cls._registered_session_type != session_type:
+            raise ValueError(
+                f"{target_cls.__name__} cannot restore "
+                f"{session_type} session-type state"
             )
         obj = target_cls.__new__(target_cls)
         obj.__setstate__(session_state)
         return obj
 
-    # --------------------------- Public properties----------------------
     @property
     def full_config(self):
-        return deepcopy(self._config)
+        config = deepcopy(self._config)
+        config["session_type"] = self._session_type
+        session_kwargs = deepcopy(self._init_args.get("kwargs", {}))
+        if session_kwargs:
+            config["session_kwargs"] = session_kwargs
+        return config
 
     @property
-    def mode(self) -> SessionMode:
-        return self._mode
+    def session_type(self) -> str:
+        return self._session_type
 
     @property
     def session_config(self) -> SessionConfig:
@@ -343,7 +351,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             steps=self.get_all_steps(),
             max_iterations=self.session_config.max_iterations,
             aliases=self._components.aliases,
-            mode=self._mode,
+            session_type=self._session_type,
         )
 
     def print_execution_graph(self, *, file=None) -> None:
@@ -368,10 +376,10 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._components.unregister_resource(resource_name)
 
     def _check_and_get_device(self):
-        if 'device' not in self._base_config:
+        if 'device' not in self._session_settings:
             return torch.device('cpu')
-        if self._base_config['device'].startswith('cuda') and torch.cuda.is_available():
-            return torch.device(self._base_config['device'])
+        if self._session_settings['device'].startswith('cuda') and torch.cuda.is_available():
+            return torch.device(self._session_settings['device'])
         else:
             return torch.device('cpu')
 
@@ -417,7 +425,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._raise_if_finished()
 
         ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
-        if self._base_config.get("show-execution-graph", True):
+        if self._session_settings.get("show_execution_graph", True):
             # print only for rank zero
             if ddp_resource is None or cast(Any, ddp_resource).rank == 0:
                 self.print_execution_graph()

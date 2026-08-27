@@ -1,42 +1,54 @@
+from collections import ChainMap
 from collections.abc import Iterable, Mapping
 
-from training_framework.components.base import (
-    Component,
-    Hook,
-    Resource,
-    Step,
-)
+from training_framework.components.base import Component, Hook, Resource, Step
+from training_framework.components.config import RESERVED_CONFIG_NAMES
 from training_framework.components.graph import (
     render_execution_graph,
     topological_sort_components,
 )
-from training_framework.components.config import RESERVED_CONFIG_NAMES
 
 
 _COMPONENT_TYPES = (Resource, Hook, Step)
-TRAINING_MODE = "training"
-ANALYSIS_MODE = "analysis"
-_COMPONENT_MODES = (TRAINING_MODE, ANALYSIS_MODE)
-_COMPONENT_REGISTRY: dict[str, type[Component]] = {}
-_ANALYSIS_COMPONENT_REGISTRY: dict[str, type[Component]] = {}
-_COMPONENT_REGISTRIES: dict[str, dict[str, type[Component]]] = {
-    TRAINING_MODE: _COMPONENT_REGISTRY,
-    ANALYSIS_MODE: _ANALYSIS_COMPONENT_REGISTRY,
-}
+TRAINING_SESSION_TYPE = "training"
+ANALYSIS_SESSION_TYPE = "analysis"
+_SHARED_COMPONENT_REGISTRY: dict[str, type[Component]] = {}
+_SESSION_COMPONENT_REGISTRIES: dict[str, dict[str, type[Component]]] = {}
+_COMPONENT_REGISTRY = _SHARED_COMPONENT_REGISTRY
+_ANALYSIS_COMPONENT_REGISTRY = _SESSION_COMPONENT_REGISTRIES.setdefault(
+    ANALYSIS_SESSION_TYPE,
+    {},
+)
 
 
-def normalize_component_mode(mode=TRAINING_MODE) -> str:
-    normalized = getattr(mode, "value", mode)
-    if normalized not in _COMPONENT_MODES:
-        allowed = ", ".join(_COMPONENT_MODES)
-        raise ValueError(
-            f"Invalid component mode {mode!r}; expected one of: {allowed}"
-        )
+def _normalize_component_session_type(session_type: str | None) -> str | None:
+    if session_type is None:
+        return None
+    if not isinstance(session_type, str):
+        raise TypeError("session_type must be a string or None")
+    normalized = session_type.strip()
+    if not normalized:
+        raise ValueError("session_type must not be empty")
     return normalized
 
 
-def component_registry(mode=TRAINING_MODE) -> dict[str, type[Component]]:
-    return _COMPONENT_REGISTRIES[normalize_component_mode(mode)]
+def _registration_registry(
+        session_type: str | None,
+) -> dict[str, type[Component]]:
+    normalized = _normalize_component_session_type(session_type)
+    if normalized is None:
+        return _SHARED_COMPONENT_REGISTRY
+    return _SESSION_COMPONENT_REGISTRIES.setdefault(normalized, {})
+
+
+def component_registry(
+        session_type: str | None = None,
+) -> Mapping[str, type[Component]]:
+    normalized = _normalize_component_session_type(session_type)
+    if normalized is None:
+        return _SHARED_COMPONENT_REGISTRY
+    scoped = _SESSION_COMPONENT_REGISTRIES.setdefault(normalized, {})
+    return ChainMap(scoped, _SHARED_COMPONENT_REGISTRY)
 
 
 def _component_type(component: Component | type[Component]) -> type[Component]:
@@ -62,9 +74,9 @@ def _component(
         *,
         expected_type=None,
         overwrite=False,
-        mode=TRAINING_MODE,
+        session_type: str | None = None,
 ):
-    registry = component_registry(mode)
+    registry = _registration_registry(session_type)
 
     def wrapper(cls):
         if not isinstance(cls, type) or not issubclass(cls, Component):
@@ -84,7 +96,11 @@ def _component(
         if name in registry:
             existing_type = _component_type(registry[name])
             if not overwrite:
-                raise ValueError(f"Component with name '{name}' already registered")
+                scope = session_type or "shared"
+                raise ValueError(
+                    f"Component with name '{name}' already registered in "
+                    f"'{scope}' scope"
+                )
             if existing_type is not registered_type:
                 raise ValueError(
                     f"Cannot overwrite {existing_type.__name__} '{name}' with "
@@ -103,13 +119,13 @@ def hook(
         name: str,
         overwrite=False,
         *,
-        mode=TRAINING_MODE,
+        session_type: str | None = None,
 ):
     return _component(
         name,
         expected_type=Hook,
         overwrite=overwrite,
-        mode=mode,
+        session_type=session_type,
     )
 
 
@@ -117,13 +133,13 @@ def resource(
         name: str,
         overwrite=False,
         *,
-        mode=TRAINING_MODE,
+        session_type: str | None = None,
 ):
     return _component(
         name,
         expected_type=Resource,
         overwrite=overwrite,
-        mode=mode,
+        session_type=session_type,
     )
 
 
@@ -131,14 +147,15 @@ def step(
         name: str,
         overwrite=False,
         *,
-        mode=TRAINING_MODE,
+        session_type: str | None = None,
 ):
     return _component(
         name,
         expected_type=Step,
         overwrite=overwrite,
-        mode=mode,
+        session_type=session_type,
     )
+
 
 class ComponentAliases:
     """Resolve session-scoped component roles to registered implementations."""
@@ -147,20 +164,22 @@ class ComponentAliases:
             self,
             aliases: Mapping[str, str] | None = None,
             *,
-            mode=TRAINING_MODE,
+            session_type: str | None = None,
     ):
         if aliases is None:
             aliases = {}
         if not isinstance(aliases, Mapping):
             raise TypeError("'aliases' must be a mapping of strings to strings")
 
-        self._mode = normalize_component_mode(mode)
-        self._registry = component_registry(self._mode)
+        normalized = _normalize_component_session_type(session_type)
+        self._session_type = normalized
+        self._registry = component_registry(normalized)
         self._aliases = dict(aliases)
         self._validate()
 
     def _validate(self) -> None:
         targets = {}
+        reserved = ", ".join(sorted(RESERVED_CONFIG_NAMES))
         for expected_name, actual_name in self._aliases.items():
             if not isinstance(expected_name, str) or not isinstance(actual_name, str):
                 raise TypeError("'aliases' must be a mapping of strings to strings")
@@ -170,9 +189,7 @@ class ComponentAliases:
                     expected_name in RESERVED_CONFIG_NAMES
                     or actual_name in RESERVED_CONFIG_NAMES
             ):
-                raise ValueError(
-                    "'aliases', 'base_config', and 'components' are reserved component names"
-                )
+                raise ValueError(f"{reserved} are reserved component names")
             if expected_name == actual_name:
                 raise ValueError(
                     f"Alias '{expected_name}' must refer to a different component"
@@ -225,8 +242,8 @@ class ComponentAliases:
         return dict(self._aliases)
 
     @property
-    def mode(self) -> str:
-        return self._mode
+    def session_type(self) -> str | None:
+        return self._session_type
 
     def __bool__(self) -> bool:
         return bool(self._aliases)
@@ -235,11 +252,16 @@ class ComponentAliases:
 def _alias_resolver(
         aliases: ComponentAliases | Mapping[str, str] | None,
         *,
-        mode=TRAINING_MODE,
+        session_type: str | None = None,
 ) -> ComponentAliases:
     if isinstance(aliases, ComponentAliases):
+        if aliases.session_type != session_type:
+            raise ValueError(
+                f"ComponentAliases uses session_type '{aliases.session_type}', "
+                f"not '{session_type}'"
+            )
         return aliases
-    return ComponentAliases(aliases, mode=mode)
+    return ComponentAliases(aliases, session_type=session_type)
 
 
 def requires_step(step_name: str):
@@ -249,14 +271,10 @@ def requires_step(step_name: str):
                 f"@requires_step can only be applied to Step subclasses. "
                 f"'{cls.__name__}' is not a Step."
             )
-
         if "required_steps" not in cls.__dict__:
             cls.required_steps = []
-
-        requirements: list[str] = cls.required_steps
-        requirements.append(step_name)
+        cls.required_steps.append(step_name)
         return cls
-
     return wrapper
 
 
@@ -267,14 +285,10 @@ def requires_hook(hook_name: str):
                 f"@requires_hook can only be applied to Step subclasses. "
                 f"'{cls.__name__}' is not a Step."
             )
-
         if "required_hooks" not in cls.__dict__:
             cls.required_hooks = list(getattr(cls, "required_hooks", ()))
-
-        requirements: list[str] = cls.required_hooks
-        requirements.append(hook_name)
+        cls.required_hooks.append(hook_name)
         return cls
-
     return wrapper
 
 
@@ -285,18 +299,14 @@ def wraps(hook_name: str):
                 f"@wraps can only be applied to Hook subclasses. "
                 f"'{cls.__name__}' is not a Hook."
             )
-
         if "wrapped_hooks" not in cls.__dict__:
             cls.wrapped_hooks = list(getattr(cls, "wrapped_hooks", ()))
-
-        wrapped_hooks: list[str] = cls.wrapped_hooks
-        if hook_name in wrapped_hooks:
+        if hook_name in cls.wrapped_hooks:
             raise ValueError(
                 f"Hook '{cls.__name__}' already wraps '{hook_name}'"
             )
-        wrapped_hooks.append(hook_name)
+        cls.wrapped_hooks.append(hook_name)
         return cls
-
     return wrapper
 
 
@@ -307,15 +317,12 @@ def requires_resource(resource_name: str):
                 "@requires_resource can only be applied to Step, Hook, "
                 f"or Resource subclasses. '{cls.__name__}' is neither."
             )
-
         if "required_resources" not in cls.__dict__:
             cls.required_resources = list(
                 getattr(cls, "required_resources", ())
             )
-
         cls.required_resources.append(resource_name)
         return cls
-
     return wrapper
 
 
@@ -323,16 +330,20 @@ def topological_sort_of_components(
         aliases: ComponentAliases | Mapping[str, str] | None = None,
         *,
         components: Iterable | None = None,
-        mode=TRAINING_MODE,
+        session_type: str | None = None,
 ) -> dict[str, int]:
-    session_mode = normalize_component_mode(mode)
-    alias_resolver = _alias_resolver(aliases, mode=session_mode)
-    registry = component_registry(alias_resolver.mode)
+    normalized = _normalize_component_session_type(session_type)
+    alias_resolver = _alias_resolver(
+        aliases,
+        session_type=normalized,
+    )
+    registry = component_registry(normalized)
     return topological_sort_components(
         alias_resolver=alias_resolver,
         registry=registry,
         components=components,
     )
+
 
 def format_execution_graph(
         *,
@@ -341,18 +352,22 @@ def format_execution_graph(
         steps: Iterable[Step],
         max_iterations: int,
         aliases: ComponentAliases | Mapping[str, str] | None = None,
-        mode=TRAINING_MODE,
+        session_type: str = TRAINING_SESSION_TYPE,
 ) -> str:
     """Return the session's component lifecycle as a readable execution graph."""
-    session_mode = normalize_component_mode(mode)
-    alias_resolver = _alias_resolver(aliases, mode=session_mode)
+    normalized = _normalize_component_session_type(session_type)
+    assert normalized is not None
+    alias_resolver = _alias_resolver(
+        aliases,
+        session_type=normalized,
+    )
     resources = list(resources)
     hooks = list(hooks)
     steps = list(steps)
     order = topological_sort_of_components(
         alias_resolver,
         components=resources + hooks + steps,
-        mode=session_mode,
+        session_type=normalized,
     )
     return render_execution_graph(
         resources=resources,
@@ -360,6 +375,6 @@ def format_execution_graph(
         steps=steps,
         max_iterations=max_iterations,
         alias_resolver=alias_resolver,
-        session_mode=session_mode,
+        session_type=normalized,
         order=order,
     )

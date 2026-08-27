@@ -38,7 +38,7 @@ def test_session_context_is_shared_between_hooks(tmp_path):
             self._context.setdefault("events", []).append("reader_teardown")
 
     config = {
-        "base_config": {
+        "session_config": {
             "rng_seed": 123,
             "sessions_dir": str(tmp_path),
             "max_iterations": 1,
@@ -77,7 +77,7 @@ def test_session_context_is_saved_restored_and_cleared(tmp_path):
             pass
 
     config = {
-        "base_config": {
+        "session_config": {
             "rng_seed": 123,
             "sessions_dir": str(tmp_path),
             "max_iterations": 1,

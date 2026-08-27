@@ -20,7 +20,7 @@ from tests.test_utils import (
 class _ExtendConfig:
     checkpoint_path: str
     new_max_iters: int
-    mode: str = "extend"
+    operation: str = "extend"
     process_timeout_on_join: float = 5.0
     session_configs: tuple[dict[str, Any], ...] = ()
     heartbeat_timeout: float = 10.0

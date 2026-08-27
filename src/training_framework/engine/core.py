@@ -1,5 +1,6 @@
 import collections
-import os
+from collections.abc import Mapping
+from copy import deepcopy
 
 from training_framework.components.builtin import Checkpointer
 from training_framework.engine.config import Configurator
@@ -10,11 +11,10 @@ from training_framework.engine.supervision import (
 )
 from training_framework.engine.worker import SessionProcessWrapper
 from training_framework.session import (
-    AnalysisSession,
+    TRAINING_SESSION_TYPE,
     Session,
-    SessionMode,
-    TrainingSession,
-    normalize_session_mode,
+    normalize_session_type,
+    session_class_for_type,
 )
 from training_framework.util import context_entry, context_exit, requires_context
 
@@ -25,7 +25,11 @@ class TrainingEngine:
         self._timeout_on_interrupt = configurator.process_timeout_on_join
         self._session_process_wrappers: list[SessionProcessWrapper] = []
 
-    def load_session(self, checkpoint_path: str, session_update_params: dict | None=None):
+    def load_session(
+            self,
+            checkpoint_path: str,
+            session_update_params: dict | None = None,
+    ):
         session = Checkpointer.load_checkpoint(checkpoint_path)
 
         if session.has_resource("ddp"):
@@ -38,7 +42,7 @@ class TrainingEngine:
                 session=session,
                 rank=rank,
                 session_update_params=session_update_params,
-                heartbeat_timeout=self._configurator.heartbeat_timeout
+                heartbeat_timeout=self._configurator.heartbeat_timeout,
             )
             for rank in range(world_size)
         ]
@@ -47,15 +51,20 @@ class TrainingEngine:
             self,
             config: dict,
             *,
-            session_mode: SessionMode | str = SessionMode.TRAINING,
-            model_checkpoint_path: str | os.PathLike[str] | None = None,
+            session_type: str = TRAINING_SESSION_TYPE,
+            session_kwargs: Mapping | None = None,
     ) -> None:
         if not isinstance(config, collections.abc.Mapping):
             raise TypeError(
                 f"config must be a mapping, got {type(config).__name__}"
             )
+        if session_kwargs is None:
+            session_kwargs = {}
+        if not isinstance(session_kwargs, Mapping):
+            raise TypeError("session_kwargs must be a mapping")
 
-        mode = normalize_session_mode(session_mode)
+        normalized_type = normalize_session_type(session_type)
+        session_class = session_class_for_type(normalized_type)
 
         if "ddp" in config:
             try:
@@ -74,22 +83,39 @@ class TrainingEngine:
         ):
             raise ValueError("ddp.world_size must be a positive integer")
 
-        def create_session() -> Session:
-            if mode is SessionMode.TRAINING:
-                return TrainingSession(config)
-            return AnalysisSession(
-                config,
-                model_checkpoint_path=model_checkpoint_path,
-            )
-
-        self._session_process_wrappers = [
+        wrappers = [
             SessionProcessWrapper(
-                session=create_session(),
+                session=session_class(
+                    deepcopy(dict(config)),
+                    **deepcopy(dict(session_kwargs)),
+                ),
                 rank=rank,
-                heartbeat_timeout=self._configurator.heartbeat_timeout
+                heartbeat_timeout=self._configurator.heartbeat_timeout,
             )
             for rank in range(world_size)
         ]
+        self._session_process_wrappers.extend(wrappers)
+
+    @staticmethod
+    def _split_session_definition(
+            definition: Mapping,
+    ) -> tuple[dict, str, dict]:
+        if not isinstance(definition, Mapping):
+            raise TypeError("Each sessions entry must be a mapping")
+
+        session_type = normalize_session_type(
+            definition.get("session_type", TRAINING_SESSION_TYPE),
+        )
+        session_kwargs = definition.get("session_kwargs", {})
+        if not isinstance(session_kwargs, Mapping):
+            raise TypeError("'session_kwargs' must be a mapping")
+
+        config = {
+            key: deepcopy(value)
+            for key, value in definition.items()
+            if key not in {"session_type", "session_kwargs"}
+        }
+        return config, session_type, deepcopy(dict(session_kwargs))
 
     @requires_context
     def start_session(self) -> None:
@@ -110,7 +136,11 @@ class TrainingEngine:
             if wrapper.started:
                 wrapper.request_stop()
 
-    def _join_or_terminate(self, wrappers: list[SessionProcessWrapper] | None = None, timeout: float=5.0) -> None:
+    def _join_or_terminate(
+            self,
+            wrappers: list[SessionProcessWrapper] | None = None,
+            timeout: float = 5.0,
+    ) -> None:
         selected = (
             wrappers
             if wrappers is not None
@@ -125,31 +155,32 @@ class TrainingEngine:
     def _close_resources(self) -> None:
         for wrapper in self._session_process_wrappers:
             process = wrapper.process
-
             if wrapper.started and not process.is_alive():
                 process.close()
 
     @context_entry
     def __enter__(self):
-        if self._configurator.mode == "new":
-            for session_config in self._configurator.session_configs:
-                self.register_session(session_config)
-        elif self._configurator.mode == "extend":
+        if self._configurator.operation == "new":
+            for definition in self._configurator.session_configs:
+                config, session_type, session_kwargs = (
+                    self._split_session_definition(definition)
+                )
+                self.register_session(
+                    config,
+                    session_type=session_type,
+                    session_kwargs=session_kwargs,
+                )
+        elif self._configurator.operation == "extend":
             self.load_session(
                 checkpoint_path=self._configurator.checkpoint_path,
-                session_update_params={"max_iterations": self._configurator.new_max_iters}
+                session_update_params={
+                    "max_iterations": self._configurator.new_max_iters,
+                },
             )
-        elif self._configurator.mode == "resume":
+        elif self._configurator.operation == "resume":
             self.load_session(self._configurator.checkpoint_path)
-        elif self._configurator.mode == "analysis":
-            for session_config in self._configurator.session_configs:
-                self.register_session(
-                    session_config,
-                    session_mode=SessionMode.ANALYSIS,
-                    model_checkpoint_path=self._configurator.model_checkpoint_path,
-                )
         else:
-            raise RuntimeError("Invalid mode!")
+            raise RuntimeError("Invalid operation!")
 
         return self
 
@@ -173,7 +204,6 @@ class TrainingEngine:
             if exc_type is None:
                 self._monitor_processes()
             else:
-                # The parent failed, so stop all workers.
                 self.request_stop_all()
                 self._join_or_terminate(
                     self._session_process_wrappers,
@@ -181,6 +211,4 @@ class TrainingEngine:
                 )
         finally:
             self._close_resources()
-
-        # Never suppress an exception from the with block.
         return False

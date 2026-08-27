@@ -1,7 +1,13 @@
 from collections.abc import Mapping
 
 
-RESERVED_CONFIG_NAMES = frozenset({"aliases", "base_config", "components"})
+RESERVED_CONFIG_NAMES = frozenset({
+    "aliases",
+    "components",
+    "session_config",
+    "session_kwargs",
+    "session_type",
+})
 
 
 def selected_component_names(config: Mapping) -> list[str]:

@@ -45,7 +45,7 @@ def session_config(
         train_config["event_path"] = str(event_path)
 
     config: dict[str, Any] = {
-        "base_config": {
+        "session_config": {
             "rng_seed": seed,
             "sessions_dir": str(root),
             "max_iterations": max_iterations,
@@ -76,7 +76,7 @@ def iteration_events(path: Path) -> list[dict[str, Any]]:
 
 def make_config(tmp_path, max_iterations=2, seed=123):
     return {
-        "base_config": {
+        "session_config": {
             "rng_seed": seed,
             "sessions_dir": str(tmp_path),
             "max_iterations": max_iterations,

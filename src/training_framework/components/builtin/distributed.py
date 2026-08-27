@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 @requires_resource("model")
-@resource("ddp")
+@resource("ddp", session_type="training")
 class DDPResource(Resource):
 
     def __init__(self, config: dict, rank: int = -1):

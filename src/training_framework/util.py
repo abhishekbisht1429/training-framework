@@ -62,13 +62,23 @@ class CaptureInitMeta(ABCMeta):
 
         @wraps(init)
         def wrapped_init(self, *args, **kwargs):
-            # Store the exact call shape for later reconstruction.
-            self._init_args = {
-                "args": args,
-                "kwargs": kwargs,
-            }
+            outermost_call = not getattr(
+                self,
+                "_capture_init_args_active",
+                False,
+            )
+            if outermost_call:
+                self._init_args = {
+                    "args": args,
+                    "kwargs": kwargs,
+                }
+                self._capture_init_args_active = True
 
-            return init(self, *args, **kwargs)
+            try:
+                return init(self, *args, **kwargs)
+            finally:
+                if outermost_call:
+                    del self._capture_init_args_active
 
         wrapped_init._captures_init_args = True
         cls.__init__ = wrapped_init

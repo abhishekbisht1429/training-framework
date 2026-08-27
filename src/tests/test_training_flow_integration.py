@@ -42,13 +42,13 @@ def test_full_spawned_ddp_training_flow(tmp_path, monkeypatch):
     _register_integration_components()
     output_dir = tmp_path / "rank-results"
     session_config = {
-        "base_config": {
+        "session_config": {
             "rng_seed": 17,
             "sessions_dir": str(tmp_path / "sessions"),
             "max_iterations": 3,
             "device": "cpu",
             "components_package": _COMPONENTS_PACKAGE,
-            "show-execution-graph": False,
+            "show_execution_graph": False,
         },
         "aliases": {
             "model": "integration_ddp_model",

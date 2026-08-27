@@ -18,7 +18,7 @@ from training_framework.components import (
 from training_framework.util import format_execution_time
 
 if TYPE_CHECKING:
-    from training_framework.session import Session
+    from training_framework.session import Session, TrainingSession
 
 
 @hook("logger")
@@ -111,7 +111,7 @@ class Tensorboard(Resource):
 
 
 @wraps("optimizer")
-@hook("timer")
+@hook("timer", session_type="training")
 class Timer(LifecycleHook):
 
     def __init__(self, config) -> None:
