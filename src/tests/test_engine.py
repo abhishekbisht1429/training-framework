@@ -23,7 +23,7 @@ from tests.test_utils import (
 
 @dataclass
 class _EngineConfig:
-    operation: str
+    mode: str
     process_timeout_on_join: float = 5.0
     session_configs: tuple[dict[str, Any], ...] = ()
     checkpoint_path: str | None = None
@@ -118,7 +118,7 @@ def test_engine_surfaces_a_real_spawned_worker_failure(tmp_path):
             "message": "failure raised inside spawned worker",
         },
     }
-    engine_config = _EngineConfig(operation="new", session_configs=(config,))
+    engine_config = _EngineConfig(mode="new", session_configs=(config,))
 
     with pytest.raises(
         RuntimeError,

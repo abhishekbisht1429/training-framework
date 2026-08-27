@@ -124,7 +124,7 @@ def test_engine_dispatches_mixed_session_types_and_constructor_kwargs(
         Wrapper,
     )
     configurator = SimpleNamespace(
-        operation="new",
+        mode="new",
         session_configs=[
             _config(tmp_path, "training"),
             {

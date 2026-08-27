@@ -160,7 +160,7 @@ class TrainingEngine:
 
     @context_entry
     def __enter__(self):
-        if self._configurator.operation == "new":
+        if self._configurator.mode == "new":
             for definition in self._configurator.session_configs:
                 config, session_type, session_kwargs = (
                     self._split_session_definition(definition)
@@ -170,14 +170,14 @@ class TrainingEngine:
                     session_type=session_type,
                     session_kwargs=session_kwargs,
                 )
-        elif self._configurator.operation == "extend":
+        elif self._configurator.mode == "extend":
             self.load_session(
                 checkpoint_path=self._configurator.checkpoint_path,
                 session_update_params={
                     "max_iterations": self._configurator.new_max_iters,
                 },
             )
-        elif self._configurator.operation == "resume":
+        elif self._configurator.mode == "resume":
             self.load_session(self._configurator.checkpoint_path)
         else:
             raise RuntimeError("Invalid operation!")

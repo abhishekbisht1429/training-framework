@@ -39,20 +39,20 @@ class Configurator:
         self._session_configs = None
         self._checkpoint_path = None
         self._new_max_iters = None
-        self._operation = None
+        self._mode = None
 
         if self._args.config:
-            self._operation = "new"
+            self._mode = "new"
             config = OmegaConf.load(self._args.config)
             if self._args.override is not None:
                 config.merge_with_dotlist(self._args.override)
             self._session_configs = OmegaConf.to_container(config)["sessions"]
         elif self._args.extend_session:
-            self._operation = "extend"
+            self._mode = "extend"
             self._checkpoint_path = self._args.extend_session[0]
             self._new_max_iters = int(self._args.extend_session[1])
         elif self._args.resume_session:
-            self._operation = "resume"
+            self._mode = "resume"
             self._checkpoint_path = self._args.resume_session
 
     def get_session_definition(self, index):
@@ -117,8 +117,8 @@ class Configurator:
         return self._args.process_timeout_on_join
 
     @property
-    def operation(self):
-        return self._operation
+    def mode(self):
+        return self._mode
 
     @property
     def heartbeat_timeout(self):

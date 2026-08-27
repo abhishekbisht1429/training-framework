@@ -1133,7 +1133,7 @@ samplers.
 | Member | Purpose |
 |---|---|
 | `Configurator()` | Parse command-line operation and options |
-| `operation` | `new`, `resume`, or `extend` |
+| `mode` | `new`, `resume`, or `extend` |
 | `session_configs` | Deep copy of parsed YAML session definitions in the new operation |
 | `checkpoint_path` | Checkpoint path in resume or extend operations |
 | `new_max_iters` | New iteration limit in the extend operation |
@@ -1141,6 +1141,9 @@ samplers.
 | `process_timeout_on_join` | Graceful process-join timeout |
 | `get_component_config(session_index, key)` | Return a deep copy of one component mapping, or `{}` for a listed no-config component |
 | `get_all_component_configs(session_index)` | Return all selected component configs, excluding special entries |
+
+`mode` controls the launch workflow. It is separate from `session_type`, which
+selects the concrete session implementation.
 
 ### `TrainingEngine`
 

@@ -257,7 +257,7 @@ def test_configurator_parses_session_type_and_kwargs(tmp_path, monkeypatch):
 
     configurator = Configurator()
 
-    assert configurator.operation == "new"
+    assert configurator.mode == "new"
     assert configurator.session_configs == [definition]
 
 
@@ -299,7 +299,7 @@ def test_engine_runs_analysis_in_spawned_worker(tmp_path):
         "integration_analysis_probe": {"output_path": str(output_path)},
     }
     configurator = SimpleNamespace(
-        operation="new",
+        mode="new",
         session_configs=[{
             "session_type": "analysis",
             "session_kwargs": {
