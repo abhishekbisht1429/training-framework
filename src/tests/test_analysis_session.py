@@ -20,6 +20,7 @@ from training_framework.engine import TrainingEngine, load_session_for_worker
 from training_framework.components.registry import (
     _ANALYSIS_COMPONENT_REGISTRY,
     _COMPONENT_REGISTRY,
+    component_registry,
 )
 from training_framework.components import (
     StatefulResource,
@@ -39,6 +40,14 @@ def _session_config(root, *, max_iterations=2):
         "device": "cpu",
         "components_package": "training_framework.components.builtin",
         "show_execution_graph": False,
+    }
+
+
+def _trained_model_config(checkpoint_path):
+    return {
+        "trained_model": {
+            "checkpoint-path": str(checkpoint_path),
+        },
     }
 
 
@@ -116,6 +125,36 @@ def test_mode_scoped_registries_allow_same_component_name():
     assert _ANALYSIS_COMPONENT_REGISTRY["shared_name"] is AnalysisStep
 
 
+def test_trained_model_is_registered_as_a_shared_component():
+    assert _COMPONENT_REGISTRY["trained_model"] is TrainedModel
+    assert "trained_model" not in _ANALYSIS_COMPONENT_REGISTRY
+    assert component_registry("training")["trained_model"] is TrainedModel
+    assert component_registry("analysis")["trained_model"] is TrainedModel
+    assert component_registry("evaluation")["trained_model"] is TrainedModel
+
+
+def test_trained_model_loads_its_configured_checkpoint(tmp_path):
+    checkpoint_path = _write_training_checkpoint(tmp_path)
+    trained_model = TrainedModel(
+        _trained_model_config(checkpoint_path)["trained_model"],
+    )
+    session = TrainingSession({
+        "session_config": _session_config(tmp_path / "host"),
+    })
+
+    with pytest.raises(RuntimeError, match="not initialized yet"):
+        getattr(trained_model, "model")
+
+    trained_model.setup(session)
+    assert float(
+        trained_model.model(torch.tensor(2.0)).detach(),
+    ) == 7.0
+
+    trained_model.teardown(session)
+    with pytest.raises(RuntimeError, match="not initialized yet"):
+        getattr(trained_model, "model")
+
+
 def test_analysis_session_loads_model_and_runs_analysis_components(tmp_path):
     checkpoint_path = _write_training_checkpoint(tmp_path)
 
@@ -137,6 +176,7 @@ def test_analysis_session_loads_model_and_runs_analysis_components(tmp_path):
     session = AnalysisSession(
         {
             "session_config": _session_config(tmp_path / "analysis"),
+            **_trained_model_config(checkpoint_path),
             "analysis_probe": {},
         },
         model_checkpoint_path=checkpoint_path,
@@ -164,7 +204,10 @@ def test_analysis_session_loads_model_and_runs_analysis_components(tmp_path):
 def test_analysis_state_restores_with_concrete_subclass(tmp_path):
     checkpoint_path = _write_training_checkpoint(tmp_path)
     session = AnalysisSession(
-        {"session_config": _session_config(tmp_path / "analysis")},
+        {
+            "session_config": _session_config(tmp_path / "analysis"),
+            **_trained_model_config(checkpoint_path),
+        },
         model_checkpoint_path=checkpoint_path,
     )
 
@@ -209,7 +252,10 @@ def test_analysis_rejects_non_session_checkpoint(tmp_path):
     checkpoint_path = tmp_path / "payload.pt"
     torch.save({"model": "not a session"}, checkpoint_path)
     session = AnalysisSession(
-        {"session_config": _session_config(tmp_path / "analysis")},
+        {
+            "session_config": _session_config(tmp_path / "analysis"),
+            **_trained_model_config(checkpoint_path),
+        },
         model_checkpoint_path=checkpoint_path,
     )
 
@@ -225,7 +271,10 @@ def test_analysis_rejects_training_checkpoint_without_model(tmp_path):
     checkpoint_path = tmp_path / "no-model.pt"
     torch.save(source, checkpoint_path)
     session = AnalysisSession(
-        {"session_config": _session_config(tmp_path / "analysis")},
+        {
+            "session_config": _session_config(tmp_path / "analysis"),
+            **_trained_model_config(checkpoint_path),
+        },
         model_checkpoint_path=checkpoint_path,
     )
 
@@ -243,6 +292,7 @@ def test_configurator_parses_session_type_and_kwargs(tmp_path, monkeypatch):
         "session_kwargs": {
             "model_checkpoint_path": str(checkpoint_path),
         },
+        **_trained_model_config(checkpoint_path),
         "session_config": _session_config(tmp_path / "run"),
     }
     config_path.write_text(
@@ -296,6 +346,7 @@ def test_engine_runs_analysis_in_spawned_worker(tmp_path):
             **_session_config(tmp_path / "analysis"),
             "components_package": "tests.integration_analysis_components",
         },
+        **_trained_model_config(checkpoint_path),
         "integration_analysis_probe": {"output_path": str(output_path)},
     }
     configurator = SimpleNamespace(

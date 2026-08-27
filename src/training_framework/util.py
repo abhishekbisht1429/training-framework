@@ -1,4 +1,3 @@
-import functools
 import importlib
 import pickle
 import pkgutil
@@ -25,24 +24,57 @@ def timestamp_str():
     return f"{base_time}_{fractional_ns}"
 
 def context_entry(func):
-    @functools.wraps(func)
+    if getattr(func, "_context_entry_wrapper", None) is func:
+        return func
+
+    @wraps(func)
     def wrapper(self, *args, **kwargs):
-        res = func(self, *args, **kwargs)
-        self._active = True
-        return res
+        outermost_call = not getattr(
+            self,
+            "_context_entry_in_progress",
+            False,
+        )
+        if outermost_call:
+            self._context_entry_in_progress = True
+
+        try:
+            result = func(self, *args, **kwargs)
+            if outermost_call:
+                self._active = True
+            return result
+        finally:
+            if outermost_call:
+                del self._context_entry_in_progress
+
+    wrapper._context_entry_wrapper = wrapper
     return wrapper
 
 def context_exit(func):
-    @functools.wraps(func)
+    if getattr(func, "_context_exit_wrapper", None) is func:
+        return func
+
+    @wraps(func)
     def wrapper(self, *args, **kwargs):
+        outermost_call = not getattr(
+            self,
+            "_context_exit_in_progress",
+            False,
+        )
+        if outermost_call:
+            self._context_exit_in_progress = True
+
         try:
             return func(self, *args, **kwargs)
         finally:
-            self._active = False
+            if outermost_call:
+                self._active = False
+                del self._context_exit_in_progress
+
+    wrapper._context_exit_wrapper = wrapper
     return wrapper
 
 def requires_context(func):
-    @functools.wraps(func)
+    @wraps(func)
     def wrapper(self, *args, **kwargs):
         if not hasattr(self, "_active") or not self._active:
             raise RuntimeError(f"This instance of {self.__class__.__name__} is not initialized yet!")
@@ -114,4 +146,3 @@ def format_execution_time(nanos: int) -> str:
         if h > 0:
             return f"{int(h)}h {int(m)}m {s:.2f}s"
         return f"{int(m)}m {s:.2f}s"
-

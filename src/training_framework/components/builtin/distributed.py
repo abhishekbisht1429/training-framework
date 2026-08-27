@@ -8,11 +8,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from training_framework.components import Resource, requires_resource, resource
-from training_framework.util import (
-    context_entry,
-    context_exit,
-    requires_context,
-)
+from training_framework.util import requires_context
 
 if TYPE_CHECKING:
     from training_framework.session import Session
@@ -57,7 +53,6 @@ class DDPResource(Resource):
     def wrapped_model(self):
         return self._ddp_wrapped_model
 
-    @context_entry
     @override
     def setup(self, session: Session) -> Any:
         os.environ["MASTER_ADDR"] = self._master_addr
@@ -84,7 +79,6 @@ class DDPResource(Resource):
             torch.distributed.destroy_process_group()
             raise
 
-    @context_exit
     @override
     def teardown(self, session):
         self._ddp_wrapped_model = None
