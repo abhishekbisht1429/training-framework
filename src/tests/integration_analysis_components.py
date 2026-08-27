@@ -15,7 +15,6 @@ from training_framework.components import (
     resource,
     step,
 )
-from training_framework.session import SessionMode
 
 
 @resource("integration_analysis_model")
@@ -40,7 +39,7 @@ class IntegrationAnalysisModel(nn.Module, StatefulResource):
         self.load_state_dict(state)
 
 
-@step("integration_analysis_probe", mode=SessionMode.ANALYSIS)
+@step("integration_analysis_probe", session_type="analysis")
 @requires_resource("trained_model")
 class IntegrationAnalysisProbe(Step):
     def __init__(self, config):

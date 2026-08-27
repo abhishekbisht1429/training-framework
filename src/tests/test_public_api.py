@@ -38,9 +38,22 @@ def test_components_package_exports_registry_api_by_identity():
     assert components.wraps is registry.wraps
 
 
-def test_registry_singletons_are_selected_by_public_mode_names():
-    assert registry.component_registry("training") is registry._COMPONENT_REGISTRY
-    assert registry.component_registry("analysis") is registry._ANALYSIS_COMPONENT_REGISTRY
+def test_effective_registries_overlay_scoped_components_on_shared_components():
+    training_registry = registry.component_registry("training")
+    analysis_registry = registry.component_registry("analysis")
+
+    assert training_registry.maps[0] is registry._SESSION_COMPONENT_REGISTRIES["training"]
+    assert analysis_registry.maps[0] is registry._ANALYSIS_COMPONENT_REGISTRY
+    assert training_registry.maps[1] is registry._SHARED_COMPONENT_REGISTRY
+    assert analysis_registry.maps[1] is registry._SHARED_COMPONENT_REGISTRY
+
+
+def test_session_package_exports_pluggable_session_type_api():
+    assert session.TRAINING_SESSION_TYPE == "training"
+    assert session.ANALYSIS_SESSION_TYPE == "analysis"
+    assert session.normalize_session_type("evaluation") == "evaluation"
+    assert callable(session.register_session_type)
+    assert callable(session.session_class_for_type)
 
 
 def test_public_functions_are_defined_in_canonical_modules():

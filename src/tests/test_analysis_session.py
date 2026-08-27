@@ -28,17 +28,17 @@ from training_framework.components import (
     resource,
     step,
 )
-from training_framework.session import AnalysisSession, Session, SessionMode, TrainingSession
+from training_framework.session import AnalysisSession, Session, TrainingSession
 
 
-def _base_config(root, *, max_iterations=2):
+def _session_config(root, *, max_iterations=2):
     return {
         "rng_seed": 19,
         "sessions_dir": str(root),
         "max_iterations": max_iterations,
         "device": "cpu",
         "components_package": "training_framework.components.builtin",
-        "show-execution-graph": False,
+        "show_execution_graph": False,
     }
 
 
@@ -65,7 +65,7 @@ def _write_training_checkpoint(tmp_path):
             self.load_state_dict(state)
 
     source = TrainingSession({
-        "base_config": _base_config(tmp_path / "training", max_iterations=4),
+        "session_config": _session_config(tmp_path / "training", max_iterations=4),
         "aliases": {"model": "analysis_source_model"},
         "model": {"weight": 3.5},
     })
@@ -75,24 +75,24 @@ def _write_training_checkpoint(tmp_path):
 
 
 def test_training_session_is_fixed_mode_compatibility_subclass(tmp_path):
-    session = TrainingSession({"base_config": _base_config(tmp_path)})
+    session = TrainingSession({"session_config": _session_config(tmp_path)})
 
     assert isinstance(session, Session)
-    assert session.mode is SessionMode.TRAINING
+    assert session.session_type == "training"
     assert not hasattr(session, "model_checkpoint_path")
     assert hasattr(session, "update_max_iters")
     assert "model_checkpoint_path" not in session.get_state()
     assert isinstance(Session.from_state(session.get_state()), TrainingSession)
 
-    legacy_state = session.get_state()
-    legacy_state.pop("mode")
-    legacy_state["model_checkpoint_path"] = None
-    assert isinstance(Session.from_state(legacy_state), TrainingSession)
+    invalid_state = session.get_state()
+    invalid_state.pop("session_type")
+    with pytest.raises(ValueError, match="required 'session_type'"):
+        Session.from_state(invalid_state)
 
 
 def test_session_is_an_abstract_base(tmp_path):
     with pytest.raises(TypeError, match="abstract class"):
-        Session({"base_config": _base_config(tmp_path)})
+        Session({"session_config": _session_config(tmp_path)})
 
 
 def test_mode_scoped_registries_allow_same_component_name():
@@ -104,7 +104,7 @@ def test_mode_scoped_registries_allow_same_component_name():
         def run(self, session):
             pass
 
-    @step("shared_name", mode=SessionMode.ANALYSIS)
+    @step("shared_name", session_type="analysis")
     class AnalysisStep(Step):
         def __init__(self, config):
             pass
@@ -119,7 +119,7 @@ def test_mode_scoped_registries_allow_same_component_name():
 def test_analysis_session_loads_model_and_runs_analysis_components(tmp_path):
     checkpoint_path = _write_training_checkpoint(tmp_path)
 
-    @step("analysis_probe", mode=SessionMode.ANALYSIS)
+    @step("analysis_probe", session_type="analysis")
     @requires_resource("trained_model")
     class AnalysisProbe(Step):
         def __init__(self, config):
@@ -136,7 +136,7 @@ def test_analysis_session_loads_model_and_runs_analysis_components(tmp_path):
 
     session = AnalysisSession(
         {
-            "base_config": _base_config(tmp_path / "analysis"),
+            "session_config": _session_config(tmp_path / "analysis"),
             "analysis_probe": {},
         },
         model_checkpoint_path=checkpoint_path,
@@ -164,20 +164,20 @@ def test_analysis_session_loads_model_and_runs_analysis_components(tmp_path):
 def test_analysis_state_restores_with_concrete_subclass(tmp_path):
     checkpoint_path = _write_training_checkpoint(tmp_path)
     session = AnalysisSession(
-        {"base_config": _base_config(tmp_path / "analysis")},
+        {"session_config": _session_config(tmp_path / "analysis")},
         model_checkpoint_path=checkpoint_path,
     )
 
     restored = Session.from_state(session.get_state())
 
     assert type(restored) is AnalysisSession
-    assert restored.mode is SessionMode.ANALYSIS
+    assert restored.session_type == "analysis"
     assert restored.model_checkpoint_path == str(checkpoint_path)
     assert not hasattr(restored, "update_max_iters")
-    with pytest.raises(ValueError, match="cannot restore analysis-mode state"):
+    with pytest.raises(ValueError, match="cannot restore analysis session-type state"):
         TrainingSession.from_state(session.get_state())
-    training = TrainingSession({"base_config": _base_config(tmp_path / "training")})
-    with pytest.raises(ValueError, match="cannot restore training-mode state"):
+    training = TrainingSession({"session_config": _session_config(tmp_path / "training")})
+    with pytest.raises(ValueError, match="cannot restore training session-type state"):
         AnalysisSession.from_state(training.get_state())
     with pytest.raises(TypeError, match="require a TrainingSession"):
         load_session_for_worker(
@@ -194,7 +194,7 @@ def test_analysis_state_restores_with_concrete_subclass(tmp_path):
 
 
 def test_analysis_requires_existing_checkpoint(tmp_path):
-    config = {"base_config": _base_config(tmp_path)}
+    config = {"session_config": _session_config(tmp_path)}
 
     with pytest.raises(TypeError, match="model_checkpoint_path"):
         AnalysisSession(config)
@@ -209,7 +209,7 @@ def test_analysis_rejects_non_session_checkpoint(tmp_path):
     checkpoint_path = tmp_path / "payload.pt"
     torch.save({"model": "not a session"}, checkpoint_path)
     session = AnalysisSession(
-        {"base_config": _base_config(tmp_path / "analysis")},
+        {"session_config": _session_config(tmp_path / "analysis")},
         model_checkpoint_path=checkpoint_path,
     )
 
@@ -220,12 +220,12 @@ def test_analysis_rejects_non_session_checkpoint(tmp_path):
 
 def test_analysis_rejects_training_checkpoint_without_model(tmp_path):
     source = TrainingSession({
-        "base_config": _base_config(tmp_path / "training"),
+        "session_config": _session_config(tmp_path / "training"),
     })
     checkpoint_path = tmp_path / "no-model.pt"
     torch.save(source, checkpoint_path)
     session = AnalysisSession(
-        {"base_config": _base_config(tmp_path / "analysis")},
+        {"session_config": _session_config(tmp_path / "analysis")},
         model_checkpoint_path=checkpoint_path,
     )
 
@@ -234,43 +234,38 @@ def test_analysis_rejects_training_checkpoint_without_model(tmp_path):
             pass
 
 
-def test_configurator_parses_analysis_inputs(tmp_path, monkeypatch):
+def test_configurator_parses_session_type_and_kwargs(tmp_path, monkeypatch):
     checkpoint_path = tmp_path / "source.pt"
     checkpoint_path.touch()
     config_path = tmp_path / "analysis.yaml"
+    definition = {
+        "session_type": "analysis",
+        "session_kwargs": {
+            "model_checkpoint_path": str(checkpoint_path),
+        },
+        "session_config": _session_config(tmp_path / "run"),
+    }
     config_path.write_text(
-        yaml.safe_dump({
-            "sessions": [{"base_config": _base_config(tmp_path / "run")}]
-        }),
+        yaml.safe_dump({"sessions": [definition]}),
         encoding="utf-8",
     )
     monkeypatch.setattr(sys, "argv", [
         "analyze",
-        "--analysis-config",
+        "--config",
         str(config_path),
-        "--model-checkpoint",
-        str(checkpoint_path),
     ])
 
     configurator = Configurator()
 
-    assert configurator.mode == "analysis"
-    assert configurator.model_checkpoint_path == str(checkpoint_path)
-    assert len(configurator.session_configs) == 1
+    assert configurator.mode == "new"
+    assert configurator.session_configs == [definition]
 
 
-def test_configurator_requires_model_checkpoint_for_analysis(tmp_path, monkeypatch):
-    config_path = tmp_path / "analysis.yaml"
-    config_path.write_text(
-        yaml.safe_dump({
-            "sessions": [{"base_config": _base_config(tmp_path / "run")}]
-        }),
-        encoding="utf-8",
-    )
+def test_configurator_rejects_removed_analysis_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv", [
         "analyze",
         "--analysis-config",
-        str(config_path),
+        "analysis.yaml",
     ])
 
     with pytest.raises(SystemExit):
@@ -286,8 +281,8 @@ def test_engine_runs_analysis_in_spawned_worker(tmp_path):
         importlib.reload(existing)
     checkpoint_path = tmp_path / "spawn-source.pt"
     source = TrainingSession({
-        "base_config": {
-            **_base_config(tmp_path / "training"),
+        "session_config": {
+            **_session_config(tmp_path / "training"),
             "components_package": "tests.integration_analysis_components",
         },
         "aliases": {"model": "integration_analysis_model"},
@@ -297,16 +292,21 @@ def test_engine_runs_analysis_in_spawned_worker(tmp_path):
 
     output_path = tmp_path / "analysis.jsonl"
     analysis_config = {
-        "base_config": {
-            **_base_config(tmp_path / "analysis"),
+        "session_config": {
+            **_session_config(tmp_path / "analysis"),
             "components_package": "tests.integration_analysis_components",
         },
         "integration_analysis_probe": {"output_path": str(output_path)},
     }
     configurator = SimpleNamespace(
-        mode="analysis",
-        session_configs=[analysis_config],
-        model_checkpoint_path=str(checkpoint_path),
+        mode="new",
+        session_configs=[{
+            "session_type": "analysis",
+            "session_kwargs": {
+                "model_checkpoint_path": str(checkpoint_path),
+            },
+            **analysis_config,
+        }],
         heartbeat_timeout=10.0,
         process_timeout_on_join=5.0,
     )

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from training_framework.session import AnalysisSession, Session
 
 
-@resource("trained_model", mode="analysis")
+@resource("trained_model", session_type="analysis")
 class TrainedModel(Resource):
     """Expose the model resource restored from a training-session checkpoint."""
 
@@ -27,7 +27,7 @@ class TrainedModel(Resource):
 
     @context_entry
     def setup(self, session: AnalysisSession) -> Any:
-        from training_framework.session import Session, SessionMode
+        from training_framework.session import Session, TRAINING_SESSION_TYPE
 
         source_session = Checkpointer.load_checkpoint(
             session.model_checkpoint_path,
@@ -37,9 +37,9 @@ class TrainedModel(Resource):
             raise TypeError(
                 "Analysis model checkpoint must contain a framework Session"
             )
-        if source_session.mode is not SessionMode.TRAINING:
+        if source_session.session_type != TRAINING_SESSION_TYPE:
             raise ValueError(
-                "Analysis model checkpoint must contain a training-mode session"
+                "Analysis model checkpoint must contain a training session"
             )
 
         try:
@@ -65,7 +65,7 @@ class TrainedModel(Resource):
         self._source_session = None
 
 
-@hook("logger", mode="analysis")
+@hook("logger", session_type="analysis")
 class AnalysisLogger(Logger):
     """Default progress logger for analysis sessions."""
 

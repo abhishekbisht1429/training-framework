@@ -106,7 +106,7 @@ def test_execution_graph_is_printed_only_for_ddp_rank_zero(
         rank,
         should_print_graph,
 ):
-    @resource("ddp", overwrite=True)
+    @resource("ddp", overwrite=True, session_type="training")
     class DDPTestResource(Resource):
         def __init__(self, config):
             self.rank = config["rank"]
@@ -118,13 +118,13 @@ def test_execution_graph_is_printed_only_for_ddp_rank_zero(
             pass
 
     config = {
-        "base_config": {
+        "session_config": {
             "rng_seed": 1,
             "sessions_dir": str(tmp_path / f"rank-{rank}"),
             "max_iterations": 1,
             "device": "cpu",
             "components_package": "training_framework.components.builtin",
-            "show-execution-graph": True,
+            "show_execution_graph": True,
         },
         "ddp": {"rank": rank},
     }

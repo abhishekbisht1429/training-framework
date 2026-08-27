@@ -14,7 +14,7 @@ from training_framework.session import TrainingSession
 
 
 def _config(tmp_path, *, show_execution_graph=None):
-    base_config = {
+    session_config = {
         "rng_seed": 1,
         "sessions_dir": str(tmp_path),
         "max_iterations": 3,
@@ -22,8 +22,8 @@ def _config(tmp_path, *, show_execution_graph=None):
         "components_package": "training_framework.components.builtin",
     }
     if show_execution_graph is not None:
-        base_config["show-execution-graph"] = show_execution_graph
-    return {"base_config": base_config}
+        session_config["show_execution_graph"] = show_execution_graph
+    return {"session_config": session_config}
 
 
 def _add_graph_components(session, setup_marker=None):
@@ -102,7 +102,7 @@ def test_execution_graph_prints_before_setup_by_default(tmp_path, capsys):
     assert output.index("TRAINING SESSION EXECUTION GRAPH") < output.index(
         "GRAPH RESOURCE SETUP"
     )
-    assert session.full_config["base_config"]["show-execution-graph"] is True
+    assert session.full_config["session_config"]["show_execution_graph"] is True
 
 
 def test_execution_graph_automatic_print_can_be_disabled(tmp_path, capsys):

@@ -17,13 +17,12 @@ from training_framework.components.base import (
     Step,
 )
 from training_framework.components.registry import (
-    ANALYSIS_MODE,
-    TRAINING_MODE,
+    ANALYSIS_SESSION_TYPE,
+    TRAINING_SESSION_TYPE,
     ComponentAliases,
     component_registry,
     format_execution_graph,
     hook,
-    normalize_component_mode,
     requires_hook,
     requires_resource,
     requires_step,
@@ -34,8 +33,8 @@ from training_framework.components.registry import (
 )
 
 __all__ = [
-    "ANALYSIS_MODE",
-    "TRAINING_MODE",
+    "ANALYSIS_SESSION_TYPE",
+    "TRAINING_SESSION_TYPE",
     "Component",
     "ComponentAliases",
     "Hook",
@@ -54,7 +53,6 @@ __all__ = [
     "component_registry",
     "format_execution_graph",
     "hook",
-    "normalize_component_mode",
     "requires_hook",
     "requires_resource",
     "requires_step",
@@ -64,5 +62,4 @@ __all__ = [
     "wraps",
 ]
 
-# Registration happens after the component API is fully initialized.
 from training_framework.components import builtin as builtin

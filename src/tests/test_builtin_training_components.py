@@ -44,14 +44,14 @@ class FakeDistributedDataParallel(nn.Module):
         return self.module(*args, **kwargs)
 
 
-def _base_config(tmp_path, *, max_iterations=3):
+def _session_config(tmp_path, *, max_iterations=3):
     return {
         "rng_seed": 41,
         "sessions_dir": str(tmp_path),
         "max_iterations": max_iterations,
         "device": "cpu",
         "components_package": "training_framework.components.builtin",
-        "show-execution-graph": False,
+        "show_execution_graph": False,
     }
 
 
@@ -96,7 +96,7 @@ def _register_training_components():
 
 def _training_config(tmp_path, *, max_iterations=3):
     return {
-        "base_config": _base_config(
+        "session_config": _session_config(
             tmp_path,
             max_iterations=max_iterations,
         ),
@@ -205,7 +205,7 @@ def test_timer_formats_iteration_and_elapsed_durations(
 
 def test_optional_builtins_do_not_break_unrelated_sessions(tmp_path):
     session = TrainingSession({
-        "base_config": _base_config(tmp_path, max_iterations=1),
+        "session_config": _session_config(tmp_path, max_iterations=1),
     })
     _remove_default_hooks(session)
 
@@ -294,7 +294,7 @@ def test_ddp_resource_activates_its_model_dependency(tmp_path):
             pass
 
     session = TrainingSession({
-        "base_config": _base_config(tmp_path),
+        "session_config": _session_config(tmp_path),
         "ddp": {
             "world_size": 1,
             "backend": "gloo",

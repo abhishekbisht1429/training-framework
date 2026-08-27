@@ -140,7 +140,7 @@ class AdditionalHookBase(LifecycleHook, Stateful):
 @pytest.fixture
 def minimal_session_config_1(tmp_path):
     return {
-        "base_config": {
+        "session_config": {
             "max_iterations": 3,
             "sessions_dir": str(tmp_path / "sessions"),
             "device": "cpu",
@@ -153,9 +153,8 @@ def minimal_session_config_1(tmp_path):
 @pytest.fixture
 def minimal_session_config_2(tmp_path):
     return {
-        "base_config": {
+        "session_config": {
             "max_iterations": 2,
-            "batch_size": 4,
             "sessions_dir": str(tmp_path / "sessions"),
             "device": "cpu",
             "rng_seed": 11,
@@ -207,19 +206,19 @@ def test_registry_decorators_register_classes_and_reject_duplicates():
 def test_training_session_initialization_and_device_validation(minimal_session_config_2, monkeypatch):
     session = TrainingSession(minimal_session_config_2)
 
-    assert session.session_config.rng_seed == minimal_session_config_2["base_config"]["rng_seed"]
-    assert session.session_config.max_iterations == minimal_session_config_2["base_config"]["max_iterations"]
-    assert session.session_config.session_dir.startswith(minimal_session_config_2["base_config"]["sessions_dir"])
+    assert session.session_config.rng_seed == minimal_session_config_2["session_config"]["rng_seed"]
+    assert session.session_config.max_iterations == minimal_session_config_2["session_config"]["max_iterations"]
+    assert session.session_config.session_dir.startswith(minimal_session_config_2["session_config"]["sessions_dir"])
     assert session.device.type == "cpu"
     assert session.iteration == 0
 
     bad_device = deepcopy(minimal_session_config_2)
-    bad_device["base_config"]["device"] = "tpu"
+    bad_device["session_config"]["device"] = "tpu"
 
     assert TrainingSession(bad_device).device == torch.device("cpu")
 
     unavailable_cuda = deepcopy(minimal_session_config_2)
-    unavailable_cuda["base_config"]["device"] = "cuda:0"
+    unavailable_cuda["session_config"]["device"] = "cuda:0"
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     assert TrainingSession(unavailable_cuda).device == torch.device("cpu")
@@ -625,21 +624,25 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
     sample_config = {
         "sessions": [
             {
-                "max_iterations": 5,
-                "batch_size": 4,
-                "sessions_dir": str(tmp_path / "sessions_1"),
-                "device": "cpu",
-                "rng_seed": 123,
+                "session_config": {
+                    "max_iterations": 5,
+                    "sessions_dir": str(tmp_path / "sessions_1"),
+                    "device": "cpu",
+                    "rng_seed": 123,
+                    "components_package": "training_framework.components.builtin",
+                },
                 "logger": {"log_every": 1, "log_file": str(tmp_path / "log_1.txt"), "nested": {"enabled": True}},
                 "checkpointer": {"checkpoint_every": 2, "checkpoints_dir": str(tmp_path / "ckpts_1")},
                 "tensorboard": {"host": "0.0.0.0", "port": 16040},
             },
             {
-                "max_iterations": 7,
-                "batch_size": 8,
-                "sessions_dir": str(tmp_path / "sessions_2"),
-                "device": "cpu",
-                "rng_seed": 456,
+                "session_config": {
+                    "max_iterations": 7,
+                    "sessions_dir": str(tmp_path / "sessions_2"),
+                    "device": "cpu",
+                    "rng_seed": 456,
+                    "components_package": "training_framework.components.builtin",
+                },
                 "logger": {"log_every": 3, "log_file": str(tmp_path / "log_2.txt")},
                 "checkpointer": {"checkpoint_every": 4, "checkpoints_dir": str(tmp_path / "ckpts_2")},
                 "tensorboard": {"host": "0.0.0.0", "port": 16041},
@@ -651,7 +654,7 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
     monkeypatch.setattr(sys, "argv", ["pytest", "--config", config_path, "--override", "sessions[0].checkpointer.checkpoint_every=11", "sessions.1.logger.log_every=9"])
 
     configurator = Configurator()
-    session_config = configurator.get_base_config(0)
+    session_config = configurator.get_session_definition(0)
     resource_config = configurator.get_component_config(0, "logger")
 
     assert session_config["checkpointer"]["checkpoint_every"] == 11
@@ -665,17 +668,16 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
         configurator.get_component_config(0, "missing")
 
     sample_config["sessions"][0]["logger"]["log_every"] = 99
-    assert configurator.get_base_config(0)["logger"]["log_every"] == 1
+    assert configurator.get_session_definition(0)["logger"]["log_every"] == 1
 
 
 def test_configurator_create_sessions_attaches_expected_components(tmp_path, monkeypatch):
     sample_config = {
         "sessions": [
             {
-                "base_config": {
+                "session_config": {
                     "max_iterations": 2,
-                    "batch_size": 4,
-                    "sessions_dir": str(tmp_path / "s1"),
+                            "sessions_dir": str(tmp_path / "s1"),
                     "device": "cpu",
                     "rng_seed": 1,
                     "components_package": "training_framework.components.builtin",
@@ -683,10 +685,9 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
                 "tensorboard": {"host": "0.0.0.0", "port": 16050},
             },
             {
-                "base_config": {
+                "session_config": {
                     "max_iterations": 2,
-                    "batch_size": 4,
-                    "sessions_dir": str(tmp_path / "s1"),
+                            "sessions_dir": str(tmp_path / "s1"),
                     "device": "cpu",
                     "rng_seed": 1,
                     "components_package": "training_framework.components.builtin",

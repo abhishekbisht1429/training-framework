@@ -32,13 +32,13 @@ def _data_manager_config(
         world_size: int = 1,
 ) -> dict:
     return {
-        "base_config": {
+        "session_config": {
             "rng_seed": 23,
             "sessions_dir": str(tmp_path / "sessions"),
             "max_iterations": 1,
             "device": "cpu",
             "components_package": _COMPONENTS_PACKAGE,
-            "show-execution-graph": False,
+            "show_execution_graph": False,
         },
         "aliases": {
             "ddp": "integration_data_context",

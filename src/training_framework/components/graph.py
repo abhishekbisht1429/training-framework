@@ -207,7 +207,7 @@ def render_execution_graph(
         steps: Iterable[Step],
         max_iterations: int,
         alias_resolver,
-        session_mode,
+        session_type,
         order: Mapping[str, int],
 ) -> str:
     ordered_resources = sorted(
@@ -234,7 +234,7 @@ def render_execution_graph(
         if isinstance(component, IterationHook)
     ]
 
-    title = f"{session_mode.upper()} SESSION EXECUTION GRAPH"
+    title = f"{session_type.upper()} SESSION EXECUTION GRAPH"
     lines = [
         title,
         "================================",

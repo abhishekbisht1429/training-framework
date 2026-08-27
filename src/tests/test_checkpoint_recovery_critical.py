@@ -475,28 +475,25 @@ def test_get_state_returns_a_detached_session_context_snapshot(tmp_path):
     assert state["session_context"] == {"nested": {"values": [1]}}
 
 
-def test_session_state_uses_unambiguous_config_keys_and_reads_legacy_keys(
-    tmp_path,
-):
+def test_session_state_uses_clean_session_type_and_config_keys(tmp_path):
     session = TrainingSession(
         make_config(tmp_path / "checkpoint-schema", max_iterations=1)
     )
 
     state = session.get_state()
 
-    assert state["config"] == session.full_config
-    assert state["base_config"] == session.full_config["base_config"]
+    assert state["session_type"] == "training"
+    assert state["config"]["session_config"] == (
+        session.full_config["session_config"]
+    )
     assert state["session_config"] == session.session_config
+    assert "base_config" not in state
+    assert "mode" not in state
 
-    legacy_state = dict(state)
-    legacy_state["config"] = state["base_config"]
-    legacy_state["base_config"] = state["session_config"]
-    del legacy_state["session_config"]
-
-    restored = TrainingSession.from_state(legacy_state)
-
-    assert restored.full_config == session.full_config
-    assert restored.session_config == session.session_config
+    invalid_state = dict(state)
+    del invalid_state["config"]
+    with pytest.raises(ValueError, match="configuration state schema"):
+        TrainingSession.from_state(invalid_state)
 
 
 def test_from_state_does_not_repeat_normal_session_initialization(

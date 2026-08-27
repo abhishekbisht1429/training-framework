@@ -3,15 +3,13 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from training_framework.session.base import Session
-from training_framework.session.config import SessionMode
+from training_framework.session.config import ANALYSIS_SESSION_TYPE
+from training_framework.session.registry import register_session_type
 
 
+@register_session_type(ANALYSIS_SESSION_TYPE)
 class AnalysisSession(Session):
     """Analysis workflow driven by a trained-model session checkpoint."""
-
-    @classmethod
-    def _session_mode(cls) -> SessionMode:
-        return SessionMode.ANALYSIS
 
     @classmethod
     def _default_component_configs(cls) -> Mapping[str, Mapping]:
@@ -61,10 +59,10 @@ class AnalysisSession(Session):
     def model_checkpoint_path(self) -> str:
         return self._model_checkpoint_path
 
-    def _get_mode_state(self) -> dict[str, Any]:
+    def _get_session_type_state(self) -> dict[str, Any]:
         return {"model_checkpoint_path": self._model_checkpoint_path}
 
-    def _restore_mode_state(self, state: Mapping[str, Any]) -> None:
+    def _restore_session_type_state(self, state: Mapping[str, Any]) -> None:
         self._model_checkpoint_path = self._validate_model_checkpoint_path(
             state.get("model_checkpoint_path"),
         )
