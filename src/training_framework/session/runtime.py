@@ -64,8 +64,8 @@ def setup_resources(session: "Session") -> None:
 
 def setup_session_hooks(session: "Session") -> None:
     for component in session._session_hooks:
-        component.setup(session)
-        session.send_heartbeat(f"Running setup {component.id}")
+        component.pre_session(session)
+        session.send_heartbeat(f"Running pre-session {component.id}")
         session._successfully_setup_hook_names.add(component.name)
 
 
@@ -98,11 +98,11 @@ def teardown_session_hooks(
             continue
         try:
             session.send_heartbeat(
-                f"Running teardown {component.id}{stage_suffix}"
+                f"Running post-session {component.id}{stage_suffix}"
             )
-            component.teardown(session)
+            component.post_session(session)
         except Exception as error:
-            print(f"Error running teardown '{component.name}': {error}")
+            print(f"Error running post-session '{component.name}': {error}")
 
 
 def report_worker_exception(

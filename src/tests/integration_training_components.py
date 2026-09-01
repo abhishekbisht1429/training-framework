@@ -187,7 +187,7 @@ class RankResultHook(LifecycleHook):
         self._observations: list[dict[str, float | int]] = []
 
     @override
-    def setup(self, session: TrainingSession) -> None:
+    def pre_session(self, session: TrainingSession) -> None:
         return None
 
     @override
@@ -207,7 +207,7 @@ class RankResultHook(LifecycleHook):
         })
 
     @override
-    def teardown(self, session: TrainingSession) -> None:
+    def post_session(self, session: TrainingSession) -> None:
         ddp = session.get_resource("ddp")
         model = ddp.wrapped_model.module
         payload = {

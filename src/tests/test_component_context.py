@@ -52,10 +52,10 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
         def guarded(self):
             return "hook"
 
-        def setup(self, session: "Session"):
+        def pre_session(self, session: "Session"):
             pass
 
-        def teardown(self, session: "Session"):
+        def post_session(self, session: "Session"):
             self.teardown_value = self.guarded()
 
         def pre_iteration_callback(self, session: "Session"):
@@ -72,14 +72,14 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
     _assert_requires_context(hook)
 
     resource.setup(session_obj)
-    hook.setup(session_obj)
+    hook.pre_session(session_obj)
 
     assert resource.guarded() == "resource"
     assert hook.guarded() == "hook"
     hook.pre_iteration_callback(session_obj)
     hook.post_iteration_callback(session_obj)
 
-    hook.teardown(session_obj)
+    hook.post_session(session_obj)
     resource.teardown(session_obj)
 
     assert hook.callback_values == ["hook", "hook"]

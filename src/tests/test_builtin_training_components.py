@@ -193,7 +193,7 @@ def test_timer_formats_iteration_and_elapsed_durations(
     timer = Timer({"call_every": 1})
     session = SimpleNamespace(iteration=2)
 
-    timer.setup(session)
+    timer.pre_session(session)
     timer.pre_iteration_callback(session)
     timer.post_iteration_callback(session)
 
@@ -328,7 +328,7 @@ def test_ddp_resource_and_optimizer_run_through_public_session_api(
 
     ddp_setup = graph.index("Resource.ddp.setup()")
     assert graph.index("Resource.public_test_model.setup()") < ddp_setup
-    assert ddp_setup < graph.index("Hook.optimizer.setup()")
+    assert ddp_setup < graph.index("Hook.optimizer.pre_session()")
     assert "requires: Resource.public_test_model" in graph
     assert "requires: Resource.ddp" in graph
 

@@ -201,10 +201,10 @@ class ProgressHook(LifecycleHook):
     def __init__(self, config: dict):
         self.call_every = int(config.get("call_every", 1))
 
-    def setup(self, session: TrainingSession) -> None:
+    def pre_session(self, session: TrainingSession) -> None:
         pass
 
-    def teardown(self, session: TrainingSession) -> None:
+    def post_session(self, session: TrainingSession) -> None:
         pass
 
     def pre_iteration_callback(self, session: TrainingSession) -> None:
@@ -314,7 +314,7 @@ The framework provides three hook interfaces:
 
 | Interface | Methods |
 |---|---|
-| `SessionHook` | `setup(session)`, `teardown(session)` |
+| `SessionHook` | `pre_session(session)`, `post_session(session)` |
 | `IterationHook` | `pre_iteration_callback(session)`, `post_iteration_callback(session)` |
 | `LifecycleHook` | All four methods |
 
@@ -518,8 +518,8 @@ class OuterHook(LifecycleHook):
     ...
 ```
 
-If `outer` wraps `inner`, setup and pre-iteration callbacks run outer
-then inner, while post-iteration callbacks and teardown run inner then outer.
+If `outer` wraps `inner`, pre-session and pre-iteration callbacks run outer
+then inner, while post-iteration and post-session callbacks run inner then outer.
 Wrapping names support session aliases. Hooks must share a lifecycle phase. For
 two iteration-capable hooks, the wrapper's `call_every` must be a positive
 multiple of the wrapped hook's value. This lets the wrapper run less often while
@@ -550,7 +550,7 @@ Construct session
     |
 Enter session
     +-- resource.setup() in dependency order
-    +-- SessionHook.setup() in dependency order
+    +-- SessionHook.pre_session() in dependency order
     +-- create session directory and write config.yaml for rank 0
     |
 Each iteration
@@ -560,7 +560,7 @@ Each iteration
     +-- clear iteration_context
     |
 Exit session
-    +-- SessionHook.teardown() in reverse dependency order
+    +-- SessionHook.post_session() in reverse dependency order
     +-- resource.teardown() in reverse dependency order
     +-- clear session_context
 ```

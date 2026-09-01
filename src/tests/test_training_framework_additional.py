@@ -105,10 +105,10 @@ class AdditionalHookBase(LifecycleHook, Stateful):
         self.post_iterations: list[int] = []
         self.shared_snapshots: list[dict[str, Any]] = []
 
-    def setup(self, session: TrainingSession):
+    def pre_session(self, session: TrainingSession):
         self.events.append("setup")
 
-    def teardown(self, session):
+    def post_session(self, session):
         self.events.append("teardown")
 
     def pre_iteration_callback(self, session: TrainingSession) -> None:
@@ -284,10 +284,10 @@ def test_registration_validation_and_lookup(minimal_session_config_2):
         def __init__(self):
             self.call_every = 1
 
-        def setup(self, session: TrainingSession):
+        def pre_session(self, session: TrainingSession):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
         def pre_iteration_callback(self, session: TrainingSession) -> None:

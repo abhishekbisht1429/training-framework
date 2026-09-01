@@ -19,11 +19,11 @@ def write_session_config(session_dir: str, config: dict[str, Any]) -> None:
 
 @hook("config_dumper")
 class ConfigDumper(SessionHook):
-    def setup(self, session: "Session") -> None:
+    def pre_session(self, session: "Session") -> None:
         write_session_config(
             session.session_config.session_dir,
             session.full_config,
         )
 
-    def teardown(self, session: "Session") -> None:
+    def post_session(self, session: "Session") -> None:
         pass

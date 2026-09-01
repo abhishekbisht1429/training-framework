@@ -14,10 +14,15 @@ class ComponentMeta(CaptureInitMeta):
         cls = super().__new__(mcls, name, bases, namespace)
 
         if getattr(cls, "_context_managed_lifecycle", False):
-            if "setup" in namespace:
-                cls.setup = context_entry(namespace["setup"])
-            if "teardown" in namespace:
-                cls.teardown = context_exit(namespace["teardown"])
+            lifecycle_wrappers = {
+                "setup": context_entry,
+                "pre_session": context_entry,
+                "teardown": context_exit,
+                "post_session": context_exit,
+            }
+            for method_name, wrapper in lifecycle_wrappers.items():
+                if method_name in namespace:
+                    setattr(cls, method_name, wrapper(namespace[method_name]))
 
         return cls
 
@@ -64,11 +69,11 @@ class Hook(Component, ABC):
 
 class SessionHook(Hook, ABC):
     @abstractmethod
-    def setup(self, session: "Session") -> None:
+    def pre_session(self, session: "Session") -> None:
         pass
 
     @abstractmethod
-    def teardown(self, session: "Session") -> None:
+    def post_session(self, session: "Session") -> None:
         pass
 
 

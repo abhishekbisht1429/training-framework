@@ -314,10 +314,10 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
             self.label = label
             self.runtime_events: list[str] = []
 
-        def setup(self, session: TrainingSession):
+        def pre_session(self, session: TrainingSession):
             self.runtime_events.append("setup")
 
-        def teardown(self, session: TrainingSession):
+        def post_session(self, session: TrainingSession):
             self.runtime_events.append("teardown")
 
     @hook("critical_checkpoint_stateful_hook")
@@ -329,10 +329,10 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
             self.teardown_calls = 0
             self.observed_values: list[int] = []
 
-        def setup(self, session: TrainingSession):
+        def pre_session(self, session: TrainingSession):
             self.setup_calls += 1
 
-        def teardown(self, session: TrainingSession):
+        def post_session(self, session: TrainingSession):
             self.teardown_calls += 1
 
         def pre_iteration_callback(self, session: TrainingSession) -> None:

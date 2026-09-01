@@ -51,10 +51,10 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
         def __init__(self, config):
             self.prefix = config["prefix"]
 
-        def setup(self, session):
+        def pre_session(self, session):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
     @step("custom_optimizer")
@@ -113,7 +113,7 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
     assert "requires: Hook.custom_metrics" in graph
     assert "requires: Step.custom_optimizer" in graph
     assert graph.index("Resource.custom_model.setup()") < graph.index(
-        "Hook.custom_metrics.setup()"
+        "Hook.custom_metrics.pre_session()"
     )
     assert graph.index("Step.custom_optimizer.run()") < graph.index(
         "Step.consumer.run()"

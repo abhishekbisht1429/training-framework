@@ -29,7 +29,7 @@ class Logger(LifecycleHook):
         self.call_every = config["log_every"]
         self._log_file = config.get("log_file", sys.stdout)
 
-    def setup(self, session: Session) -> Any:
+    def pre_session(self, session: Session) -> Any:
         if self._log_file is not sys.stdout:
             try:
                 self._log_file = open(self._config["log_file"], "w")
@@ -39,7 +39,7 @@ class Logger(LifecycleHook):
                     f"{self._config['log_file']}"
                 )
 
-    def teardown(self, session) -> None:
+    def post_session(self, session) -> None:
         if self._log_file is not sys.stdout:
             self._log_file.close()
 
@@ -119,10 +119,10 @@ class Timer(LifecycleHook):
         self._session_start = None
         self._iter_start = None
 
-    def setup(self, session: TrainingSession):
+    def pre_session(self, session: TrainingSession):
         self._session_start = time.time_ns()
 
-    def teardown(self, session: Session):
+    def post_session(self, session: Session):
         pass
 
     def pre_iteration_callback(self, session: Session) -> None:

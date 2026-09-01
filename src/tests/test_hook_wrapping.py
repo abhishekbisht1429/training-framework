@@ -45,7 +45,7 @@ def test_wraps_orders_every_shared_lifecycle_phase(tmp_path):
         def __init__(self, config):
             pass
 
-        def setup(self, session):
+        def pre_session(self, session):
             events.append("inner.setup")
 
         def pre_iteration_callback(self, session):
@@ -54,7 +54,7 @@ def test_wraps_orders_every_shared_lifecycle_phase(tmp_path):
         def post_iteration_callback(self, session):
             events.append("inner.post")
 
-        def teardown(self, session):
+        def post_session(self, session):
             events.append("inner.teardown")
 
     @hook("outer")
@@ -65,7 +65,7 @@ def test_wraps_orders_every_shared_lifecycle_phase(tmp_path):
         def __init__(self, config):
             pass
 
-        def setup(self, session):
+        def pre_session(self, session):
             events.append("outer.setup")
 
         def pre_iteration_callback(self, session):
@@ -74,7 +74,7 @@ def test_wraps_orders_every_shared_lifecycle_phase(tmp_path):
         def post_iteration_callback(self, session):
             events.append("outer.post")
 
-        def teardown(self, session):
+        def post_session(self, session):
             events.append("outer.teardown")
 
     @step("body")
@@ -94,7 +94,9 @@ def test_wraps_orders_every_shared_lifecycle_phase(tmp_path):
     session.add_step(BodyStep({}))
 
     graph = session.execution_graph()
-    assert graph.index("Hook.outer.setup()") < graph.index("Hook.inner.setup()")
+    assert graph.index("Hook.outer.pre_session()") < graph.index(
+        "Hook.inner.pre_session()"
+    )
     assert (
         graph.index("Hook.outer.pre_iteration_callback()")
         < graph.index("Hook.inner.pre_iteration_callback()")
@@ -103,8 +105,8 @@ def test_wraps_orders_every_shared_lifecycle_phase(tmp_path):
         graph.index("Hook.inner.post_iteration_callback()")
         < graph.index("Hook.outer.post_iteration_callback()")
     )
-    assert graph.index("Hook.inner.teardown()") < graph.index(
-        "Hook.outer.teardown()"
+    assert graph.index("Hook.inner.post_session()") < graph.index(
+        "Hook.outer.post_session()"
     )
     assert "wraps: Hook.inner" in graph
 
@@ -255,10 +257,10 @@ def test_wraps_rejects_missing_hook_target(tmp_path):
     class Wrapper(LifecycleHook):
         call_every = 1
 
-        def setup(self, session):
+        def pre_session(self, session):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
         def pre_iteration_callback(self, session):
@@ -289,10 +291,10 @@ def test_wraps_rejects_non_hook_target(tmp_path):
     class Wrapper(LifecycleHook):
         call_every = 1
 
-        def setup(self, session):
+        def pre_session(self, session):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
         def pre_iteration_callback(self, session):
@@ -353,10 +355,10 @@ def test_wraps_rejects_hooks_without_a_shared_lifecycle_phase(tmp_path):
         def __init__(self, config):
             pass
 
-        def setup(self, session):
+        def pre_session(self, session):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
     @hook("iteration_target")

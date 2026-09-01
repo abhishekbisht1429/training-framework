@@ -183,11 +183,11 @@ def test_checkpoint_pickle_round_trip_restores_resources_hooks_and_state(tmp_pat
             self.teardown_calls = 0
             self.seen_session_dirs = []
 
-        def setup(self, session):
+        def pre_session(self, session):
             self.setup_calls += 1
             self.seen_session_dirs.append(session.session_config.session_dir)
 
-        def teardown(self, session):
+        def post_session(self, session):
             self.teardown_calls += 1
 
         def get_state(self):

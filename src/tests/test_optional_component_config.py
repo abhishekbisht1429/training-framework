@@ -94,10 +94,10 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
             self.config = dict(config)
             self.call_every = 1
 
-        def setup(self, session):
+        def pre_session(self, session):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
         def pre_iteration_callback(self, session):
@@ -114,10 +114,10 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
             self.config = dict(config)
             self.call_every = 1
 
-        def setup(self, session):
+        def pre_session(self, session):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
         def pre_iteration_callback(self, session):
