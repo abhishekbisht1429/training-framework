@@ -282,6 +282,14 @@ python -m my_project.train --config my_project/config.yaml
 
 The parent process creates the session and worker configuration. The worker process reconstructs the session and executes the configured components.
 
+For debugger-managed worker processes, pass `--debug`. Workers are spawned
+normally, and the parent waits for them using plain process joins without
+heartbeat, failure, timeout, or termination monitoring:
+
+```bash
+python -m my_project.train --config my_project/config.yaml --debug
+```
+
 ## Core concepts
 
 ### Resource
@@ -1137,6 +1145,7 @@ samplers.
 | `new_max_iters` | New iteration limit in the extend operation |
 | `heartbeat_timeout` | Worker heartbeat deadline |
 | `process_timeout_on_join` | Graceful process-join timeout |
+| `debug` | Whether the parent only joins workers without monitoring them |
 | `get_component_config(session_index, key)` | Return a deep copy of one component mapping, or `{}` for a listed no-config component |
 | `get_all_component_configs(session_index)` | Return all selected component configs, excluding special entries |
 

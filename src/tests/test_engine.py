@@ -29,6 +29,7 @@ class _EngineConfig:
     checkpoint_path: str | None = None
     new_max_iters: int | None = None
     heartbeat_timeout: float = 10.0
+    debug: bool = False
 
 
 def _training_step(session: TrainingSession):
@@ -126,6 +127,65 @@ def test_engine_surfaces_a_real_spawned_worker_failure(tmp_path):
     ):
         with TrainingEngine(engine_config) as engine:
             engine.start_session()
+
+
+def test_debug_mode_starts_and_joins_workers_without_monitoring(
+        tmp_path,
+        monkeypatch,
+):
+    register_test_components()
+    wrappers = []
+    monitor_calls = []
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.closed = False
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    class Wrapper:
+        def __init__(self, *, session, rank, heartbeat_timeout):
+            self.started = False
+            self.joined = False
+            self.process = Process()
+            wrappers.append(self)
+
+        def start(self):
+            self.started = True
+
+        def join(self):
+            self.joined = True
+            self.process.alive = False
+
+    monkeypatch.setattr(
+        "training_framework.engine.core.SessionProcessWrapper",
+        Wrapper,
+    )
+    monkeypatch.setattr(
+        "training_framework.engine.core.monitor_processes",
+        lambda *args, **kwargs: monitor_calls.append(True),
+    )
+    engine_config = _EngineConfig(
+        mode="new",
+        session_configs=(
+            session_config(tmp_path / "first", max_iterations=1),
+            session_config(tmp_path / "second", max_iterations=1),
+        ),
+        debug=True,
+    )
+
+    with TrainingEngine(engine_config) as engine:
+        engine.start_session()
+
+    assert len(wrappers) == 2
+    assert all(wrapper.started and wrapper.joined for wrapper in wrappers)
+    assert all(wrapper.process.closed for wrapper in wrappers)
+    assert monitor_calls == []
 
 
 def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_path):

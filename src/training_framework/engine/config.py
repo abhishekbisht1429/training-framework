@@ -27,6 +27,11 @@ class Configurator:
         )
 
         self._parser.add_argument("--override", type=str, nargs="*", default=None)
+        self._parser.add_argument(
+            "--debug",
+            action="store_true",
+            help="Wait for worker processes using joins without monitoring",
+        )
         self._parser.add_argument("--heartbeat-timeout", type=float, default=30.0)
         self._parser.add_argument(
             "--process_timeout_on_join",
@@ -132,3 +137,7 @@ class Configurator:
     @property
     def heartbeat_timeout(self):
         return self._args.heartbeat_timeout
+
+    @property
+    def debug(self):
+        return self._args.debug

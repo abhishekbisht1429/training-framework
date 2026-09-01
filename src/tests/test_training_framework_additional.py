@@ -651,13 +651,26 @@ def test_configurator_reads_overrides_and_returns_deep_copies(tmp_path, monkeypa
     }
 
     config_path = _write_yaml(tmp_path, sample_config)
-    monkeypatch.setattr(sys, "argv", ["pytest", "--config", config_path, "--override", "sessions[0].checkpointer.checkpoint_every=11", "sessions.1.logger.log_every=9"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pytest",
+            "--config",
+            config_path,
+            "--debug",
+            "--override",
+            "sessions[0].checkpointer.checkpoint_every=11",
+            "sessions.1.logger.log_every=9",
+        ],
+    )
 
     configurator = Configurator()
     session_config = configurator.get_session_definition(0)
     resource_config = configurator.get_component_config(0, "logger")
 
     assert session_config["checkpointer"]["checkpoint_every"] == 11
+    assert configurator.debug is True
     assert configurator.get_component_config(1, "logger")["log_every"] == 9
     assert resource_config == sample_config["sessions"][0]["logger"]
 
@@ -703,6 +716,7 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
     sessions = [TrainingSession(config) for config in configurator.session_configs]
 
     assert len(sessions) == 2
+    assert configurator.debug is False
 
     first_hook_names = {
         component.name for component in sessions[0].get_all_hooks()

@@ -198,17 +198,24 @@ class TrainingEngine:
             ),
         )
 
+    def _join_started_processes(self) -> None:
+        for wrapper in self._session_process_wrappers:
+            if wrapper.started:
+                wrapper.join()
+
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
-            if exc_type is None:
-                self._monitor_processes()
-            else:
+            if exc_type is not None:
                 self.request_stop_all()
                 self._join_or_terminate(
                     self._session_process_wrappers,
                     timeout=self._timeout_on_interrupt,
                 )
+            elif getattr(self._configurator, "debug", False):
+                self._join_started_processes()
+            else:
+                self._monitor_processes()
         finally:
             self._close_resources()
         return False
