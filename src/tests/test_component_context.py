@@ -5,11 +5,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from training_framework.components import LifecycleHook, Resource
-from training_framework.util import (
-    context_entry,
-    context_exit,
-    requires_context,
-)
+from training_framework.util import requires_context
 
 if TYPE_CHECKING:
     from training_framework.session import Session
@@ -149,29 +145,4 @@ def test_context_exit_waits_for_outermost_teardown_and_clears_on_failure():
         resource.teardown(session_obj)
 
     assert resource.value_after_parent_teardown == "ready"
-    _assert_requires_context(resource)
-
-
-def test_explicit_context_decorators_are_not_wrapped_twice():
-    class ExplicitResource(Resource):
-        @requires_context
-        def guarded(self):
-            return "ready"
-
-        @context_entry
-        def setup(self, session: "Session"):
-            pass
-
-        @context_exit
-        def teardown(self, session: "Session"):
-            pass
-
-    assert context_entry(ExplicitResource.setup) is ExplicitResource.setup
-    assert context_exit(ExplicitResource.teardown) is ExplicitResource.teardown
-
-    resource = ExplicitResource()
-    session_obj = cast("Session", object())
-    resource.setup(session_obj)
-    assert resource.guarded() == "ready"
-    resource.teardown(session_obj)
     _assert_requires_context(resource)

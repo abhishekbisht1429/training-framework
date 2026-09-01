@@ -59,8 +59,7 @@ class Logger(LifecycleHook):
         return {"config": self._config}
 
     def __setstate__(self, state: Any) -> None:
-        self._config = state["config"]
-        self.call_every = self._config["log_every"]
+        self.__init__(state["config"])
 
 
 @resource("tensorboard")

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from training_framework.util import CaptureInitMeta, context_entry, context_exit
@@ -42,6 +43,9 @@ class Component(ABC, metaclass=ComponentMeta):
 
 
 class Stateful(ABC):
+    _PICKLE_VERSION_KEY = "__training_framework_pickle_version__"
+    _PICKLE_VERSION = 1
+
     @abstractmethod
     def get_state(self) -> Any:
         raise NotImplementedError
@@ -51,9 +55,31 @@ class Stateful(ABC):
         raise NotImplementedError
 
     def __getstate__(self) -> Any:
-        return self.get_state()
+        if not isinstance(self, Component):
+            return self.get_state()
+
+        return {
+            self._PICKLE_VERSION_KEY: self._PICKLE_VERSION,
+            "init_args": self._init_args,
+            "state": self.get_state(),
+        }
 
     def __setstate__(self, state: Any) -> None:
+        if (
+                isinstance(state, Mapping)
+                and state.get(self._PICKLE_VERSION_KEY)
+                == self._PICKLE_VERSION
+        ):
+            init_args = state["init_args"]
+            self.__init__(
+                *init_args["args"],
+                **init_args["kwargs"],
+            )
+            self.set_state(state["state"])
+            return
+
+        # Pickles created before the reconstruction envelope contained only
+        # the component state. Preserve that best-effort restoration path.
         self.set_state(state)
 
 

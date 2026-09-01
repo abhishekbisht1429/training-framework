@@ -12,6 +12,7 @@
 ## New test cases instructions
 - Do not add very implementation speciifc test cases. 
 - Wherever possible add future agnostic tests that test the intended functionality rather than testing whether the component behaves in a implementation specific way.
+- Every builtin component must have some serialization and deserialization tests.
 
 ## Parallel test guardian
 

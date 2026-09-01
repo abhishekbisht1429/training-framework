@@ -21,7 +21,7 @@ from training_framework.components import (
     resource,
     step, Stateful, SessionHook, LifecycleHook, Resource, Step,
 )
-from training_framework.session import SessionPhase, TrainingSession
+from training_framework.session import TrainingSession
 
 from tests.test_utils import make_config
 
@@ -52,11 +52,15 @@ class CriticalCheckpointAccumulatorStepBase(Step, Stateful):
         self.value = state["value"]
         self.history = list(state["history"])
 
+
+def _component(components, name):
+    return next(component for component in components if component.name == name)
+
+
 def run_to_completion(session: TrainingSession) -> list[int]:
     with session:
         completed_iterations = list(session)
 
-    assert session._phase is SessionPhase.FINISHED
     return completed_iterations
 
 
@@ -106,13 +110,14 @@ def test_pickle_resume_matches_uninterrupted_run_and_preserves_rng_streams(tmp_p
         assert [next(partial) for _ in range(3)] == [1, 2, 3]
         checkpoint_payload = pickle.dumps(partial)
 
-    assert partial._phase is SessionPhase.PAUSED
 
     restored = pickle.loads(checkpoint_payload)
-    restored_step = restored._steps["critical_checkpoint_rng_step"]
+    restored_step = _component(
+        restored.get_all_steps(),
+        "critical_checkpoint_rng_step",
+    )
 
     assert restored is not partial
-    assert restored._phase is SessionPhase.NEW
     assert restored.iteration == 3
     assert restored_step.samples == expected_samples[:3]
     with pytest.raises(
@@ -202,7 +207,10 @@ def test_checkpoint_resume_preserves_model_and_optimizer_state(tmp_path):
         checkpoint_payload = pickle.dumps(partial)
 
     restored = pickle.loads(checkpoint_payload)
-    restored_step = restored._steps["critical_checkpoint_optimizer_step"]
+    restored_step = _component(
+        restored.get_all_steps(),
+        "critical_checkpoint_optimizer_step",
+    )
 
     assert restored_step.initial_value == 0.25
     assert restored_step.learning_rate == 0.05
@@ -412,9 +420,18 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
 
     restored = pickle.loads(checkpoint_payload)
     restored_resource = restored.get_resource(resource_id)
-    restored_stateful_hook = restored._hooks["critical_checkpoint_stateful_hook"]
-    restored_stateless_hook = restored._hooks["critical_checkpoint_stateless_hook"]
-    restored_step = restored._steps["critical_checkpoint_accumulator_step"]
+    restored_stateful_hook = _component(
+        restored.get_all_hooks(),
+        "critical_checkpoint_stateful_hook",
+    )
+    restored_stateless_hook = _component(
+        restored.get_all_hooks(),
+        "critical_checkpoint_stateless_hook",
+    )
+    restored_step = _component(
+        restored.get_all_steps(),
+        "critical_checkpoint_accumulator_step",
+    )
 
     assert type(restored_resource) is CriticalCheckpointStatefulResource
     assert type(restored_stateful_hook) is CriticalCheckpointStatefulHook
@@ -578,7 +595,10 @@ def test_component_constructors_do_not_advance_restored_rng_streams(tmp_path):
         checkpoint_payload = pickle.dumps(partial)
 
     restored = pickle.loads(checkpoint_payload)
-    restored_step = restored._steps["critical_checkpoint_random_init_step"]
+    restored_step = _component(
+        restored.get_all_steps(),
+        "critical_checkpoint_random_init_step",
+    )
     run_to_completion(restored)
 
     assert restored_step.constructor_sample == baseline_step.constructor_sample

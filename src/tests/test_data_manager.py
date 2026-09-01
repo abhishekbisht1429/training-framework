@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import pickle
 import sys
 import time
 
@@ -134,6 +135,33 @@ def test_data_manager_resume_returns_the_exact_next_logical_batch(tmp_path):
         actual_next_batch = next(
             restored.get_resource("data_manager").data_iter
         )
+
+    assert not torch.equal(
+        first_batch[:, 0],
+        expected_next_batch[:, 0],
+    )
+    torch.testing.assert_close(
+        actual_next_batch[:, 0],
+        expected_next_batch[:, 0],
+    )
+
+
+def test_pickled_data_manager_resumes_at_the_exact_next_batch(tmp_path):
+    source = _new_session(tmp_path / "source")
+    with source:
+        source_manager = source.get_resource("data_manager")
+        first_batch = next(source_manager.data_iter)
+        restored_manager = pickle.loads(pickle.dumps(source_manager))
+        expected_next_batch = next(source_manager.data_iter)
+
+    target = _new_session(
+        tmp_path / "target",
+        register_components=False,
+    )
+    target.unregister_resource("data_manager")
+    target.register_resource(restored_manager)
+    with target:
+        actual_next_batch = next(restored_manager.data_iter)
 
     assert not torch.equal(
         first_batch[:, 0],

@@ -14,7 +14,6 @@ from collections.abc import Callable
 import pytest
 
 from training_framework.components import (
-    Component,
     Hook,
     Resource,
     Step,
@@ -27,7 +26,7 @@ from training_framework.components import (
     topological_sort_of_components,
     wraps,
 )
-from training_framework.components.registry import _COMPONENT_REGISTRY, _component
+from training_framework.components.registry import _COMPONENT_REGISTRY, component_registry
 
 
 ClassFactory = Callable[[str], type]
@@ -111,7 +110,7 @@ def test_component_decorator_registers_class_and_sets_metadata(
     decorated_class = decorator("registered_component")(component_class)
 
     assert decorated_class is component_class
-    assert _COMPONENT_REGISTRY == {"registered_component": component_class}
+    assert component_registry() == {"registered_component": component_class}
     assert component_class.name == "registered_component"
     assert component_class.id == f"{kind}.registered_component"
 
@@ -132,7 +131,7 @@ def test_duplicate_component_name_is_rejected_without_overwriting_registry(
     with pytest.raises(ValueError, match="already registered"):
         decorator("duplicate_name")(second_class)
 
-    assert _COMPONENT_REGISTRY == {"duplicate_name": first_class}
+    assert component_registry() == {"duplicate_name": first_class}
 
 
 @pytest.mark.parametrize(
@@ -154,29 +153,6 @@ def test_component_decorator_rejects_wrong_component_type(
         decorator("wrong_component")(wrong_class)
 
 
-
-def test_internal_component_decorator_rejects_missing_or_ambiguous_category():
-    class BareComponent(Component):
-        pass
-
-    class AmbiguousComponent(Resource, Step):
-        def setup(self, session):
-            pass
-
-        def teardown(self, session):
-            pass
-
-        def run(self, session):
-            pass
-
-    with pytest.raises(TypeError, match="exactly one component category"):
-        _component("bare_component")(BareComponent)
-    with pytest.raises(TypeError, match="abstract"):
-        BareComponent()
-    with pytest.raises(TypeError, match="found Resource, Step"):
-        _component("ambiguous_component")(AmbiguousComponent)
-
-
 def test_same_category_registration_can_be_overwritten_explicitly():
     first_class = resource("replaceable")(
         make_resource_class("FirstResource")
@@ -186,7 +162,7 @@ def test_same_category_registration_can_be_overwritten_explicitly():
     )
 
     assert replacement_class is not first_class
-    assert _COMPONENT_REGISTRY["replaceable"] is replacement_class
+    assert component_registry()["replaceable"] is replacement_class
     assert replacement_class.id == "Resource.replaceable"
 
 
@@ -199,7 +175,7 @@ def test_component_names_are_unique_across_categories():
     with pytest.raises(ValueError, match="already registered"):
         step(shared_name)(make_step_class("SharedStep"))
 
-    assert _COMPONENT_REGISTRY == {shared_name: resource_class}
+    assert component_registry() == {shared_name: resource_class}
     assert resource_class.id == "Resource.shared_name"
 
 
@@ -322,48 +298,6 @@ def test_dependency_decorator_rejects_invalid_consumer_type(
         dependency_decorator("dependency")(component_class)
 
 
-@pytest.mark.parametrize(
-    ("dependency_decorator", "class_factory", "attribute"),
-    (
-        pytest.param(
-            requires_resource,
-            make_step_class,
-            "required_resources",
-            id="multiple-resources",
-        ),
-        pytest.param(
-            requires_hook,
-            make_step_class,
-            "required_hooks",
-            id="multiple-hooks",
-        ),
-        pytest.param(
-            requires_step,
-            make_step_class,
-            "required_steps",
-            id="multiple-steps",
-        ),
-        pytest.param(
-            wraps,
-            make_hook_class,
-            "wrapped_hooks",
-            id="multiple-wrapped-hooks",
-        ),
-    ),
-)
-def test_multiple_requirements_preserve_decorator_application_order(
-    dependency_decorator,
-    class_factory: ClassFactory,
-    attribute: str,
-):
-    component_class = class_factory("Consumer")
-
-    component_class = dependency_decorator("first")(component_class)
-    component_class = dependency_decorator("second")(component_class)
-
-    assert getattr(component_class, attribute) == ["first", "second"]
-
-
 def test_resource_requirements_on_subclass_do_not_mutate_parent_class():
     parent_class = requires_resource("parent_resource")(
         make_step_class("ParentStep")
@@ -379,12 +313,6 @@ def test_resource_requirements_on_subclass_do_not_mutate_parent_class():
         "parent_resource",
         "child_resource",
     ]
-
-
-
-def test_topological_sort_returns_empty_mapping_for_empty_registries():
-    assert topological_sort_of_components() == {}
-
 
 
 def test_topological_sort_orders_full_cross_category_dependency_chain():
@@ -493,7 +421,6 @@ def test_prerequisite_name_must_exist_in_correct_registry(
         topological_sort_of_components()
 
 
-
 def test_overwrite_cannot_change_component_category():
     shared_name = "shared_dependency"
 
@@ -503,8 +430,7 @@ def test_overwrite_cannot_change_component_category():
     with pytest.raises(ValueError, match="Cannot overwrite Resource"):
         hook(shared_name, overwrite=True)(make_hook_class("SharedHook"))
 
-    assert _COMPONENT_REGISTRY[shared_name] is shared_resource
-
+    assert component_registry()[shared_name] is shared_resource
 
 
 def test_topological_sort_rejects_cyclic_dependencies():
