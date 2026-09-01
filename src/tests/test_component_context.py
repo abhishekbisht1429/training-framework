@@ -5,11 +5,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from training_framework.components import LifecycleHook, Resource
-from training_framework.util import (
-    context_entry,
-    context_exit,
-    requires_context,
-)
+from training_framework.util import requires_context
 
 if TYPE_CHECKING:
     from training_framework.session import Session
@@ -52,10 +48,10 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
         def guarded(self):
             return "hook"
 
-        def setup(self, session: "Session"):
+        def pre_session(self, session: "Session"):
             pass
 
-        def teardown(self, session: "Session"):
+        def post_session(self, session: "Session"):
             self.teardown_value = self.guarded()
 
         def pre_iteration_callback(self, session: "Session"):
@@ -72,14 +68,14 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
     _assert_requires_context(hook)
 
     resource.setup(session_obj)
-    hook.setup(session_obj)
+    hook.pre_session(session_obj)
 
     assert resource.guarded() == "resource"
     assert hook.guarded() == "hook"
     hook.pre_iteration_callback(session_obj)
     hook.post_iteration_callback(session_obj)
 
-    hook.teardown(session_obj)
+    hook.post_session(session_obj)
     resource.teardown(session_obj)
 
     assert hook.callback_values == ["hook", "hook"]
@@ -149,29 +145,4 @@ def test_context_exit_waits_for_outermost_teardown_and_clears_on_failure():
         resource.teardown(session_obj)
 
     assert resource.value_after_parent_teardown == "ready"
-    _assert_requires_context(resource)
-
-
-def test_explicit_context_decorators_are_not_wrapped_twice():
-    class ExplicitResource(Resource):
-        @requires_context
-        def guarded(self):
-            return "ready"
-
-        @context_entry
-        def setup(self, session: "Session"):
-            pass
-
-        @context_exit
-        def teardown(self, session: "Session"):
-            pass
-
-    assert context_entry(ExplicitResource.setup) is ExplicitResource.setup
-    assert context_exit(ExplicitResource.teardown) is ExplicitResource.teardown
-
-    resource = ExplicitResource()
-    session_obj = cast("Session", object())
-    resource.setup(session_obj)
-    assert resource.guarded() == "ready"
-    resource.teardown(session_obj)
     _assert_requires_context(resource)

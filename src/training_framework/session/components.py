@@ -11,7 +11,7 @@ from training_framework.components import (
     Step,
 )
 from training_framework.components.config import (
-    RESERVED_CONFIG_NAMES,
+    reserved_config_names,
     selected_component_names,
 )
 from training_framework.components.registry import (
@@ -123,9 +123,11 @@ class SessionComponents:
             if isinstance(component, Step)
         }
 
-    @staticmethod
-    def _selected_component_names(config: Mapping) -> list[str]:
-        return selected_component_names(config)
+    def _selected_component_names(self, config: Mapping) -> list[str]:
+        return selected_component_names(
+            config,
+            session_type=self.session_type,
+        )
 
     @staticmethod
     def _dependency_specs(
@@ -187,12 +189,13 @@ class SessionComponents:
     ) -> None:
         selected_names = self._selected_component_names(config)
         self.aliases.validate_config(config)
+        reserved_names = reserved_config_names(self.session_type)
 
         component_configs: dict[str, dict] = {}
         explicitly_configured: set[str] = set()
         configured_roots: list[str] = []
         for name, component_config in config.items():
-            if name in RESERVED_CONFIG_NAMES:
+            if name in reserved_names:
                 continue
             if not isinstance(component_config, Mapping):
                 raise ValueError(

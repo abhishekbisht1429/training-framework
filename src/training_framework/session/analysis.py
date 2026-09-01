@@ -18,22 +18,17 @@ class AnalysisSession(Session):
             "logger": {"log_every": 10},
         }
 
-    def __init__(
-            self,
-            config: dict,
-            *,
-            model_checkpoint_path: str | os.PathLike[str],
-    ):
+    def __init__(self, config: dict):
+        if not isinstance(config, Mapping):
+            raise TypeError("config must be a mapping")
+        normalized_config = dict(config)
         self._model_checkpoint_path = self._validate_model_checkpoint_path(
-            model_checkpoint_path,
+            normalized_config.get("model_checkpoint_path"),
         )
-        super().__init__(config)
-        self._init_args = {
-            "args": (config,),
-            "kwargs": {
-                "model_checkpoint_path": self._model_checkpoint_path,
-            },
-        }
+        normalized_config["model_checkpoint_path"] = (
+            self._model_checkpoint_path
+        )
+        super().__init__(normalized_config)
 
     @staticmethod
     def _validate_model_checkpoint_path(

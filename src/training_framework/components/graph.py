@@ -256,7 +256,7 @@ def render_execution_graph(
         lines,
         "  |   ",
         [(component, "setup") for component in ordered_resources]
-        + [(component, "setup") for component in session_hooks],
+        + [(component, "pre_session") for component in session_hooks],
         alias_resolver,
     )
 
@@ -308,7 +308,7 @@ def render_execution_graph(
     _append_execution_calls(
         lines,
         "      ",
-        [(component, "teardown") for component in reversed(session_hooks)]
+        [(component, "post_session") for component in reversed(session_hooks)]
         + [(component, "teardown") for component in reversed(ordered_resources)],
         alias_resolver,
     )

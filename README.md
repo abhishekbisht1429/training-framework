@@ -201,10 +201,10 @@ class ProgressHook(LifecycleHook):
     def __init__(self, config: dict):
         self.call_every = int(config.get("call_every", 1))
 
-    def setup(self, session: TrainingSession) -> None:
+    def pre_session(self, session: TrainingSession) -> None:
         pass
 
-    def teardown(self, session: TrainingSession) -> None:
+    def post_session(self, session: TrainingSession) -> None:
         pass
 
     def pre_iteration_callback(self, session: TrainingSession) -> None:
@@ -282,6 +282,14 @@ python -m my_project.train --config my_project/config.yaml
 
 The parent process creates the session and worker configuration. The worker process reconstructs the session and executes the configured components.
 
+For debugger-managed worker processes, pass `--debug`. Workers are spawned
+normally, and the parent waits for them using plain process joins without
+heartbeat, failure, timeout, or termination monitoring:
+
+```bash
+python -m my_project.train --config my_project/config.yaml --debug
+```
+
 ## Core concepts
 
 ### Resource
@@ -314,7 +322,7 @@ The framework provides three hook interfaces:
 
 | Interface | Methods |
 |---|---|
-| `SessionHook` | `setup(session)`, `teardown(session)` |
+| `SessionHook` | `pre_session(session)`, `post_session(session)` |
 | `IterationHook` | `pre_iteration_callback(session)`, `post_iteration_callback(session)` |
 | `LifecycleHook` | All four methods |
 
@@ -518,8 +526,8 @@ class OuterHook(LifecycleHook):
     ...
 ```
 
-If `outer` wraps `inner`, setup and pre-iteration callbacks run outer
-then inner, while post-iteration callbacks and teardown run inner then outer.
+If `outer` wraps `inner`, pre-session and pre-iteration callbacks run outer
+then inner, while post-iteration and post-session callbacks run inner then outer.
 Wrapping names support session aliases. Hooks must share a lifecycle phase. For
 two iteration-capable hooks, the wrapper's `call_every` must be a positive
 multiple of the wrapped hook's value. This lets the wrapper run less often while
@@ -550,7 +558,7 @@ Construct session
     |
 Enter session
     +-- resource.setup() in dependency order
-    +-- SessionHook.setup() in dependency order
+    +-- SessionHook.pre_session() in dependency order
     +-- create session directory and write config.yaml for rank 0
     |
 Each iteration
@@ -560,7 +568,7 @@ Each iteration
     +-- clear iteration_context
     |
 Exit session
-    +-- SessionHook.teardown() in reverse dependency order
+    +-- SessionHook.post_session() in reverse dependency order
     +-- resource.teardown() in reverse dependency order
     +-- clear session_context
 ```
@@ -712,6 +720,7 @@ application analysis components need to be selected explicitly:
 ```yaml
 sessions:
   - session_type: analysis
+    model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
 
     session_config:
       rng_seed: 42
@@ -720,9 +729,6 @@ sessions:
       components_package: my_project.analysis_components
       device: cpu
       show_execution_graph: true
-
-    session_kwargs:
-      model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
 
     report:
       output_path: ./analysis-runs/report.json
@@ -734,10 +740,10 @@ For direct execution, construct the concrete analysis subclass:
 from training_framework.session import AnalysisSession
 
 
-session = AnalysisSession(
-    analysis_config,
-    model_checkpoint_path="./runs/session_.../checkpoints/<checkpoint-name>",
+analysis_config["model_checkpoint_path"] = (
+    "./runs/session_.../checkpoints/<checkpoint-name>"
 )
+session = AnalysisSession(analysis_config)
 ```
 
 Run the analysis entry through the same generic config path:
@@ -1139,6 +1145,7 @@ samplers.
 | `new_max_iters` | New iteration limit in the extend operation |
 | `heartbeat_timeout` | Worker heartbeat deadline |
 | `process_timeout_on_join` | Graceful process-join timeout |
+| `debug` | Whether the parent only joins workers without monitoring them |
 | `get_component_config(session_index, key)` | Return a deep copy of one component mapping, or `{}` for a listed no-config component |
 | `get_all_component_configs(session_index)` | Return all selected component configs, excluding special entries |
 
@@ -1170,7 +1177,7 @@ The engine monitors workers while leaving the context.
 |---|---|
 | `Session` | Abstract base implementing the shared component and iteration lifecycle |
 | `TrainingSession(config)` | Concrete training session with logger/checkpointer defaults and extension support |
-| `AnalysisSession(config, *, model_checkpoint_path)` | Concrete analysis session with trained-model/logger defaults |
+| `AnalysisSession(config)` | Concrete analysis session with trained-model/logger defaults |
 | `session_type` | Registered string identifying the concrete session workflow |
 | `AnalysisSession.model_checkpoint_path` | Source training checkpoint used by analysis |
 | `session_config` | Frozen `SessionConfig` containing seed, directory, and max iterations |

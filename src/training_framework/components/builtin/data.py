@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, override, Callable
 
 import torch
 from torch.utils.data import DataLoader
@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from training_framework.components import StatefulResource
 from training_framework.dataloader import DistributedInfiniteSampler
 from training_framework.components import requires_resource, resource
+from training_framework.util import requires_context
 
 if TYPE_CHECKING:
     from training_framework.session import Session
@@ -58,6 +59,7 @@ class DataManager(StatefulResource):
         self._sampler_state: dict[str, Any] | None = None
         self._local_batch_size: int | None = None
         self._samples_per_rank: int | None = None
+        self._collate_fn: Callable[[Any], Any] | None = None
 
         if (
                 isinstance(self._batch_size, bool)
@@ -76,9 +78,11 @@ class DataManager(StatefulResource):
     def data_iter(self):
         return self._data_iter
 
-    @classmethod
-    def collate_fn(cls, batch):
-        return torch.stack(batch)
+    def collate_fn(self, batch):
+        if self._collate_fn is None:
+            return torch.stack(batch)
+        else:
+            return self._collate_fn(batch)
 
     def _validate_setup(self, dataset_size: int, world_size: int) -> None:
         if dataset_size <= 0:
@@ -204,3 +208,7 @@ class DataManager(StatefulResource):
                 "Cannot restore DataManager state with a different batch_size"
             )
         self._sampler_state = deepcopy(state["sampler_state"])
+    
+    @requires_context
+    def set_collate_func(self, collate_fn: Callable[[Any], Any]):
+        self._collate_fn = collate_fn

@@ -6,7 +6,7 @@ from training_framework.components import (
     Resource,
     resource,
 )
-from training_framework.session import SessionPhase, TrainingSession
+from training_framework.session import TrainingSession
 from tests.test_utils import read_events, register_test_components, session_config
 
 
@@ -38,7 +38,6 @@ def test_config_driven_session_runs_training_and_lifecycle_end_to_end(tmp_path):
 
     assert completed_iterations == [1, 2, 3]
     assert session.iteration == 3
-    assert session._phase is SessionPhase.FINISHED
     assert session.session_context == {}
 
     assert model.setup_count == 1

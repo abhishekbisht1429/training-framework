@@ -161,7 +161,7 @@ class StatefulMetricsHook(StatefulLifeCycleHook):
         self.observations: list[dict[str, float | int]] = []
 
     @override
-    def setup(self, session: TrainingSession) -> None:
+    def pre_session(self, session: TrainingSession) -> None:
         self.setup_count += 1
         _append_event(
             self.config.get("event_path"),
@@ -171,7 +171,7 @@ class StatefulMetricsHook(StatefulLifeCycleHook):
         )
 
     @override
-    def teardown(self, session: TrainingSession) -> None:
+    def post_session(self, session: TrainingSession) -> None:
         self.teardown_count += 1
         _append_event(
             self.config.get("event_path"),
@@ -256,11 +256,11 @@ class RankZeroOnlyHook(LifecycleHook):
         self.call_every = int(self.config.get("call_every", 1))
 
     @override
-    def setup(self, session: TrainingSession) -> None:
+    def pre_session(self, session: TrainingSession) -> None:
         return None
 
     @override
-    def teardown(self, session: TrainingSession) -> None:
+    def post_session(self, session: TrainingSession) -> None:
         return None
 
     @override

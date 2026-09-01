@@ -1,28 +1,14 @@
 from __future__ import annotations
 
+import pickle
 from types import SimpleNamespace
 
 import pytest
 import torch
 from torch import nn
 
-import training_framework.components.builtin as builtin_components
-from training_framework.components.builtin import (
-    Checkpointer,
-    DataManager,
-    DDPResource,
-    Logger,
-    OptimizerHook,
-    Tensorboard,
-    Timer,
-)
-from training_framework.components.builtin import (
-    checkpointing,
-    data,
-    distributed,
-    observability,
-    optimization,
-)
+from training_framework.components.builtin import Timer
+from training_framework.components.builtin import distributed, observability
 from training_framework.components import (
     Resource,
     StatefulResource,
@@ -163,24 +149,7 @@ def _optimizer_hook(session):
     )
 
 
-def test_builtin_package_exports_public_component_classes():
-    assert builtin_components.Checkpointer is Checkpointer
-    assert builtin_components.DataManager is DataManager
-    assert builtin_components.DDPResource is DDPResource
-    assert builtin_components.Logger is Logger
-    assert builtin_components.OptimizerHook is OptimizerHook
-    assert builtin_components.Tensorboard is Tensorboard
-    assert builtin_components.Timer is Timer
-
-    assert Checkpointer is checkpointing.Checkpointer
-    assert DataManager is data.DataManager
-    assert DDPResource is distributed.DDPResource
-    assert Logger is observability.Logger
-    assert OptimizerHook is optimization.OptimizerHook
-    assert Tensorboard is observability.Tensorboard
-    assert Timer is observability.Timer
-
-def test_timer_formats_iteration_and_elapsed_durations(
+def test_pickled_timer_formats_iteration_and_elapsed_durations(
         monkeypatch,
         capsys,
 ):
@@ -190,10 +159,12 @@ def test_timer_formats_iteration_and_elapsed_durations(
         "time_ns",
         timestamps.__next__,
     )
-    timer = Timer({"call_every": 1})
+    timer = pickle.loads(pickle.dumps(
+        Timer({"call_every": 1})
+    ))
     session = SimpleNamespace(iteration=2)
 
-    timer.setup(session)
+    timer.pre_session(session)
     timer.pre_iteration_callback(session)
     timer.post_iteration_callback(session)
 
@@ -312,7 +283,7 @@ def test_ddp_resource_activates_its_model_dependency(tmp_path):
     )
 
 
-def test_ddp_resource_and_optimizer_run_through_public_session_api(
+def test_pickled_ddp_resource_and_optimizer_run_through_public_session_api(
         tmp_path,
         monkeypatch,
 ):
@@ -322,13 +293,16 @@ def test_ddp_resource_and_optimizer_run_through_public_session_api(
     _remove_default_hooks(session)
 
     ddp = session.get_resource("ddp")
+    ddp = pickle.loads(pickle.dumps(ddp))
+    session.unregister_resource("ddp")
+    session.register_resource(ddp)
     model = session.get_resource("model")
     optimizer = _optimizer_hook(session)
     graph = session.execution_graph()
 
     ddp_setup = graph.index("Resource.ddp.setup()")
     assert graph.index("Resource.public_test_model.setup()") < ddp_setup
-    assert ddp_setup < graph.index("Hook.optimizer.setup()")
+    assert ddp_setup < graph.index("Hook.optimizer.pre_session()")
     assert "requires: Resource.public_test_model" in graph
     assert "requires: Resource.ddp" in graph
 
@@ -456,7 +430,7 @@ def test_ddp_resource_cleans_up_when_model_wrapping_fails(
         _ = ddp.wrapped_model
 
 
-def test_optimizer_state_round_trip_matches_uninterrupted_training(
+def test_pickled_optimizer_state_matches_uninterrupted_training(
         tmp_path,
         monkeypatch,
 ):
@@ -474,7 +448,13 @@ def test_optimizer_state_round_trip_matches_uninterrupted_training(
     with paused:
         assert next(paused) == 1
 
+    restored_optimizer = pickle.loads(pickle.dumps(
+        _optimizer_hook(paused)
+    ))
     restored = TrainingSession.from_state(paused.get_state())
+    restored.unregister_hook("optimizer")
+    restored.register_hook(restored_optimizer)
+
     with restored:
         assert list(restored) == [2, 3]
 

@@ -22,7 +22,7 @@ class Checkpointer(LifecycleHook, Stateful):
         self.call_every = config["checkpoint_every"]
 
     @override
-    def setup(self, session: Session) -> Any:
+    def pre_session(self, session: Session) -> Any:
         if "checkpoints_dir" in self._config:
             self._checkpoints_dir = self._config["checkpoints_dir"]
         else:
@@ -33,7 +33,7 @@ class Checkpointer(LifecycleHook, Stateful):
         os.makedirs(self._checkpoints_dir, exist_ok=True)
 
     @override
-    def teardown(self, session):
+    def post_session(self, session):
         pass
 
     @override

@@ -43,7 +43,7 @@ class OptimizerHook(StatefulLifeCycleHook):
         )
 
     @override
-    def setup(self, session: Session):
+    def pre_session(self, session: Session):
         ddp_model: nn.Module = session.get_resource("ddp")
         self._optimizer = optim.AdamW(
             ddp_model.wrapped_model.parameters(),
@@ -82,7 +82,7 @@ class OptimizerHook(StatefulLifeCycleHook):
         self._lr_scheduler.step()
 
     @override
-    def teardown(self, session: Session):
+    def post_session(self, session: Session):
         self._restored_state = self.get_state()
         self._optimizer = None
         self._lr_scheduler = None

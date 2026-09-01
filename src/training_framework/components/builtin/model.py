@@ -15,10 +15,9 @@ class TrainedModel(Resource):
     """Expose the model resource restored from a training-session checkpoint."""
 
     def __init__(self, config: dict):
-        self._config = config
         self._source_session = None
-        self._checkpoint_path = config['checkpoint-path']
         self._model: Any = None
+        self._model_checkpoint_path = config["model_checkpoint_path"]
 
     @property
     @requires_context
@@ -26,13 +25,16 @@ class TrainedModel(Resource):
         return self._model
 
     def setup(self, session: Session) -> Any:
-        from training_framework.session import Session, TRAINING_SESSION_TYPE
+        from training_framework.session import (
+            Session as FrameworkSession,
+            TRAINING_SESSION_TYPE,
+        )
 
         source_session = Checkpointer.load_checkpoint(
-            self._checkpoint_path,
+            self._model_checkpoint_path,
             map_location="cpu",
         )
-        if not isinstance(source_session, Session):
+        if not isinstance(source_session, FrameworkSession):
             raise TypeError(
                 "Analysis model checkpoint must contain a framework Session"
             )

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from training_framework.util import CaptureInitMeta, context_entry, context_exit
@@ -14,10 +15,15 @@ class ComponentMeta(CaptureInitMeta):
         cls = super().__new__(mcls, name, bases, namespace)
 
         if getattr(cls, "_context_managed_lifecycle", False):
-            if "setup" in namespace:
-                cls.setup = context_entry(namespace["setup"])
-            if "teardown" in namespace:
-                cls.teardown = context_exit(namespace["teardown"])
+            lifecycle_wrappers = {
+                "setup": context_entry,
+                "pre_session": context_entry,
+                "teardown": context_exit,
+                "post_session": context_exit,
+            }
+            for method_name, wrapper in lifecycle_wrappers.items():
+                if method_name in namespace:
+                    setattr(cls, method_name, wrapper(namespace[method_name]))
 
         return cls
 
@@ -37,6 +43,9 @@ class Component(ABC, metaclass=ComponentMeta):
 
 
 class Stateful(ABC):
+    _PICKLE_VERSION_KEY = "__training_framework_pickle_version__"
+    _PICKLE_VERSION = 1
+
     @abstractmethod
     def get_state(self) -> Any:
         raise NotImplementedError
@@ -46,9 +55,31 @@ class Stateful(ABC):
         raise NotImplementedError
 
     def __getstate__(self) -> Any:
-        return self.get_state()
+        if not isinstance(self, Component):
+            return self.get_state()
+
+        return {
+            self._PICKLE_VERSION_KEY: self._PICKLE_VERSION,
+            "init_args": self._init_args,
+            "state": self.get_state(),
+        }
 
     def __setstate__(self, state: Any) -> None:
+        if (
+                isinstance(state, Mapping)
+                and state.get(self._PICKLE_VERSION_KEY)
+                == self._PICKLE_VERSION
+        ):
+            init_args = state["init_args"]
+            self.__init__(
+                *init_args["args"],
+                **init_args["kwargs"],
+            )
+            self.set_state(state["state"])
+            return
+
+        # Pickles created before the reconstruction envelope contained only
+        # the component state. Preserve that best-effort restoration path.
         self.set_state(state)
 
 
@@ -64,11 +95,11 @@ class Hook(Component, ABC):
 
 class SessionHook(Hook, ABC):
     @abstractmethod
-    def setup(self, session: "Session") -> None:
+    def pre_session(self, session: "Session") -> None:
         pass
 
     @abstractmethod
-    def teardown(self, session: "Session") -> None:
+    def post_session(self, session: "Session") -> None:
         pass
 
 

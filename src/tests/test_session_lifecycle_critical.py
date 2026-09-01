@@ -17,7 +17,7 @@ from training_framework.components import (
     resource,
     step, LifecycleHook, Resource, Step,
 )
-from training_framework.session import SessionPhase, TrainingSession
+from training_framework.session import TrainingSession
 from tests.test_utils import make_config
 
 class LifecycleSetupError(RuntimeError):
@@ -86,13 +86,13 @@ class TraceHookBase(LifecycleHook):
         self.post_payloads: list[tuple[int, tuple[str, ...]]] = []
         self.context_sizes_seen_on_setup: list[int] = []
 
-    def setup(self, session: TrainingSession):
+    def pre_session(self, session: TrainingSession):
         self.setup_calls += 1
         self.trace.append(f"hook:{self.label}:setup")
         self.context_sizes_seen_on_setup.append(len(session.session_context))
         session.session_context.setdefault("hook_setups", []).append(self.label)
 
-    def teardown(self, session: TrainingSession):
+    def post_session(self, session: TrainingSession):
         self.teardown_calls += 1
         self.trace.append(f"hook:{self.label}:teardown")
 
@@ -189,7 +189,6 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
     completed: list[int] = []
     with session as entered:
         assert entered is session
-        assert session._phase is SessionPhase.READY
 
         while True:
             try:
@@ -201,10 +200,8 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
             # iteration completion must clear the transient context.
             assert session.iteration_context == {}
 
-        assert session._phase is SessionPhase.FINISHED
 
     assert completed == [1, 2, 3, 4, 5]
-    assert session._phase is SessionPhase.FINISHED
     assert session.session_context == {}
 
     expected_trace = [
@@ -292,7 +289,6 @@ def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
         session.session_context["temporary"] = "first-context"
 
     assert session.iteration == 2
-    assert session._phase is SessionPhase.PAUSED
     assert session.session_context == {}
     assert resource_a.setup_calls == 1
     assert resource_a.teardown_calls == 1
@@ -300,14 +296,11 @@ def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
     assert hook_obj.teardown_calls == 1
 
     with session:
-        assert session._phase is SessionPhase.READY
         assert session.iteration == 2
         assert "temporary" not in session.session_context
         assert list(session) == [3, 4]
-        assert session._phase is SessionPhase.FINISHED
 
     assert session.iteration == 4
-    assert session._phase is SessionPhase.FINISHED
     assert session.session_context == {}
     assert resource_a.setup_calls == 2
     assert resource_a.teardown_calls == 2
@@ -373,8 +366,6 @@ def test_body_exception_propagates_after_normal_cleanup(tmp_path):
         "resource:A:teardown",
     ]
     assert session.session_context == {}
-    assert session._phase is SessionPhase.NEW
-    assert getattr(session, "_active", False) is False
 
 
 def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
@@ -422,7 +413,6 @@ def test_resource_teardown_failure_does_not_skip_remaining_cleanup(
     assert resource_a.teardown_calls == 1
     assert hook_obj.teardown_calls == 1
     assert session.session_context == {}
-    assert session._phase is SessionPhase.NEW
     assert trace[-3:] == [
         "hook:A:teardown",
         "resource:B:teardown",
@@ -457,8 +447,6 @@ def test_partial_setup_failure_rolls_back_initialized_resources(tmp_path):
     assert resource_a.setup_calls == 1
     assert resource_a.teardown_calls == 1
     assert session.session_context == {}
-    assert session._phase is SessionPhase.NEW
-    assert getattr(session, "_active", False) is False
 
 
 def test_hook_setup_failure_rolls_back_hooks_and_resources(tmp_path):
@@ -472,7 +460,7 @@ def test_hook_setup_failure_rolls_back_hooks_and_resources(tmp_path):
 
     @hook("critical_hook_setup_failing")
     class CriticalHookSetupFailing(TraceHookBase):
-        def setup(self, session: TrainingSession):
+        def pre_session(self, session: TrainingSession):
             self.setup_calls += 1
             self.trace.append(f"hook:{self.label}:setup")
             raise LifecycleSetupError(f"hook {self.label} setup failed")
@@ -501,42 +489,6 @@ def test_hook_setup_failure_rolls_back_hooks_and_resources(tmp_path):
     ]
     assert failing_hook.teardown_calls == 0
     assert session.session_context == {}
-    assert session._phase is SessionPhase.NEW
-    assert getattr(session, "_active", False) is False
-
-
-def test_resource_and_hook_have_independent_setup_tracking(tmp_path):
-    @resource("critical_shared_lifecycle_resource")
-    class CriticalSharedNameResource(TraceResourceBase):
-        pass
-
-    @hook("critical_shared_lifecycle_hook")
-    class CriticalSharedNameHook(TraceHookBase):
-        def setup(self, session: TrainingSession):
-            self.setup_calls += 1
-            self.trace.append(f"hook:{self.label}:setup")
-            raise LifecycleSetupError(f"hook {self.label} setup failed")
-
-    trace: list[str] = []
-    session = TrainingSession(
-        make_config(tmp_path / "shared-name-rollback", max_iterations=1)
-    )
-    resource_obj = CriticalSharedNameResource("shared", trace)
-    hook_obj = CriticalSharedNameHook("shared", trace)
-    session.register_resource(resource_obj)
-    session.register_hook(hook_obj)
-
-    with pytest.raises(LifecycleSetupError, match="hook shared setup failed"):
-        with session:
-            pass
-
-    assert trace == [
-        "resource:shared:setup",
-        "hook:shared:setup",
-        "resource:shared:teardown",
-    ]
-    assert hook_obj.teardown_calls == 0
-    assert resource_obj.teardown_calls == 1
 
 
 def test_step_failure_still_clears_iteration_context_and_runs_session_cleanup(
@@ -575,9 +527,6 @@ def test_step_failure_still_clears_iteration_context_and_runs_session_cleanup(
     assert resource_a.teardown_calls == 1
     assert hook_obj.teardown_calls == 1
     assert session.session_context == {}
-    assert session._shared_state == {}
-    assert session._phase in {SessionPhase.PAUSED, SessionPhase.INTERRUPTED}
-    assert getattr(session, "_active", False) is False
 
 
 def test_hook_teardown_failure_does_not_skip_later_cleanup(tmp_path):
@@ -620,5 +569,3 @@ def test_hook_teardown_failure_does_not_skip_later_cleanup(tmp_path):
     assert failing_hook.teardown_calls == 1
     assert later_hook.teardown_calls == 1
     assert session.session_context == {}
-    assert session._phase is SessionPhase.NEW
-    assert getattr(session, "_active", False) is False

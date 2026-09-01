@@ -107,6 +107,12 @@ def test_custom_session_type_round_trips_through_state_registry(tmp_path):
     assert session.full_config["session_kwargs"] == {"label": "quality"}
 
 
+def test_full_config_excludes_keyword_config_argument(tmp_path):
+    session = TrainingSession(config=_config(tmp_path))
+
+    assert "session_kwargs" not in session.full_config
+
+
 def test_engine_dispatches_mixed_session_types_and_constructor_kwargs(
         tmp_path,
         monkeypatch,

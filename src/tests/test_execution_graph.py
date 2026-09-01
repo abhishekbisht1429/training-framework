@@ -41,10 +41,10 @@ def _add_graph_components(session, setup_marker=None):
     class GraphHook(LifecycleHook):
         call_every = 2
 
-        def setup(self, session):
+        def pre_session(self, session):
             pass
 
-        def teardown(self, session):
+        def post_session(self, session):
             pass
 
         def pre_iteration_callback(self, session):
@@ -76,12 +76,12 @@ def test_execution_graph_expands_component_functions_in_runtime_order(tmp_path):
     graph = session.execution_graph()
 
     resource_setup = graph.index("Resource.graph_resource.setup()")
-    hook_setup = graph.index("Hook.graph_hook.setup()")
+    hook_setup = graph.index("Hook.graph_hook.pre_session()")
     hook_pre = graph.index("Hook.graph_hook.pre_iteration_callback()")
     step_run = graph.index("Step.graph_step.run()")
     hook_post = graph.index("Hook.graph_hook.post_iteration_callback()")
     resource_teardown = graph.index("Resource.graph_resource.teardown()")
-    hook_teardown = graph.index("Hook.graph_hook.teardown()")
+    hook_teardown = graph.index("Hook.graph_hook.post_session()")
 
     assert resource_setup < hook_setup < hook_pre < step_run < hook_post
     assert hook_post < hook_teardown < resource_teardown

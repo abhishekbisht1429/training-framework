@@ -244,6 +244,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         config = deepcopy(self._config)
         config["session_type"] = self._session_type
         session_kwargs = deepcopy(self._init_args.get("kwargs", {}))
+        session_kwargs.pop("config", None)
         if session_kwargs:
             config["session_kwargs"] = session_kwargs
         return config

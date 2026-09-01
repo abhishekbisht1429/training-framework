@@ -9,6 +9,11 @@
 - These instructions apply even for subagents or any other parallel agents.
 - If the detailed output log of any command is not required then always suppress it.
 
+## New test cases instructions
+- Do not add very implementation speciifc test cases. 
+- Wherever possible add future agnostic tests that test the intended functionality rather than testing whether the component behaves in a implementation specific way.
+- Every builtin component must have some serialization and deserialization tests.
+
 ## Parallel test guardian
 
 - After every completed major change, the primary agent must spawn the project-scoped

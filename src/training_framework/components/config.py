@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 
 
-RESERVED_CONFIG_NAMES = frozenset({
+COMMON_RESERVED_CONFIG_NAMES = frozenset({
     "aliases",
     "components",
     "session_config",
@@ -9,9 +9,34 @@ RESERVED_CONFIG_NAMES = frozenset({
     "session_type",
 })
 
+SESSION_RESERVED_CONFIG_NAMES = {
+    "analysis": frozenset({"model_checkpoint_path"}),
+}
 
-def selected_component_names(config: Mapping) -> list[str]:
+
+def reserved_config_names(session_type: str | None = None) -> frozenset[str]:
+    if session_type is None:
+        normalized_type = "training"
+    elif not isinstance(session_type, str):
+        raise TypeError("session_type must be a string or None")
+    else:
+        normalized_type = session_type.strip()
+        if not normalized_type:
+            raise ValueError("session_type must not be empty")
+
+    return (
+        COMMON_RESERVED_CONFIG_NAMES
+        | SESSION_RESERVED_CONFIG_NAMES.get(normalized_type, frozenset())
+    )
+
+
+def selected_component_names(
+        config: Mapping,
+        *,
+        session_type: str | None = None,
+) -> list[str]:
     """Validate and return explicitly selected component names."""
+    reserved_names = reserved_config_names(session_type)
     selected = config.get("components", [])
     if not isinstance(selected, list):
         raise TypeError("'components' must be a list of component names")
@@ -23,7 +48,7 @@ def selected_component_names(config: Mapping) -> list[str]:
             raise TypeError("'components' entries must be strings")
         if not name:
             raise ValueError("'components' entries must not be empty")
-        if name in RESERVED_CONFIG_NAMES:
+        if name in reserved_names:
             raise ValueError(
                 f"'{name}' is a reserved configuration name and cannot "
                 "select a component"
