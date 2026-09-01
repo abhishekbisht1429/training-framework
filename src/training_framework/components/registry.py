@@ -2,7 +2,7 @@ from collections import ChainMap
 from collections.abc import Iterable, Mapping
 
 from training_framework.components.base import Component, Hook, Resource, Step
-from training_framework.components.config import RESERVED_CONFIG_NAMES
+from training_framework.components.config import reserved_config_names
 from training_framework.components.graph import (
     render_execution_graph,
     topological_sort_components,
@@ -179,15 +179,16 @@ class ComponentAliases:
 
     def _validate(self) -> None:
         targets = {}
-        reserved = ", ".join(sorted(RESERVED_CONFIG_NAMES))
+        reserved_names = reserved_config_names(self._session_type)
+        reserved = ", ".join(sorted(reserved_names))
         for expected_name, actual_name in self._aliases.items():
             if not isinstance(expected_name, str) or not isinstance(actual_name, str):
                 raise TypeError("'aliases' must be a mapping of strings to strings")
             if not expected_name or not actual_name:
                 raise ValueError("Alias names must not be empty")
             if (
-                    expected_name in RESERVED_CONFIG_NAMES
-                    or actual_name in RESERVED_CONFIG_NAMES
+                    expected_name in reserved_names
+                    or actual_name in reserved_names
             ):
                 raise ValueError(f"{reserved} are reserved component names")
             if expected_name == actual_name:

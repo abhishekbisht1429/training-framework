@@ -712,6 +712,7 @@ application analysis components need to be selected explicitly:
 ```yaml
 sessions:
   - session_type: analysis
+    model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
 
     session_config:
       rng_seed: 42
@@ -720,9 +721,6 @@ sessions:
       components_package: my_project.analysis_components
       device: cpu
       show_execution_graph: true
-
-    session_kwargs:
-      model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
 
     report:
       output_path: ./analysis-runs/report.json
@@ -734,10 +732,10 @@ For direct execution, construct the concrete analysis subclass:
 from training_framework.session import AnalysisSession
 
 
-session = AnalysisSession(
-    analysis_config,
-    model_checkpoint_path="./runs/session_.../checkpoints/<checkpoint-name>",
+analysis_config["model_checkpoint_path"] = (
+    "./runs/session_.../checkpoints/<checkpoint-name>"
 )
+session = AnalysisSession(analysis_config)
 ```
 
 Run the analysis entry through the same generic config path:
@@ -1170,7 +1168,7 @@ The engine monitors workers while leaving the context.
 |---|---|
 | `Session` | Abstract base implementing the shared component and iteration lifecycle |
 | `TrainingSession(config)` | Concrete training session with logger/checkpointer defaults and extension support |
-| `AnalysisSession(config, *, model_checkpoint_path)` | Concrete analysis session with trained-model/logger defaults |
+| `AnalysisSession(config)` | Concrete analysis session with trained-model/logger defaults |
 | `session_type` | Registered string identifying the concrete session workflow |
 | `AnalysisSession.model_checkpoint_path` | Source training checkpoint used by analysis |
 | `session_config` | Frozen `SessionConfig` containing seed, directory, and max iterations |

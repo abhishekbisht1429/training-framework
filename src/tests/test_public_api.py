@@ -22,10 +22,7 @@ def test_public_classes_have_canonical_domain_module_paths():
 def test_session_constructor_signatures_are_public():
     assert str(inspect.signature(session.Session)) == "(config: dict)"
     assert str(inspect.signature(session.TrainingSession)) == "(config: dict)"
-    assert str(inspect.signature(session.AnalysisSession)) == (
-        "(config: dict, *, "
-        "model_checkpoint_path: str | os.PathLike[str])"
-    )
+    assert str(inspect.signature(session.AnalysisSession)) == "(config: dict)"
 
 
 def test_components_package_exports_registry_api_by_identity():

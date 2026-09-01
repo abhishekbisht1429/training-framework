@@ -18,10 +18,6 @@ class TrainingSession(Session):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self._init_args = {
-            "args": (config,),
-            "kwargs": {},
-        }
 
     def update_max_iters(self, new_max_iters):
         self._session_config = SessionConfig(

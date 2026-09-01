@@ -7,7 +7,7 @@ from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.util import requires_context
 
 if TYPE_CHECKING:
-    from training_framework.session import Session
+    from training_framework.session import AnalysisSession
 
 
 @resource("trained_model")
@@ -17,7 +17,6 @@ class TrainedModel(Resource):
     def __init__(self, config: dict):
         self._config = config
         self._source_session = None
-        self._checkpoint_path = config['checkpoint-path']
         self._model: Any = None
 
     @property
@@ -25,11 +24,11 @@ class TrainedModel(Resource):
     def model(self):
         return self._model
 
-    def setup(self, session: Session) -> Any:
+    def setup(self, session: AnalysisSession) -> Any:
         from training_framework.session import Session, TRAINING_SESSION_TYPE
 
         source_session = Checkpointer.load_checkpoint(
-            self._checkpoint_path,
+            session.model_checkpoint_path,
             map_location="cpu",
         )
         if not isinstance(source_session, Session):
@@ -58,6 +57,6 @@ class TrainedModel(Resource):
         self._model.eval()
         self._source_session = source_session
 
-    def teardown(self, session: Session) -> None:
+    def teardown(self, session: AnalysisSession) -> None:
         self._model = None
         self._source_session = None

@@ -5,7 +5,7 @@ from copy import deepcopy
 from omegaconf import OmegaConf
 
 from training_framework.components.config import (
-    RESERVED_CONFIG_NAMES,
+    reserved_config_names,
     selected_component_names,
 )
 
@@ -62,13 +62,21 @@ class Configurator:
 
     @staticmethod
     def _selected_component_names(session_config: Mapping) -> list[str]:
-        return selected_component_names(session_config)
+        return selected_component_names(
+            session_config,
+            session_type=session_config.get("session_type"),
+        )
+
+    @staticmethod
+    def _reserved_config_names(session_config: Mapping) -> frozenset[str]:
+        return reserved_config_names(session_config.get("session_type"))
 
     def get_component_config(self, session_index: int, key: str):
         if not self._session_configs:
             raise KeyError("Cannot use this function in the current operation!")
         session_config = self._session_configs[session_index]
-        if key in session_config and key not in RESERVED_CONFIG_NAMES:
+        reserved_names = self._reserved_config_names(session_config)
+        if key in session_config and key not in reserved_names:
             if not isinstance(session_config[key], Mapping):
                 raise ValueError(
                     f"The value corresponding to the key '{key}' is not a mapping"
@@ -82,13 +90,14 @@ class Configurator:
         if not self._session_configs:
             raise KeyError("Cannot use this function in the current operation!")
         session_config = self._session_configs[session_index]
+        reserved_names = self._reserved_config_names(session_config)
         component_configs = {
             name: {}
             for name in self._selected_component_names(session_config)
         }
 
         for key in session_config:
-            if key in RESERVED_CONFIG_NAMES:
+            if key in reserved_names:
                 continue
             component_configs[key] = self.get_component_config(session_index, key)
 
