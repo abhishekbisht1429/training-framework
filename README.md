@@ -355,6 +355,20 @@ class TrainStep(Step):
 
 Steps are executed in dependency order.
 
+A component that does not need constructor configuration or other initialization
+may omit `__init__` entirely:
+
+```python
+@step("validate")
+class ValidationStep(Step):
+    def run(self, session: TrainingSession) -> None:
+        ...
+```
+
+The inherited constructor accepts and ignores the component's configuration
+mapping. Components that need configuration should continue to implement
+`__init__(self, config)`.
+
 ### Stateful components
 
 Components with mutable state that must survive checkpointing can inherit one of:

@@ -35,6 +35,10 @@ class Component(ABC, metaclass=ComponentMeta):
     id: str
     _context_managed_lifecycle = False
 
+    def __init__(self, config: Mapping | None = None) -> None:
+        """Initialize a component that does not require configuration."""
+        pass
+
     @classmethod
     @abstractmethod
     def _component_category_name(cls) -> str:
