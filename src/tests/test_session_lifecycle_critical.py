@@ -15,7 +15,7 @@ import pytest
 from training_framework.components import (
     hook,
     resource,
-    step, LifecycleHook, Resource, Step,
+    step, LifecycleHook, Resource, SessionHook, Step,
 )
 from training_framework.session import TrainingSession
 from tests.test_utils import make_config
@@ -40,13 +40,16 @@ class TraceResourceBase(Resource):
         *,
         fail_setup: bool = False,
         fail_teardown: bool = False,
+        fail_rollback: bool = False,
     ):
         self.label = label
         self.trace = trace
         self.fail_setup = fail_setup
         self.fail_teardown = fail_teardown
+        self.fail_rollback = fail_rollback
         self.setup_calls = 0
         self.teardown_calls = 0
+        self.rollback_calls = 0
 
     def setup(self, session: TrainingSession):
         self.setup_calls += 1
@@ -65,6 +68,15 @@ class TraceResourceBase(Resource):
                 f"resource {self.label} teardown failed"
             )
 
+    def rollback_setup(self, session: TrainingSession):
+        self.rollback_calls += 1
+        self.trace.append(f"resource:{self.label}:rollback")
+
+        if self.fail_rollback:
+            raise LifecycleTeardownError(
+                f"resource {self.label} rollback failed"
+            )
+
 
 class TraceHookBase(LifecycleHook):
     def __init__(
@@ -74,13 +86,16 @@ class TraceHookBase(LifecycleHook):
         *,
         call_every: int = 1,
         fail_teardown: bool = False,
+        fail_rollback: bool = False,
     ):
         self.label = label
         self.trace = trace
         self.call_every = call_every
         self.fail_teardown = fail_teardown
+        self.fail_rollback = fail_rollback
         self.setup_calls = 0
         self.teardown_calls = 0
+        self.rollback_calls = 0
         self.pre_iterations: list[int] = []
         self.post_iterations: list[int] = []
         self.post_payloads: list[tuple[int, tuple[str, ...]]] = []
@@ -99,6 +114,15 @@ class TraceHookBase(LifecycleHook):
         if self.fail_teardown:
             raise LifecycleTeardownError(
                 f"hook {self.label} teardown failed"
+            )
+
+    def rollback_pre_session(self, session: TrainingSession):
+        self.rollback_calls += 1
+        self.trace.append(f"hook:{self.label}:rollback")
+
+        if self.fail_rollback:
+            raise LifecycleTeardownError(
+                f"hook {self.label} rollback failed"
             )
 
     def pre_iteration_callback(self, session: TrainingSession) -> None:
@@ -445,7 +469,17 @@ def test_partial_setup_failure_rolls_back_initialized_resources(tmp_path):
             pass
 
     assert resource_a.setup_calls == 1
+    assert resource_a.rollback_calls == 0
     assert resource_a.teardown_calls == 1
+    assert resource_b.setup_calls == 1
+    assert resource_b.rollback_calls == 1
+    assert resource_b.teardown_calls == 0
+    assert trace == [
+        "resource:A:setup",
+        "resource:B:setup",
+        "resource:B:rollback",
+        "resource:A:teardown",
+    ]
     assert session.session_context == {}
 
 
@@ -484,11 +518,107 @@ def test_hook_setup_failure_rolls_back_hooks_and_resources(tmp_path):
         "resource:resource:setup",
         "hook:ready:setup",
         "hook:failing:setup",
+        "hook:failing:rollback",
         "hook:ready:teardown",
         "resource:resource:teardown",
     ]
     assert failing_hook.teardown_calls == 0
+    assert failing_hook.rollback_calls == 1
     assert session.session_context == {}
+
+
+def test_session_only_hook_pre_session_failure_rolls_back(tmp_path):
+    @resource("critical_session_only_hook_resource")
+    class CriticalSessionOnlyHookResource(TraceResourceBase):
+        pass
+
+    @hook("critical_session_only_failing_hook")
+    class CriticalSessionOnlyFailingHook(SessionHook):
+        def __init__(self, trace):
+            self.trace = trace
+            self.rollback_calls = 0
+            self.post_session_calls = 0
+
+        def pre_session(self, session: TrainingSession):
+            self.trace.append("session-hook:setup")
+            raise LifecycleSetupError("session hook setup failed")
+
+        def rollback_pre_session(self, session: TrainingSession):
+            self.rollback_calls += 1
+            self.trace.append("session-hook:rollback")
+
+        def post_session(self, session: TrainingSession):
+            self.post_session_calls += 1
+
+    trace: list[str] = []
+    session = TrainingSession(
+        make_config(tmp_path / "session-hook-rollback", max_iterations=1)
+    )
+    resource_obj = CriticalSessionOnlyHookResource("resource", trace)
+    failing_hook = CriticalSessionOnlyFailingHook(trace)
+    session.register_resource(resource_obj)
+    session.register_hook(failing_hook)
+
+    with pytest.raises(LifecycleSetupError, match="session hook setup failed"):
+        with session:
+            pass
+
+    assert trace == [
+        "resource:resource:setup",
+        "session-hook:setup",
+        "session-hook:rollback",
+        "resource:resource:teardown",
+    ]
+    assert failing_hook.rollback_calls == 1
+    assert failing_hook.post_session_calls == 0
+
+
+def test_resource_rollback_failure_preserves_setup_error_and_cleanup(
+    tmp_path,
+    capsys,
+):
+    @resource("critical_rollback_error_ready_resource")
+    class CriticalRollbackErrorReadyResource(TraceResourceBase):
+        pass
+
+    @resource("critical_rollback_error_failing_resource")
+    class CriticalRollbackErrorFailingResource(TraceResourceBase):
+        pass
+
+    trace: list[str] = []
+    session = TrainingSession(
+        make_config(tmp_path / "rollback-error", max_iterations=1)
+    )
+    ready_resource = CriticalRollbackErrorReadyResource("ready", trace)
+    failing_resource = CriticalRollbackErrorFailingResource(
+        "failing",
+        trace,
+        fail_setup=True,
+        fail_rollback=True,
+    )
+    session.register_resource(ready_resource)
+    session.register_resource(failing_resource)
+
+    with pytest.raises(
+        LifecycleSetupError,
+        match="resource failing setup failed",
+    ):
+        with session:
+            pass
+
+    assert trace == [
+        "resource:ready:setup",
+        "resource:failing:setup",
+        "resource:failing:rollback",
+        "resource:ready:teardown",
+    ]
+    assert ready_resource.teardown_calls == 1
+    assert failing_resource.teardown_calls == 0
+    assert (
+        "Error rolling back setup for resource "
+        "'Resource.critical_rollback_error_failing_resource': "
+        "resource failing rollback failed"
+    ) in capsys.readouterr().out
 
 
 def test_step_failure_still_clears_iteration_context_and_runs_session_cleanup(

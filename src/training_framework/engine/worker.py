@@ -3,7 +3,8 @@ import signal
 import time
 import traceback
 
-from torch import multiprocessing
+import torch
+from torch import distributed, multiprocessing
 
 from training_framework.session import Session, TrainingSession
 
@@ -52,6 +53,30 @@ def load_session_for_worker(
     return session
 
 
+def _stop_requested(session: Session, stop_event) -> bool:
+    local_stop_requested = stop_event.is_set()
+    if not session.has_resource("ddp"):
+        return local_stop_requested
+
+    ddp_resource = session.get_resource("ddp")
+    control_device = (
+        session.device
+        if ddp_resource.backend == "nccl"
+        else torch.device("cpu")
+    )
+    stop_flag = torch.tensor(
+        int(local_stop_requested),
+        dtype=torch.int32,
+        device=control_device,
+    )
+    session.send_heartbeat("Synchronizing worker stop state")
+    distributed.all_reduce(
+        stop_flag,
+        op=distributed.ReduceOp.MAX,
+    )
+    return bool(stop_flag.item())
+
+
 def session_process_worker(
         session_state,
         rank: int,
@@ -69,7 +94,9 @@ def session_process_worker(
         session.set_dist_manager_err_conn(error_conn)
         session.set_heartbeat_interval(10.0)
         with session:
-            while not stop_event.is_set():
+            while True:
+                if _stop_requested(session, stop_event):
+                    break
                 try:
                     next(session)
                 except StopIteration:

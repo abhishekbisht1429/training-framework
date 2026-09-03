@@ -169,6 +169,52 @@ def test_pickled_tensorboard_can_start_and_release_runtime_handles(
     assert restored.summary_writer is None
 
 
+def test_tensorboard_rolls_back_process_when_writer_creation_fails(
+    tmp_path,
+    monkeypatch,
+):
+    processes = []
+
+    class FakeProcess:
+        def __init__(self, args):
+            self.terminated = False
+            processes.append(self)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    def fail_writer_creation(*args, **kwargs):
+        raise RuntimeError("writer creation failed")
+
+    monkeypatch.setattr(observability.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(
+        observability,
+        "SummaryWriter",
+        fail_writer_creation,
+    )
+
+    component = Tensorboard({
+        "host": "127.0.0.1",
+        "port": 6008,
+    })
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    session = SimpleNamespace(
+        session_config=SimpleNamespace(session_dir=str(session_dir))
+    )
+
+    with pytest.raises(RuntimeError, match="writer creation failed"):
+        component.setup(session)
+
+    component.rollback_setup(session)
+
+    assert processes[0].terminated
+    assert component.summary_writer is None
+
+
 def test_pickled_trained_model_loads_an_evaluation_model(tmp_path):
     resource("pickle_round_trip_model")(_PickleRoundTripModel)
     source = TrainingSession({

@@ -56,6 +56,35 @@ def _join_spawned_wrapper(wrapper: SessionProcessWrapper, timeout: float = 30.0)
     return exitcode
 
 
+def test_spawned_non_ddp_worker_honors_stop_request(tmp_path):
+    register_test_components()
+    session = TrainingSession(
+        session_config(
+            tmp_path / "stopped",
+            max_iterations=100_000,
+            event_path=tmp_path / "stopped.jsonl",
+        )
+    )
+    wrapper = SessionProcessWrapper(
+        session,
+        rank=0,
+        heartbeat_timeout=30.0,
+    )
+    wrapper.start()
+    wrapper.request_stop()
+    wrapper.process.join(timeout=30.0)
+
+    if wrapper.process.is_alive():
+        wrapper.process.terminate()
+        wrapper.process.join(timeout=5.0)
+        pytest.fail("non-DDP worker did not honor its stop request")
+
+    exitcode = wrapper.process.exitcode
+    wrapper.join()
+
+    assert exitcode == 0
+
+
 def test_spawned_worker_reconstructs_paused_state_and_continues_exactly(tmp_path):
     """The child must resume model, optimizer, step, iteration, and RNG state."""
 

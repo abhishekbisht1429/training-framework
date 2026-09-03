@@ -89,6 +89,9 @@ available after checkpoint restoration and in spawned workers.
 
 `optimizer` expects a loss tensor in `session.iteration_context` and performs
 zeroing, backward propagation, optimization, and scheduler advancement.
+If its pre-session initialization fails after creating an optimizer or
+scheduler, its rollback callback clears those incomplete runtime handles
+without changing the persisted component-state schema.
 
 The TensorBoard resource starts the external `tensorboard` command, creates a
 PyTorch `SummaryWriter`, and exposes it through `summary_writer`:
@@ -104,6 +107,8 @@ tensorboard.summary_writer.add_scalar(
 
 The executable must be available and the selected port must be free. Teardown
 closes the writer and terminates the external process.
+If setup fails after creating either handle, rollback closes the writer when
+present and terminates the partially started process.
 
 ### Analysis built-ins
 

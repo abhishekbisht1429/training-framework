@@ -18,7 +18,7 @@
 
 7. **Heartbeat detection happens between framework stages.** A single long-running component call can exceed the deadline without sending another heartbeat. Set `--heartbeat-timeout` above the longest expected uninterrupted setup, hook, step, or teardown operation.
 
-8. **Graceful stopping occurs between iterations.** A worker already inside a component call will finish or block there until the join timeout causes termination.
+8. **Graceful stopping occurs between iterations.** Non-DDP workers use their local stop event. DDP workers make a rank-wide stop decision before each iteration, so every rank may complete one final synchronized iteration when a request races with that decision. Work already inside a component or collective must finish or wait until the join timeout causes termination.
 
 9. **Checkpoint files are trusted-code artifacts.** The built-in loader uses unrestricted Python deserialization. Never load an untrusted checkpoint.
 

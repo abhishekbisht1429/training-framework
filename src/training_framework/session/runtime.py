@@ -58,13 +58,39 @@ def run_iteration(session: "Session") -> int:
 def setup_resources(session: "Session") -> None:
     for component in session._sorted_resources:
         session.send_heartbeat(f"Running setup {component.id}")
-        component.setup(session)
+        try:
+            component.setup(session)
+        except Exception:
+            try:
+                session.send_heartbeat(
+                    f"Running setup rollback {component.id}"
+                )
+                component.rollback_setup(session)
+            except Exception as error:
+                print(
+                    f"Error rolling back setup for resource "
+                    f"'{component.id}': {error}"
+                )
+            raise
         session._successfully_setup_resource_names.add(component.name)
 
 
 def setup_session_hooks(session: "Session") -> None:
     for component in session._session_hooks:
-        component.pre_session(session)
+        try:
+            component.pre_session(session)
+        except Exception:
+            try:
+                session.send_heartbeat(
+                    f"Running pre-session rollback {component.id}"
+                )
+                component.rollback_pre_session(session)
+            except Exception as error:
+                print(
+                    f"Error rolling back pre-session for hook "
+                    f"'{component.id}': {error}"
+                )
+            raise
         session.send_heartbeat(f"Running pre-session {component.id}")
         session._successfully_setup_hook_names.add(component.name)
 

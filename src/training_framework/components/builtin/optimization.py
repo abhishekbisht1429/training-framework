@@ -88,6 +88,11 @@ class OptimizerHook(StatefulLifeCycleHook):
         self._lr_scheduler = None
 
     @override
+    def rollback_pre_session(self, session: Session) -> None:
+        self._optimizer = None
+        self._lr_scheduler = None
+
+    @override
     def set_state(self, state: Any) -> None:
         self._restored_state = deepcopy(state)
         if self._optimizer is not None and self._lr_scheduler is not None:

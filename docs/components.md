@@ -22,11 +22,21 @@ class DatasetResource(Resource):
     def setup(self, session: TrainingSession) -> None:
         self.dataset = build_dataset(self.config)
 
+    def rollback_setup(self, session: TrainingSession) -> None:
+        self.dataset = None
+
     def teardown(self, session: TrainingSession) -> None:
         self.dataset = None
 ```
 
 Resources are set up before session hooks and torn down in reverse resource order.
+
+If a resource's own `setup()` raises, the framework calls its
+`rollback_setup()` before tearing down resources that completed setup earlier.
+The rollback method has a no-op default, so existing resource subclasses remain
+valid. Override it when setup can leave partial external state, and make it safe
+for every point at which setup can fail. Because setup did not complete,
+rollback must not depend on context-guarded resource members.
 
 ### Hook
 
@@ -34,9 +44,9 @@ The framework provides three hook interfaces:
 
 | Interface | Methods |
 |---|---|
-| `SessionHook` | `pre_session(session)`, `post_session(session)` |
+| `SessionHook` | `pre_session(session)`, `rollback_pre_session(session)`, `post_session(session)` |
 | `IterationHook` | `pre_iteration_callback(session)`, `post_iteration_callback(session)` |
-| `LifecycleHook` | All four methods |
+| `LifecycleHook` | All session and iteration hook methods |
 
 An iteration hook must expose a positive `call_every` integer. An iteration hook is selected when:
 
@@ -45,6 +55,13 @@ An iteration hook must expose a positive `call_every` integer. An iteration hook
 - `session.iteration % hook.call_every == 0`.
 
 The first and final iterations therefore invoke every iteration hook, regardless of `call_every`.
+
+If a session hook's own `pre_session()` raises, the framework calls its
+`rollback_pre_session()`. This method also has a no-op default for backward
+compatibility and should reverse only effects created by the incomplete
+callback. The failing hook does not receive `post_session()`; hooks that
+completed `pre_session()` earlier still receive normal reverse-order
+post-session cleanup.
 
 ### Step
 

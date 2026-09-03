@@ -14,6 +14,7 @@ from training_framework.components import (
     LifecycleHook,
     Resource,
     StatefulResource,
+    SessionHook,
     Step,
     hook,
     requires_resource,
@@ -205,6 +206,25 @@ class MeanSquaredLossStep(Step):
             prediction,
             target,
         )
+
+
+@hook("integration_ready")
+@requires_resource("ddp")
+class RankReadyHook(SessionHook):
+    """Publish that a rank completed setup for stop coordination tests."""
+
+    def __init__(self, config: dict):
+        self._ready_dir = Path(config["ready_dir"])
+
+    @override
+    def pre_session(self, session: TrainingSession) -> None:
+        rank = session.get_resource("ddp").rank
+        self._ready_dir.mkdir(parents=True, exist_ok=True)
+        (self._ready_dir / f"rank_{rank}.ready").touch()
+
+    @override
+    def post_session(self, session: TrainingSession) -> None:
+        return None
 
 
 @hook("integration_results")

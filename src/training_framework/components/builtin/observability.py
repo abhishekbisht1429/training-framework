@@ -100,13 +100,23 @@ class Tensorboard(Resource):
 
     def teardown(self, session):
         print("releasing resources...")
-        self._tb_summary_writer.close()
-        self._tb_process.terminate()
+        self._release_partial_setup()
         print("resources released...")
 
-        self._tb_summary_writer = None
-        if self._tb_process is not None:
-            self._tb_process.terminate()
+    def rollback_setup(self, session: Session) -> None:
+        self._release_partial_setup()
+
+    def _release_partial_setup(self) -> None:
+        try:
+            if self._tb_summary_writer is not None:
+                self._tb_summary_writer.close()
+        finally:
+            self._tb_summary_writer = None
+
+            process = self._tb_process
+            self._tb_process = None
+            if process is not None and process.poll() is None:
+                process.terminate()
 
 
 @wraps("optimizer")
