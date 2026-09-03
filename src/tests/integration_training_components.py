@@ -128,6 +128,37 @@ class WorkerReportingDataset(Dataset, Resource):
         return None
 
 
+@resource("integration_collating_dataset")
+class CollatingDataset(Dataset, Resource):
+    def __init__(self, config: dict):
+        self._dataset_size = int(config["dataset_size"])
+
+    def __len__(self) -> int:
+        return self._dataset_size
+
+    def __getitem__(self, index: int) -> int:
+        return index
+
+    def collate_fn(self, batch: list[int]) -> dict[str, object]:
+        return {
+            "indices": torch.tensor(batch, dtype=torch.int64),
+            "collated": True,
+        }
+
+    @override
+    def setup(self, session: TrainingSession) -> None:
+        return None
+
+    @override
+    def teardown(self, session: TrainingSession) -> None:
+        return None
+
+
+@resource("integration_invalid_collate_dataset")
+class InvalidCollateDataset(CollatingDataset):
+    collate_fn = None
+
+
 @step("integration_data")
 @requires_resource("data_manager")
 class DistributedDataLoadingStep(Step):

@@ -355,6 +355,20 @@ class TrainStep(Step):
 
 Steps are executed in dependency order.
 
+A component that does not need constructor configuration or other initialization
+may omit `__init__` entirely:
+
+```python
+@step("validate")
+class ValidationStep(Step):
+    def run(self, session: TrainingSession) -> None:
+        ...
+```
+
+The inherited constructor accepts and ignores the component's configuration
+mapping. Components that need configuration should continue to implement
+`__init__(self, config)`.
+
 ### Stateful components
 
 Components with mutable state that must survive checkpointing can inherit one of:
@@ -1010,8 +1024,29 @@ tensorboard:
 
 `data_manager.data_iter` is available only while the session is active. It
 divides the global batch size across ranks and checkpoints delivered-batch
-progress. `optimizer` expects a loss tensor in `session.iteration_context` and
-performs zeroing, backward propagation, optimization, and scheduler advancement.
+progress. A dataset resource may provide a callable `collate_fn(batch)` method
+to control batching:
+
+```python
+from torch.utils.data import Dataset
+
+from training_framework.components import Resource, resource
+
+
+@resource("dataset")
+class TokenDataset(Dataset, Resource):
+    ...
+
+    def collate_fn(self, batch):
+        return pad_sequences(batch)
+```
+
+When the dataset does not define `collate_fn`, the data manager uses
+`torch.stack`. Keeping the collator on the importable dataset class makes it
+available after checkpoint restoration and in spawned workers.
+
+`optimizer` expects a loss tensor in `session.iteration_context` and performs
+zeroing, backward propagation, optimization, and scheduler advancement.
 
 The TensorBoard resource starts the external `tensorboard` command, creates a
 PyTorch `SummaryWriter`, and exposes it through `summary_writer`:

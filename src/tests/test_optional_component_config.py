@@ -8,6 +8,7 @@ from training_framework.components import (
     Hook,
     LifecycleHook,
     Resource,
+    StatefulStep,
     Step,
     hook,
     requires_hook,
@@ -62,6 +63,33 @@ def test_components_list_activates_empty_config_and_mapping_wins(tmp_path):
 
     component = session.get_all_steps()[0]
     assert component.config == {"value": 7}
+
+
+def test_component_can_omit_constructor_and_restore_state(tmp_path):
+    @step("constructor_free_step")
+    class ConstructorFreeStep(StatefulStep):
+        executions = 0
+
+        def run(self, session):
+            self.executions += 1
+
+        def get_state(self):
+            return {"executions": self.executions}
+
+        def set_state(self, state):
+            self.executions = state["executions"]
+
+    session = TrainingSession({
+        "session_config": _session_config(tmp_path),
+        "components": ["constructor_free_step"],
+    })
+
+    with session:
+        assert next(session) == 1
+
+    restored = TrainingSession.from_state(session.get_state())
+
+    assert restored.get_all_steps()[0].executions == 1
 
 
 def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):

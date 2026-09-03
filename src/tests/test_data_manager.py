@@ -28,6 +28,7 @@ def _data_manager_config(
         *,
         batch_size: int = 2,
         dataset_size: int = 8,
+        dataset_name: str = "integration_worker_dataset",
         num_workers: int = 0,
         rank: int = 0,
         world_size: int = 1,
@@ -43,7 +44,7 @@ def _data_manager_config(
         },
         "aliases": {
             "ddp": "integration_data_context",
-            "dataset": "integration_worker_dataset",
+            "dataset": dataset_name,
         },
         "ddp": {
             "rank": rank,
@@ -118,6 +119,32 @@ def test_data_manager_rejects_invalid_batch_or_dataset_configuration(
         dataset_size=dataset_size,
     )
     with pytest.raises(ValueError, match=message):
+        with session:
+            pass
+
+
+def test_data_manager_uses_dataset_collate_function_after_restore(tmp_path):
+    source = _new_session(
+        tmp_path / "source",
+        dataset_name="integration_collating_dataset",
+    )
+    restored = TrainingSession.from_state(source.get_state())
+
+    with restored:
+        batch = next(restored.get_resource("data_manager").data_iter)
+
+    assert batch["collated"] is True
+    assert batch["indices"].shape == (2,)
+    assert batch["indices"].dtype is torch.int64
+
+
+def test_data_manager_rejects_non_callable_dataset_collate_function(tmp_path):
+    session = _new_session(
+        tmp_path,
+        dataset_name="integration_invalid_collate_dataset",
+    )
+
+    with pytest.raises(TypeError, match="collate_fn must be callable"):
         with session:
             pass
 

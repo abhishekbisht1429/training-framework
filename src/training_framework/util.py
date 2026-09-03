@@ -82,6 +82,18 @@ def requires_context(func):
     return wrapper
 
 
+def call_outside_context(func):
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if getattr(self, "_active", False):
+            raise RuntimeError(
+                f"This instance of {self.__class__.__name__} "
+                "is already initialized!"
+            )
+        return func(self, *args, **kwargs)
+    return wrapper
+
+
 class CaptureInitMeta(ABCMeta):
     def __new__(mcls, name, bases, namespace):
         cls = super().__new__(mcls, name, bases, namespace)
