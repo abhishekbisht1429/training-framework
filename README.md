@@ -18,12 +18,13 @@ Workflow code is organized into reusable **resources**, **hooks**, and **steps**
 - Decorator-based registration and recursive component-package discovery
 - Shared components with optional per-session-type registry overrides
 - Explicit resource, hook, and step dependencies
+- Opt-in rollback for partially initialized resources and session hooks
 - Topological execution ordering and dependency-cycle detection
 - Session-level and iteration-level shared contexts
 - Stateful component checkpointing and session restoration
 - Restoration of Python, NumPy, PyTorch, and CUDA RNG state
 - Spawn-based worker processes with error forwarding and heartbeat monitoring
-- Single-node PyTorch DistributedDataParallel process-group setup
+- Single-node PyTorch DistributedDataParallel setup with coordinated stopping
 - Resume and extend operations for saved sessions
 - Analysis sessions driven by a trained-session checkpoint
 - Built-in model loading, logging, checkpointing, DDP, data management, optimization, timing, TensorBoard, and infinite samplers

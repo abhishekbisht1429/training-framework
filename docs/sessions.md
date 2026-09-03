@@ -39,6 +39,17 @@ NEW -> READY -> RUNNING -> FINISHED
 
 If an iteration fails, its iteration counter is rolled back and its iteration context is cleared before the exception propagates.
 
+If a resource's `setup()` fails, its `rollback_setup()` callback runs before
+previously initialized resources are torn down in reverse order. If a session
+hook's `pre_session()` fails, its `rollback_pre_session()` callback runs
+before earlier hooks receive `post_session()` and resources are torn down.
+The component whose initialization failed does not receive its normal
+`teardown()` or `post_session()` callback.
+
+Rollback errors are reported without replacing the original initialization
+exception or preventing the remaining cleanup. Session context is cleared
+before that original exception propagates.
+
 ## Shared contexts
 
 ### `iteration_context`

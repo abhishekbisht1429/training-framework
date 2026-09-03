@@ -57,6 +57,19 @@ During setup, the built-in DDP resource:
   using NCCL; and
 - wraps the model with `torch.nn.parallel.DistributedDataParallel`.
 
+Before each DDP iteration, every rank contributes its local cooperative-stop
+state to an `all_reduce(MAX)` decision. A stop request received by any rank
+therefore causes all ranks to leave the training loop at the same iteration
+boundary instead of allowing another rank to enter a mismatched forward or
+backward collective. Gloo uses a CPU control tensor; NCCL uses the session's
+CUDA device.
+
+A request that arrives just after this decision may allow one additional
+iteration, but that iteration is admitted for every rank. The consensus does
+not interrupt a collective already in progress. Worker failures and unhealthy
+process groups still rely on the supervisor's configured graceful-join timeout
+and terminate/kill fallback. Non-DDP workers keep using their local stop event.
+
 The wrapped module is available only inside the active session context:
 
 ```python

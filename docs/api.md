@@ -17,6 +17,14 @@ from training_framework.session import (
 )
 ```
 
+`Resource` defines `setup(session)`, `rollback_setup(session)`, and
+`teardown(session)`. `SessionHook` defines `pre_session(session)`,
+`rollback_pre_session(session)`, and `post_session(session)`.
+The rollback methods are concrete no-ops by default, so existing subclasses
+remain valid without implementing them. A component should override its
+rollback method only when failed initialization can leave partial effects to
+release.
+
 `training_framework.dataloader` remains the public home of the infinite
 samplers.
 

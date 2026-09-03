@@ -73,4 +73,13 @@ On interruption, worker failure, or heartbeat timeout, the engine:
 4. waits briefly again; and
 5. kills processes that still remain alive.
 
-The stop event is checked between iterations. A step, hook, setup, or teardown call that is already running is not interrupted cooperatively.
+Non-DDP workers check their local stop event between iterations. DDP workers
+instead combine their local event states with `all_reduce(MAX)` before each
+iteration, so all ranks either admit the next iteration or leave the loop
+together. This prevents one rank from stopping while another enters a DDP
+forward or backward collective.
+
+A stop request that races with a completed DDP decision may permit one
+additional synchronized iteration. A step, hook, setup, teardown, or collective
+that is already running is not interrupted cooperatively; the supervisor's
+timeout and process termination remain the fallback for unresponsive workers.
