@@ -106,6 +106,15 @@ class SessionHook(Hook, ABC):
     def post_session(self, session: "Session") -> None:
         pass
 
+    def rollback_pre_session(self, session: "Session") -> None:
+        """Undo partial effects after :meth:`pre_session` fails.
+
+        The default is intentionally a no-op so existing hooks remain
+        backward compatible. Hooks that can create external effects before
+        ``pre_session`` completes should override this method.
+        """
+        pass
+
 
 class IterationHook(Hook, ABC):
     call_every: int
@@ -137,6 +146,15 @@ class Resource(Component, ABC):
 
     @abstractmethod
     def teardown(self, session: "Session") -> None:
+        pass
+
+    def rollback_setup(self, session: "Session") -> None:
+        """Undo partial effects after :meth:`setup` fails.
+
+        The default is intentionally a no-op so existing resources remain
+        backward compatible. Resources that can create external effects
+        before ``setup`` completes should override this method.
+        """
         pass
 
 
