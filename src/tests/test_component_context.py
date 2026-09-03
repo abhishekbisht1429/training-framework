@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from training_framework.components import LifecycleHook, Resource
-from training_framework.util import requires_context
+from training_framework.util import call_outside_context, requires_context
 
 if TYPE_CHECKING:
     from training_framework.session import Session
@@ -22,6 +22,17 @@ def _assert_requires_context(instance) -> None:
         instance.guarded()
 
 
+def _assert_call_outside_context(instance) -> None:
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"This instance of {type(instance).__name__} "
+            "is already initialized!"
+        ),
+    ):
+        instance.outside_only()
+
+
 def test_resource_and_lifecycle_hook_context_is_automatic():
     class GuardedResource(Resource):
         def __init__(self):
@@ -29,6 +40,10 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
 
         @requires_context
         def guarded(self):
+            return "resource"
+
+        @call_outside_context
+        def outside_only(self):
             return "resource"
 
         def setup(self, session: "Session"):
@@ -46,6 +61,10 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
 
         @requires_context
         def guarded(self):
+            return "hook"
+
+        @call_outside_context
+        def outside_only(self):
             return "hook"
 
         def pre_session(self, session: "Session"):
@@ -66,12 +85,16 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
 
     _assert_requires_context(resource)
     _assert_requires_context(hook)
+    assert resource.outside_only() == "resource"
+    assert hook.outside_only() == "hook"
 
     resource.setup(session_obj)
     hook.pre_session(session_obj)
 
     assert resource.guarded() == "resource"
     assert hook.guarded() == "hook"
+    _assert_call_outside_context(resource)
+    _assert_call_outside_context(hook)
     hook.pre_iteration_callback(session_obj)
     hook.post_iteration_callback(session_obj)
 
@@ -83,15 +106,22 @@ def test_resource_and_lifecycle_hook_context_is_automatic():
     assert resource.teardown_value == "resource"
     _assert_requires_context(resource)
     _assert_requires_context(hook)
+    assert resource.outside_only() == "resource"
+    assert hook.outside_only() == "hook"
 
 
 def test_context_entry_waits_for_outermost_setup_to_finish():
     class ParentResource(Resource):
         def __init__(self):
             self.active_during_child_setup = None
+            self.outside_during_child_setup = None
 
         @requires_context
         def guarded(self):
+            return "ready"
+
+        @call_outside_context
+        def outside_only(self):
             return "ready"
 
         def setup(self, session: "Session"):
@@ -104,6 +134,7 @@ def test_context_entry_waits_for_outermost_setup_to_finish():
         def setup(self, session: "Session"):
             super().setup(session)
             self.active_during_child_setup = getattr(self, "_active", False)
+            self.outside_during_child_setup = self.outside_only()
             raise RuntimeError("child setup failed")
 
     resource = FailingChildResource()
@@ -113,13 +144,19 @@ def test_context_entry_waits_for_outermost_setup_to_finish():
         resource.setup(session_obj)
 
     assert resource.active_during_child_setup is False
+    assert resource.outside_during_child_setup == "ready"
     _assert_requires_context(resource)
+    assert resource.outside_only() == "ready"
 
 
 def test_context_exit_waits_for_outermost_teardown_and_clears_on_failure():
     class ParentResource(Resource):
         @requires_context
         def guarded(self):
+            return "ready"
+
+        @call_outside_context
+        def outside_only(self):
             return "ready"
 
         def setup(self, session: "Session"):
@@ -131,10 +168,15 @@ def test_context_exit_waits_for_outermost_teardown_and_clears_on_failure():
     class FailingChildResource(ParentResource):
         def __init__(self):
             self.value_after_parent_teardown = None
+            self.outside_error_during_teardown = None
 
         def teardown(self, session: "Session"):
             super().teardown(session)
             self.value_after_parent_teardown = self.guarded()
+            try:
+                self.outside_only()
+            except RuntimeError as error:
+                self.outside_error_during_teardown = str(error)
             raise RuntimeError("child teardown failed")
 
     resource = FailingChildResource()
@@ -145,4 +187,8 @@ def test_context_exit_waits_for_outermost_teardown_and_clears_on_failure():
         resource.teardown(session_obj)
 
     assert resource.value_after_parent_teardown == "ready"
+    assert resource.outside_error_during_teardown == (
+        "This instance of FailingChildResource is already initialized!"
+    )
     _assert_requires_context(resource)
+    assert resource.outside_only() == "ready"
