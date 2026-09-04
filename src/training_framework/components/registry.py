@@ -1,3 +1,4 @@
+import warnings
 from collections import ChainMap
 from collections.abc import Iterable, Mapping
 
@@ -157,8 +158,129 @@ def step(
     )
 
 
-class ComponentAliases:
-    """Resolve session-scoped component roles to registered implementations."""
+class ComponentBindings:
+    """Bind session-scoped component roles to registered implementations."""
+
+    def __init__(
+            self,
+            bindings: Mapping[str, str] | None = None,
+            *,
+            session_type: str | None = None,
+    ):
+        if bindings is None:
+            bindings = {}
+        if not isinstance(bindings, Mapping):
+            raise TypeError(
+                "'component_bindings' must be a mapping of strings to strings"
+            )
+
+        normalized = _normalize_component_session_type(session_type)
+        self._session_type = normalized
+        self._registry = component_registry(normalized)
+        self._bindings = dict(bindings)
+        self._validate()
+
+    def _validate(self) -> None:
+        targets = {}
+        reserved_names = reserved_config_names(self._session_type)
+        reserved = ", ".join(sorted(reserved_names))
+        for role_name, implementation_name in self._bindings.items():
+            if (
+                    not isinstance(role_name, str)
+                    or not isinstance(implementation_name, str)
+            ):
+                raise TypeError(
+                    "'component_bindings' must be a mapping of strings to strings"
+                )
+            if not role_name or not implementation_name:
+                raise ValueError("Component binding names must not be empty")
+            if (
+                    role_name in reserved_names
+                    or implementation_name in reserved_names
+            ):
+                raise ValueError(f"{reserved} are reserved component names")
+            if role_name == implementation_name:
+                raise ValueError(
+                    f"Component binding '{role_name}' must refer to a "
+                    "different component"
+                )
+            if implementation_name in self._bindings:
+                raise ValueError(
+                    "Component binding chains and cycles are not supported: "
+                    f"'{role_name}' resolves to bound role "
+                    f"'{implementation_name}'"
+                )
+            if implementation_name in targets:
+                raise ValueError(
+                    f"Component roles '{targets[implementation_name]}' and "
+                    f"'{role_name}' cannot both bind to "
+                    f"'{implementation_name}'"
+                )
+
+            if implementation_name not in self._registry:
+                raise ValueError(
+                    f"Component binding target '{implementation_name}' is not "
+                    "a registered component"
+                )
+            implementation_type = _component_type(
+                self._registry[implementation_name]
+            )
+            if (
+                    role_name in self._registry
+                    and _component_type(self._registry[role_name])
+                    is not implementation_type
+            ):
+                raise ValueError(
+                    f"Component binding '{role_name}' -> "
+                    f"'{implementation_name}' changes the component category"
+                )
+
+            targets[implementation_name] = role_name
+
+    def validate_config(self, config: Mapping) -> None:
+        for role_name, implementation_name in self._bindings.items():
+            if role_name in config:
+                raise ValueError(
+                    f"Component role '{role_name}' is bound to "
+                    f"'{implementation_name}'. Configure the implementation "
+                    f"name '{implementation_name}' at the top level, not the "
+                    f"role name '{role_name}'."
+                )
+
+    def resolve(self, name: str) -> str:
+        return self._bindings.get(name, name)
+
+    def is_bound(self, name: str) -> bool:
+        return name in self._bindings
+
+    def is_alias(self, name: str) -> bool:
+        warnings.warn(
+            "ComponentBindings.is_alias() is deprecated; use is_bound()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.is_bound(name)
+
+    @property
+    def bindings(self) -> dict[str, str]:
+        return dict(self._bindings)
+
+    @property
+    def session_type(self) -> str | None:
+        return self._session_type
+
+    def __bool__(self) -> bool:
+        return bool(self._bindings)
+
+    def __setstate__(self, state) -> None:
+        legacy_bindings = state.pop("_aliases", None)
+        if "_bindings" not in state and legacy_bindings is not None:
+            state["_bindings"] = legacy_bindings
+        self.__dict__.update(state)
+
+
+class ComponentAliases(ComponentBindings):
+    """Deprecated compatibility name for ComponentBindings."""
 
     def __init__(
             self,
@@ -166,103 +288,52 @@ class ComponentAliases:
             *,
             session_type: str | None = None,
     ):
-        if aliases is None:
-            aliases = {}
-        if not isinstance(aliases, Mapping):
-            raise TypeError("'aliases' must be a mapping of strings to strings")
-
-        normalized = _normalize_component_session_type(session_type)
-        self._session_type = normalized
-        self._registry = component_registry(normalized)
-        self._aliases = dict(aliases)
-        self._validate()
-
-    def _validate(self) -> None:
-        targets = {}
-        reserved_names = reserved_config_names(self._session_type)
-        reserved = ", ".join(sorted(reserved_names))
-        for expected_name, actual_name in self._aliases.items():
-            if not isinstance(expected_name, str) or not isinstance(actual_name, str):
-                raise TypeError("'aliases' must be a mapping of strings to strings")
-            if not expected_name or not actual_name:
-                raise ValueError("Alias names must not be empty")
-            if (
-                    expected_name in reserved_names
-                    or actual_name in reserved_names
-            ):
-                raise ValueError(f"{reserved} are reserved component names")
-            if expected_name == actual_name:
-                raise ValueError(
-                    f"Alias '{expected_name}' must refer to a different component"
-                )
-            if actual_name in self._aliases:
-                raise ValueError(
-                    f"Alias chains and cycles are not supported: "
-                    f"'{expected_name}' resolves to alias '{actual_name}'"
-                )
-            if actual_name in targets:
-                raise ValueError(
-                    f"Aliases '{targets[actual_name]}' and '{expected_name}' "
-                    f"cannot both target '{actual_name}'"
-                )
-
-            if actual_name not in self._registry:
-                raise ValueError(
-                    f"Alias target '{actual_name}' is not a registered component"
-                )
-            actual_type = _component_type(self._registry[actual_name])
-            if (
-                    expected_name in self._registry
-                    and _component_type(self._registry[expected_name])
-                    is not actual_type
-            ):
-                raise ValueError(
-                    f"Alias '{expected_name}' -> '{actual_name}' changes the "
-                    "component category"
-                )
-
-            targets[actual_name] = expected_name
-
-    def validate_config(self, config: Mapping) -> None:
-        selected_components = config.get("components", ())
-        for expected_name, actual_name in self._aliases.items():
-            if actual_name in config or actual_name in selected_components:
-                raise ValueError(
-                    f"Configure alias '{expected_name}', not both "
-                    f"'{expected_name}' and '{actual_name}'"
-                )
-
-    def resolve(self, name: str) -> str:
-        return self._aliases.get(name, name)
-
-    def is_alias(self, name: str) -> bool:
-        return name in self._aliases
-
-    @property
-    def bindings(self) -> dict[str, str]:
-        return dict(self._aliases)
-
-    @property
-    def session_type(self) -> str | None:
-        return self._session_type
-
-    def __bool__(self) -> bool:
-        return bool(self._aliases)
+        warnings.warn(
+            "ComponentAliases is deprecated; use ComponentBindings",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(aliases, session_type=session_type)
 
 
-def _alias_resolver(
-        aliases: ComponentAliases | Mapping[str, str] | None,
+def _coalesce_component_bindings(
+        component_bindings,
+        aliases,
+        *,
+        stacklevel: int = 3,
+):
+    if component_bindings is not None and aliases is not None:
+        raise ValueError(
+            "Provide either 'component_bindings' or deprecated 'aliases', "
+            "not both"
+        )
+    if aliases is not None:
+        warnings.warn(
+            "'aliases' is deprecated; use 'component_bindings'",
+            DeprecationWarning,
+            stacklevel=stacklevel,
+        )
+        return aliases
+    return component_bindings
+
+
+def _binding_resolver(
+        component_bindings: ComponentBindings | Mapping[str, str] | None,
         *,
         session_type: str | None = None,
-) -> ComponentAliases:
-    if isinstance(aliases, ComponentAliases):
-        if aliases.session_type != session_type:
+) -> ComponentBindings:
+    if isinstance(component_bindings, ComponentBindings):
+        if component_bindings.session_type != session_type:
             raise ValueError(
-                f"ComponentAliases uses session_type '{aliases.session_type}', "
+                "ComponentBindings uses session_type "
+                f"'{component_bindings.session_type}', "
                 f"not '{session_type}'"
             )
-        return aliases
-    return ComponentAliases(aliases, session_type=session_type)
+        return component_bindings
+    return ComponentBindings(
+        component_bindings,
+        session_type=session_type,
+    )
 
 
 def requires_step(step_name: str):
@@ -328,19 +399,24 @@ def requires_resource(resource_name: str):
 
 
 def topological_sort_of_components(
-        aliases: ComponentAliases | Mapping[str, str] | None = None,
+        component_bindings: ComponentBindings | Mapping[str, str] | None = None,
         *,
         components: Iterable | None = None,
         session_type: str | None = None,
+        aliases: ComponentBindings | Mapping[str, str] | None = None,
 ) -> dict[str, int]:
-    normalized = _normalize_component_session_type(session_type)
-    alias_resolver = _alias_resolver(
+    component_bindings = _coalesce_component_bindings(
+        component_bindings,
         aliases,
+    )
+    normalized = _normalize_component_session_type(session_type)
+    binding_resolver = _binding_resolver(
+        component_bindings,
         session_type=normalized,
     )
     registry = component_registry(normalized)
     return topological_sort_components(
-        alias_resolver=alias_resolver,
+        binding_resolver=binding_resolver,
         registry=registry,
         components=components,
     )
@@ -352,21 +428,28 @@ def format_execution_graph(
         hooks: Iterable[Hook],
         steps: Iterable[Step],
         max_iterations: int,
-        aliases: ComponentAliases | Mapping[str, str] | None = None,
+        component_bindings: (
+            ComponentBindings | Mapping[str, str] | None
+        ) = None,
         session_type: str = TRAINING_SESSION_TYPE,
+        aliases: ComponentBindings | Mapping[str, str] | None = None,
 ) -> str:
     """Return the session's component lifecycle as a readable execution graph."""
+    component_bindings = _coalesce_component_bindings(
+        component_bindings,
+        aliases,
+    )
     normalized = _normalize_component_session_type(session_type)
     assert normalized is not None
-    alias_resolver = _alias_resolver(
-        aliases,
+    binding_resolver = _binding_resolver(
+        component_bindings,
         session_type=normalized,
     )
     resources = list(resources)
     hooks = list(hooks)
     steps = list(steps)
     order = topological_sort_of_components(
-        alias_resolver,
+        binding_resolver,
         components=resources + hooks + steps,
         session_type=normalized,
     )
@@ -375,7 +458,7 @@ def format_execution_graph(
         hooks=hooks,
         steps=steps,
         max_iterations=max_iterations,
-        alias_resolver=alias_resolver,
+        binding_resolver=binding_resolver,
         session_type=normalized,
         order=order,
     )

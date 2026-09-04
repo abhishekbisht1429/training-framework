@@ -24,9 +24,8 @@ sessions:
         - model
         - train
 
-    components:
-      - model
-      - train
+    model: {}
+    train: {}
 
     logger:
       log_every: 10

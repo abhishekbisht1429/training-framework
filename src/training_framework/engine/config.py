@@ -5,8 +5,8 @@ from copy import deepcopy
 from omegaconf import OmegaConf
 
 from training_framework.components.config import (
+    reject_legacy_components_entry,
     reserved_config_names,
-    selected_component_names,
 )
 
 
@@ -63,14 +63,9 @@ class Configurator:
     def get_session_definition(self, index):
         if not self._session_configs:
             raise KeyError("Cannot use this function in the current operation!")
-        return deepcopy(self._session_configs[index])
-
-    @staticmethod
-    def _selected_component_names(session_config: Mapping) -> list[str]:
-        return selected_component_names(
-            session_config,
-            session_type=session_config.get("session_type"),
-        )
+        session_definition = self._session_configs[index]
+        reject_legacy_components_entry(session_definition)
+        return deepcopy(session_definition)
 
     @staticmethod
     def _reserved_config_names(session_config: Mapping) -> frozenset[str]:
@@ -80,6 +75,7 @@ class Configurator:
         if not self._session_configs:
             raise KeyError("Cannot use this function in the current operation!")
         session_config = self._session_configs[session_index]
+        reject_legacy_components_entry(session_config)
         reserved_names = self._reserved_config_names(session_config)
         if key in session_config and key not in reserved_names:
             if not isinstance(session_config[key], Mapping):
@@ -87,19 +83,15 @@ class Configurator:
                     f"The value corresponding to the key '{key}' is not a mapping"
                 )
             return deepcopy(session_config[key])
-        if key in self._selected_component_names(session_config):
-            return {}
         raise KeyError(key)
 
     def get_all_component_configs(self, session_index):
         if not self._session_configs:
             raise KeyError("Cannot use this function in the current operation!")
         session_config = self._session_configs[session_index]
+        reject_legacy_components_entry(session_config)
         reserved_names = self._reserved_config_names(session_config)
-        component_configs = {
-            name: {}
-            for name in self._selected_component_names(session_config)
-        }
+        component_configs = {}
 
         for key in session_config:
             if key in reserved_names:
@@ -112,6 +104,8 @@ class Configurator:
     def session_configs(self):
         if not self._session_configs:
             raise KeyError("Cannot use this property in the current operation!")
+        for session_config in self._session_configs:
+            reject_legacy_components_entry(session_config)
         return deepcopy(self._session_configs)
 
     @property

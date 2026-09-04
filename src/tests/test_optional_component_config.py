@@ -32,7 +32,7 @@ def _session_config(tmp_path):
     }
 
 
-def test_components_list_activates_empty_config_and_mapping_wins(tmp_path):
+def test_empty_mapping_activates_component_and_supplies_config(tmp_path):
     @step("optional_config_step")
     class OptionalConfigStep(Step):
         def __init__(self, config):
@@ -51,7 +51,6 @@ def test_components_list_activates_empty_config_and_mapping_wins(tmp_path):
 
     session = TrainingSession({
         "session_config": _session_config(tmp_path),
-        "components": ["optional_config_step"],
         "optional_config_step": {"value": 7},
     })
 
@@ -81,7 +80,7 @@ def test_component_can_omit_constructor_and_restore_state(tmp_path):
 
     session = TrainingSession({
         "session_config": _session_config(tmp_path),
-        "components": ["constructor_free_step"],
+        "constructor_free_step": {},
     })
 
     with session:
@@ -95,9 +94,6 @@ def test_component_can_omit_constructor_and_restore_state(tmp_path):
 def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
     @resource("closure_leaf")
     class ClosureLeaf(Resource):
-        def __init__(self, config):
-            self.config = dict(config)
-
         def setup(self, session):
             pass
 
@@ -107,9 +103,6 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
     @resource("closure_parent")
     @requires_resource("closure_leaf")
     class ClosureParent(Resource):
-        def __init__(self, config):
-            self.config = dict(config)
-
         def setup(self, session):
             pass
 
@@ -118,9 +111,7 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
 
     @hook("closure_inner")
     class ClosureInner(LifecycleHook):
-        def __init__(self, config):
-            self.config = dict(config)
-            self.call_every = 1
+        call_every = 1
 
         def pre_session(self, session):
             pass
@@ -138,9 +129,7 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
     @wraps("closure_inner")
     @requires_resource("closure_parent")
     class ClosureOuter(LifecycleHook):
-        def __init__(self, config):
-            self.config = dict(config)
-            self.call_every = 1
+        call_every = 1
 
         def pre_session(self, session):
             pass
@@ -157,9 +146,6 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
     @step("closure_prerequisite")
     @requires_resource("closure_parent")
     class ClosurePrerequisite(Step):
-        def __init__(self, config):
-            self.config = dict(config)
-
         def run(self, session):
             pass
 
@@ -175,7 +161,7 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
 
     session = TrainingSession({
         "session_config": _session_config(tmp_path),
-        "components": ["closure_root"],
+        "closure_root": {},
     })
 
     assert {resource.name for resource in session.get_all_resources()} == {
@@ -201,9 +187,6 @@ def test_dependencies_and_wrapped_hooks_are_activated_recursively(tmp_path):
 def test_alias_can_be_activated_only_through_a_dependency(tmp_path):
     @resource("alias_actual_resource")
     class AliasActualResource(Resource):
-        def __init__(self, config):
-            self.config = dict(config)
-
         def setup(self, session):
             pass
 
@@ -232,17 +215,18 @@ def test_alias_can_be_activated_only_through_a_dependency(tmp_path):
 
     session = TrainingSession({
         "session_config": _session_config(tmp_path),
-        "aliases": {
+        "component_bindings": {
             "alias_resource_role": "alias_actual_resource",
             "unused_resource_role": "unused_alias_actual",
         },
-        "components": ["alias_consumer"],
+        "alias_consumer": {},
     })
 
-    assert session.get_resource("alias_resource_role").config == {}
+    assert session.has_resource("alias_resource_role")
     assert not session.has_resource("unused_resource_role")
-    restored = TrainingSession.from_state(session.get_state())
-    assert restored.get_resource("alias_resource_role").config == {}
+    state = session.get_state()
+    restored = TrainingSession.from_state(state)
+    assert restored.has_resource("alias_resource_role")
 
 
 def test_aliased_default_is_activated_with_empty_config(tmp_path):
@@ -253,7 +237,7 @@ def test_aliased_default_is_activated_with_empty_config(tmp_path):
 
     session = TrainingSession({
         "session_config": _session_config(tmp_path),
-        "aliases": {"logger": "empty_config_logger"},
+        "component_bindings": {"logger": "empty_config_logger"},
     })
 
     hooks = {component.name: component for component in session.get_all_hooks()}
@@ -262,54 +246,18 @@ def test_aliased_default_is_activated_with_empty_config(tmp_path):
     assert "checkpointer" in hooks
 
 
-@pytest.mark.parametrize(
-    ("components", "error_type", "match"),
-    (
-        pytest.param("some_step", TypeError, "must be a list", id="not-a-list"),
-        pytest.param([1], TypeError, "entries must be strings", id="non-string"),
-        pytest.param([""], ValueError, "must not be empty", id="empty-name"),
-        pytest.param(
-            ["session_config"],
+def test_legacy_components_entry_is_rejected_with_migration_guidance(tmp_path):
+    with pytest.raises(
             ValueError,
-            "reserved configuration name",
-            id="reserved-name",
-        ),
-        pytest.param(
-            ["duplicate_step", "duplicate_step"],
-            ValueError,
-            "more than once",
-            id="duplicate",
-        ),
-        pytest.param(
-            ["unknown_optional_component"],
-            ValueError,
-            "No step, hook or resource registered",
-            id="unknown",
-        ),
-    ),
-)
-def test_invalid_components_lists_are_rejected(
-        tmp_path,
-        components,
-        error_type,
-        match,
-):
-    @step("duplicate_step")
-    class DuplicateStep(Step):
-        def __init__(self, config):
-            pass
-
-        def run(self, session):
-            pass
-
-    with pytest.raises(error_type, match=match):
+            match="no longer supported.*top-level mappings",
+    ):
         TrainingSession({
             "session_config": _session_config(tmp_path),
-            "components": components,
+            "components": ["legacy_step"],
         })
 
 
-def test_alias_target_cannot_be_selected_directly(tmp_path):
+def test_bound_role_cannot_be_configured_as_a_component(tmp_path):
     @step("direct_alias_target")
     class DirectAliasTarget(Step):
         def __init__(self, config):
@@ -318,38 +266,105 @@ def test_alias_target_cannot_be_selected_directly(tmp_path):
         def run(self, session):
             pass
 
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(ValueError, match="Configure the implementation name"):
         TrainingSession({
             "session_config": _session_config(tmp_path),
-            "aliases": {"virtual_step": "direct_alias_target"},
-            "components": ["direct_alias_target"],
+            "component_bindings": {
+                "virtual_step": "direct_alias_target",
+            },
+            "virtual_step": {},
         })
 
 
-def test_auto_configured_constructor_failure_requests_mapping(tmp_path):
-    @step("configuration_required_step")
-    class ConfigurationRequiredStep(Step):
+def test_required_custom_constructor_requires_mapping(tmp_path):
+    @resource("configuration_required_resource")
+    class ConfigurationRequiredResource(Resource):
         def __init__(self, config):
             self.value = config["required_value"]
 
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    @step("configuration_consumer")
+    @requires_resource("configuration_required_resource")
+    class ConfigurationConsumer(Step):
         def run(self, session):
             pass
 
     with pytest.raises(
         RuntimeError,
-        match="auto-configured component 'configuration_required_step'.*top-level",
+        match="'configuration_required_resource' is required.*custom constructor.*top-level",
     ):
         TrainingSession({
             "session_config": _session_config(tmp_path),
-            "components": ["configuration_required_step"],
+            "configuration_consumer": {},
         })
 
 
-def test_configurator_unifies_list_and_mapping_components():
+def test_inherited_custom_constructor_requires_mapping(tmp_path):
+    class ConfiguredResourceBase(Resource):
+        def __init__(self, config):
+            self.value = config["required_value"]
+
+    @resource("inherited_configuration_resource")
+    class InheritedConfigurationResource(ConfiguredResourceBase):
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    @step("inherited_configuration_consumer")
+    @requires_resource("inherited_configuration_resource")
+    class InheritedConfigurationConsumer(Step):
+        def run(self, session):
+            pass
+
+    with pytest.raises(
+            RuntimeError,
+            match="'inherited_configuration_resource'.*custom",
+    ):
+        TrainingSession({
+            "session_config": _session_config(tmp_path),
+            "inherited_configuration_consumer": {},
+        })
+
+
+def test_required_custom_constructor_uses_supplied_mapping(tmp_path):
+    @resource("configured_dependency")
+    class ConfiguredDependency(Resource):
+        def __init__(self, config):
+            self.value = config["value"]
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+    @step("configured_consumer")
+    @requires_resource("configured_dependency")
+    class ConfiguredConsumer(Step):
+        def run(self, session):
+            pass
+
+    session = TrainingSession({
+        "session_config": _session_config(tmp_path),
+        "configured_consumer": {},
+        "configured_dependency": {"value": 11},
+    })
+
+    assert session.get_resource("configured_dependency").value == 11
+
+
+def test_configurator_returns_mapping_components_only():
     configurator = Configurator.__new__(Configurator)
     configurator._session_configs = [{
         "session_config": {"max_iterations": 1},
-        "components": ["empty_component", "configured_component"],
+        "empty_component": {},
         "configured_component": {"value": 11},
     }]
 
@@ -363,6 +378,17 @@ def test_configurator_unifies_list_and_mapping_components():
     }
     with pytest.raises(KeyError):
         configurator.get_component_config(0, "inactive_component")
+
+
+def test_configurator_rejects_legacy_components_entry():
+    configurator = Configurator.__new__(Configurator)
+    configurator._session_configs = [{
+        "session_config": {"max_iterations": 1},
+        "components": ["legacy_component"],
+    }]
+
+    with pytest.raises(ValueError, match="no longer supported"):
+        configurator.get_session_definition(0)
 
 
 def test_secondary_rank_keeps_parallel_component_dependency_closure(tmp_path):
@@ -384,9 +410,6 @@ def test_secondary_rank_keeps_parallel_component_dependency_closure(tmp_path):
 
     @resource("parallel_dependency")
     class ParallelDependency(Resource):
-        def __init__(self, config):
-            self.config = dict(config)
-
         def setup(self, session):
             pass
 
@@ -404,9 +427,6 @@ def test_secondary_rank_keeps_parallel_component_dependency_closure(tmp_path):
 
     @resource("rank_zero_dependency")
     class RankZeroDependency(Resource):
-        def __init__(self, config):
-            self.config = dict(config)
-
         def setup(self, session):
             pass
 
@@ -424,9 +444,10 @@ def test_secondary_rank_keeps_parallel_component_dependency_closure(tmp_path):
 
     config = {
         "session_config": _session_config(tmp_path),
-        "aliases": {"ddp": "closure_ddp"},
-        "components": ["parallel_root", "rank_zero_only"],
-        "ddp": {
+        "component_bindings": {"ddp": "closure_ddp"},
+        "parallel_root": {},
+        "rank_zero_only": {},
+        "closure_ddp": {
             "world_size": 2,
             "parallel_components": ["parallel_root"],
         },

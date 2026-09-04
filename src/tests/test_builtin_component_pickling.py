@@ -219,8 +219,8 @@ def test_pickled_trained_model_loads_an_evaluation_model(tmp_path):
     resource("pickle_round_trip_model")(_PickleRoundTripModel)
     source = TrainingSession({
         "session_config": _session_config(tmp_path / "source"),
-        "aliases": {"model": "pickle_round_trip_model"},
-        "model": {"initial_weight": 2.0},
+        "component_bindings": {"model": "pickle_round_trip_model"},
+        "pickle_round_trip_model": {"initial_weight": 2.0},
     })
     checkpoint_path = tmp_path / "training-session.pt"
     torch.save(source, checkpoint_path)

@@ -3,9 +3,12 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import signal
 import socket
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 import torch
@@ -16,6 +19,7 @@ from training_framework.engine import SessionProcessWrapper, TrainingEngine
 
 
 _COMPONENTS_PACKAGE = "tests.integration_training_components"
+_INTEGRATION_RUNNER = "tests.integration_training_runner"
 
 
 pytestmark = pytest.mark.skipif(
@@ -47,6 +51,28 @@ def _wait_for_paths(paths, timeout: float = 30.0) -> None:
         time.sleep(0.01)
 
 
+def _wait_for_process_paths(
+    process,
+    paths,
+    log_path,
+    timeout: float = 30.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while not all(path.exists() for path in paths):
+        returncode = process.poll()
+        if returncode is not None:
+            pytest.fail(
+                f"Training process exited with code {returncode} before "
+                f"workers made progress:\n{log_path.read_text(encoding='utf-8')}"
+            )
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                "Timed out waiting for training workers to make progress:\n"
+                f"{log_path.read_text(encoding='utf-8')}"
+            )
+        time.sleep(0.01)
+
+
 def _ddp_session_config(
     tmp_path,
     output_dir,
@@ -63,14 +89,14 @@ def _ddp_session_config(
             "components_package": _COMPONENTS_PACKAGE,
             "show_execution_graph": False,
         },
-        "aliases": {
+        "component_bindings": {
             "model": "integration_ddp_model",
             "dataset": "integration_dataset",
         },
-        "model": {
+        "integration_ddp_model": {
             "initial_weight": 0.0,
         },
-        "dataset": {
+        "integration_dataset": {
             "dataset_size": 4,
         },
         "ddp": {
@@ -114,6 +140,108 @@ def _ddp_session_config(
             "ready_dir": str(ready_dir),
         }
     return session_config
+
+
+def _run_sigint_training_flow(tmp_path, *, process_group: bool) -> None:
+    max_iterations = 100_000
+    output_dir = tmp_path / "rank-results"
+    progress_dir = tmp_path / "rank-progress"
+    session_config = _ddp_session_config(
+        tmp_path,
+        output_dir,
+        max_iterations=max_iterations,
+    )
+    session_config["integration_results"]["progress_dir"] = str(progress_dir)
+    config_path = tmp_path / "training.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"sessions": [session_config]}),
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "training.log"
+    command = [
+        sys.executable,
+        "-m",
+        _INTEGRATION_RUNNER,
+        "--config",
+        str(config_path),
+        "--heartbeat-timeout",
+        "30",
+        "--process_timeout_on_join",
+        "10",
+    ]
+    environment = os.environ.copy()
+    source_root = str(Path(__file__).parents[1])
+    inherited_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        path
+        for path in (source_root, inherited_pythonpath)
+        if path
+    )
+
+    with log_path.open("w", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            command,
+            env=environment,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            _wait_for_process_paths(
+                process,
+                [
+                    progress_dir / "rank_0.progress",
+                    progress_dir / "rank_1.progress",
+                ],
+                log_path,
+            )
+            if process_group:
+                os.killpg(process.pid, signal.SIGINT)
+            else:
+                process.send_signal(signal.SIGINT)
+            returncode = process.wait(timeout=30.0)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5.0)
+
+    process_log = log_path.read_text(encoding="utf-8")
+    assert returncode == 0, process_log
+    results = [
+        json.loads(
+            (output_dir / f"rank_{rank}.json").read_text(encoding="utf-8")
+        )
+        for rank in range(2)
+    ]
+    completed_iterations = [
+        [observation["iteration"] for observation in result["observations"]]
+        for result in results
+    ]
+    assert completed_iterations[0]
+    assert completed_iterations[0] == completed_iterations[1]
+    assert len(completed_iterations[0]) < max_iterations
+    assert results[0]["final_weight"] == pytest.approx(
+        results[1]["final_weight"],
+        rel=1e-6,
+        abs=1e-6,
+    )
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="SIGINT process integration requires POSIX process groups",
+)
+def test_sigint_to_supervisor_gracefully_stops_full_training(tmp_path):
+    _run_sigint_training_flow(tmp_path, process_group=False)
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="SIGINT process integration requires POSIX process groups",
+)
+def test_sigint_to_process_group_gracefully_stops_full_training(tmp_path):
+    _run_sigint_training_flow(tmp_path, process_group=True)
 
 
 def test_full_spawned_ddp_training_flow(tmp_path, monkeypatch):

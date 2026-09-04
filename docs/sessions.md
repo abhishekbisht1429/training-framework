@@ -141,7 +141,8 @@ python -m my_project.train --config my_project/analysis.yaml
 
 The checkpoint must contain a framework `TrainingSession`, not a standalone
 model state dictionary. The source session must expose a model through the
-`model` resource role, directly or through an alias, and that resource must
+`model` resource role, directly or through a component binding, and that
+resource must
 provide `to(device)` and `eval()`. During analysis setup, `trained_model` loads
 the source session on CPU, moves the recovered model to the analysis device,
 places it in evaluation mode, and exposes it through

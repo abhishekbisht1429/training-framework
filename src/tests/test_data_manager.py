@@ -42,15 +42,15 @@ def _data_manager_config(
             "components_package": _COMPONENTS_PACKAGE,
             "show_execution_graph": False,
         },
-        "aliases": {
+        "component_bindings": {
             "ddp": "integration_data_context",
             "dataset": dataset_name,
         },
-        "ddp": {
+        "integration_data_context": {
             "rank": rank,
             "world_size": world_size,
         },
-        "dataset": {
+        dataset_name: {
             "dataset_size": dataset_size,
         },
         "data_manager": {
