@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -11,11 +12,12 @@ from training_framework.components import (
     Step,
 )
 from training_framework.components.config import (
+    reject_legacy_components_entry,
     reserved_config_names,
-    selected_component_names,
 )
 from training_framework.components.registry import (
-    ComponentAliases,
+    ComponentBindings,
+    _coalesce_component_bindings,
     _component_type,
     component_registry,
     topological_sort_of_components,
@@ -30,8 +32,9 @@ class SessionComponents:
             resources: dict[str, Resource] | None = None,
             steps: dict[str, Step] | None = None,
             hooks: dict[str, Hook] | None = None,
-            aliases: dict[str, str] | None = None,
+            component_bindings: Mapping[str, str] | None = None,
             session_type: str = TRAINING_SESSION_TYPE,
+            aliases: Mapping[str, str] | None = None,
     ):
         self.session_type = normalize_session_type(session_type)
         self.registry = component_registry(self.session_type)
@@ -39,7 +42,20 @@ class SessionComponents:
         self._merge_components(resources, Resource)
         self._merge_components(hooks, Hook)
         self._merge_components(steps, Step)
-        self.aliases = ComponentAliases(aliases, session_type=self.session_type)
+        component_bindings = _coalesce_component_bindings(
+            component_bindings,
+            aliases,
+        )
+        self.component_bindings = ComponentBindings(
+            component_bindings,
+            session_type=self.session_type,
+        )
+
+    def __setstate__(self, state) -> None:
+        legacy_bindings = state.pop("aliases", None)
+        if "component_bindings" not in state and legacy_bindings is not None:
+            state["component_bindings"] = legacy_bindings
+        self.__dict__.update(state)
 
     def get_state(self) -> dict[str, dict[str, Any]]:
         return {
@@ -123,12 +139,6 @@ class SessionComponents:
             if isinstance(component, Step)
         }
 
-    def _selected_component_names(self, config: Mapping) -> list[str]:
-        return selected_component_names(
-            config,
-            session_type=self.session_type,
-        )
-
     @staticmethod
     def _dependency_specs(
             component_class: type[Component],
@@ -187,12 +197,11 @@ class SessionComponents:
             *,
             default_configs: Mapping[str, Mapping] | None = None,
     ) -> None:
-        selected_names = self._selected_component_names(config)
-        self.aliases.validate_config(config)
+        reject_legacy_components_entry(config)
+        self.component_bindings.validate_config(config)
         reserved_names = reserved_config_names(self.session_type)
 
         component_configs: dict[str, dict] = {}
-        explicitly_configured: set[str] = set()
         configured_roots: list[str] = []
         for name, component_config in config.items():
             if name in reserved_names:
@@ -203,7 +212,6 @@ class SessionComponents:
                 )
             resolved_name = self.resolve_name(name)
             component_configs[resolved_name] = dict(component_config)
-            explicitly_configured.add(resolved_name)
             configured_roots.append(name)
 
         roots: list[str] = []
@@ -216,10 +224,6 @@ class SessionComponents:
                     if resolved_name == name
                     else {}
                 )
-
-        for name in selected_names:
-            roots.append(name)
-            component_configs.setdefault(self.resolve_name(name), {})
 
         roots.extend(configured_roots)
         visiting: set[str] = set()
@@ -240,20 +244,18 @@ class SessionComponents:
                     )
                     activate(dependency_name)
 
-                component_config = component_configs.get(resolved_name, {})
-                try:
-                    component = component_class(component_config)
-                except Exception as error:
-                    if (
-                            resolved_name not in explicitly_configured
-                            and not component_config
-                    ):
-                        raise RuntimeError(
-                            f"Failed to initialize auto-configured component "
-                            f"'{resolved_name}' with an empty config. Add a "
-                            f"top-level component mapping for its configuration."
-                        ) from error
-                    raise
+                if resolved_name in component_configs:
+                    component = component_class(
+                        component_configs[resolved_name],
+                    )
+                elif component_class.__init__ is Component.__init__:
+                    component = component_class()
+                else:
+                    raise RuntimeError(
+                        f"Component '{resolved_name}' is required but defines "
+                        "a custom constructor. Add a top-level component "
+                        f"mapping for '{resolved_name}'."
+                    )
                 self._register_component_instance(component)
             finally:
                 visiting.discard(resolved_name)
@@ -342,9 +344,9 @@ class SessionComponents:
                 f"{base_type.__name__}!"
             )
 
-        if self.aliases.is_alias(component.name):
+        if self.component_bindings.is_bound(component.name):
             raise ValueError(
-                f"Component role '{component.name}' is aliased to "
+                f"Component role '{component.name}' is bound to "
                 f"'{self.resolve_name(component.name)}' in this session"
             )
 
@@ -401,15 +403,33 @@ class SessionComponents:
         return isinstance(component, Resource)
 
     def resolve_name(self, name: str) -> str:
-        return self.aliases.resolve(name)
+        return self.component_bindings.resolve(name)
+
+    @property
+    def bindings(self) -> dict[str, str]:
+        return self.component_bindings.bindings
+
+    @property
+    def aliases(self) -> ComponentBindings:
+        warnings.warn(
+            "SessionComponents.aliases is deprecated; use component_bindings",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.component_bindings
 
     @property
     def alias_bindings(self) -> dict[str, str]:
-        return self.aliases.bindings
+        warnings.warn(
+            "SessionComponents.alias_bindings is deprecated; use bindings",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.bindings
 
     def _component_order(self) -> dict[str, int]:
         return topological_sort_of_components(
-            self.aliases,
+            self.component_bindings,
             components=self.components.values(),
             session_type=self.session_type,
         )

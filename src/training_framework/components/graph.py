@@ -78,7 +78,7 @@ def _validate_wrapping_lifecycle(
 
 def topological_sort_components(
         *,
-        alias_resolver,
+        binding_resolver,
         registry: Mapping[str, type[Component]],
         components: Iterable[Component | type[Component]] | None,
 ) -> dict[str, int]:
@@ -105,7 +105,7 @@ def topological_sort_components(
         )
         for attribute, required_type in requirements:
             for required_name in getattr(component, attribute, []):
-                resolved_name = alias_resolver.resolve(required_name)
+                resolved_name = binding_resolver.resolve(required_name)
                 registered_class = registry.get(resolved_name)
                 if (
                         registered_class is None
@@ -133,7 +133,7 @@ def topological_sort_components(
 
         resolved_targets = set()
         for wrapped_name in getattr(wrapper, "wrapped_hooks", ()):
-            resolved_name = alias_resolver.resolve(wrapped_name)
+            resolved_name = binding_resolver.resolve(wrapped_name)
             registered_class = registry.get(resolved_name)
             if registered_class is None or not issubclass(registered_class, Hook):
                 raise RuntimeError(
@@ -149,7 +149,7 @@ def topological_sort_components(
             if wrapped_id in resolved_targets:
                 raise RuntimeError(
                     f"Hook '{wrapper.name}' wraps Hook '{resolved_name}' "
-                    "more than once after alias resolution"
+                        "more than once after component binding resolution"
                 )
             resolved_targets.add(wrapped_id)
 
@@ -206,7 +206,7 @@ def render_execution_graph(
         hooks: Iterable[Hook],
         steps: Iterable[Step],
         max_iterations: int,
-        alias_resolver,
+        binding_resolver,
         session_type,
         order: Mapping[str, int],
 ) -> str:
@@ -240,11 +240,12 @@ def render_execution_graph(
         "================================",
         f"Max iterations: {max_iterations}",
     ]
-    if alias_resolver:
-        lines.extend(["", "ALIASES"])
+    if binding_resolver:
+        lines.extend(["", "COMPONENT BINDINGS"])
         lines.extend(
-            f"  {expected_name} -> {actual_name}"
-            for expected_name, actual_name in alias_resolver.bindings.items()
+            f"  {role_name} -> {implementation_name}"
+            for role_name, implementation_name
+            in binding_resolver.bindings.items()
         )
     lines.extend([
         "",
@@ -257,7 +258,7 @@ def render_execution_graph(
         "  |   ",
         [(component, "setup") for component in ordered_resources]
         + [(component, "pre_session") for component in session_hooks],
-        alias_resolver,
+        binding_resolver,
     )
 
     lines.extend([
@@ -273,7 +274,7 @@ def render_execution_graph(
             (component, "pre_iteration_callback")
             for component in iteration_hooks
         ],
-        alias_resolver,
+        binding_resolver,
     )
 
     lines.extend([
@@ -284,7 +285,7 @@ def render_execution_graph(
         lines,
         "  |   |   ",
         [(component, "run") for component in ordered_steps],
-        alias_resolver,
+        binding_resolver,
     )
 
     lines.extend([
@@ -298,7 +299,7 @@ def render_execution_graph(
             (component, "post_iteration_callback")
             for component in reversed(iteration_hooks)
         ],
-        alias_resolver,
+        binding_resolver,
     )
 
     lines.extend([
@@ -310,7 +311,7 @@ def render_execution_graph(
         "      ",
         [(component, "post_session") for component in reversed(session_hooks)]
         + [(component, "teardown") for component in reversed(ordered_resources)],
-        alias_resolver,
+        binding_resolver,
     )
     lines.extend([
         "  |",
@@ -319,17 +320,17 @@ def render_execution_graph(
     return "\n".join(lines)
 
 
-def _append_execution_calls(lines, prefix, calls, alias_resolver) -> None:
+def _append_execution_calls(lines, prefix, calls, binding_resolver) -> None:
     if not calls:
         lines.append(f"{prefix}(none)")
         return
 
     for index, (component, method_name) in enumerate(calls, start=1):
         annotations = []
-        requirements = _component_requirements(component, alias_resolver)
+        requirements = _component_requirements(component, binding_resolver)
         if requirements:
             annotations.append(f"requires: {', '.join(requirements)}")
-        wrapped_hooks = _component_wrapped_hooks(component, alias_resolver)
+        wrapped_hooks = _component_wrapped_hooks(component, binding_resolver)
         if wrapped_hooks:
             annotations.append(f"wraps: {', '.join(wrapped_hooks)}")
         if method_name in {
@@ -346,26 +347,26 @@ def _append_execution_calls(lines, prefix, calls, alias_resolver) -> None:
         )
 
 
-def _component_requirements(component, alias_resolver) -> list[str]:
+def _component_requirements(component, binding_resolver) -> list[str]:
     return (
         [
-            f"Resource.{alias_resolver.resolve(name)}"
+            f"Resource.{binding_resolver.resolve(name)}"
             for name in getattr(component, "required_resources", ())
         ]
         + [
-            f"Hook.{alias_resolver.resolve(name)}"
+            f"Hook.{binding_resolver.resolve(name)}"
             for name in getattr(component, "required_hooks", ())
         ]
         + [
-            f"Step.{alias_resolver.resolve(name)}"
+            f"Step.{binding_resolver.resolve(name)}"
             for name in getattr(component, "required_steps", ())
         ]
     )
 
 
-def _component_wrapped_hooks(component, alias_resolver) -> list[str]:
+def _component_wrapped_hooks(component, binding_resolver) -> list[str]:
     return [
-        f"Hook.{alias_resolver.resolve(name)}"
+        f"Hook.{binding_resolver.resolve(name)}"
         for name in getattr(component, "wrapped_hooks", ())
     ]
 

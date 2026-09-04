@@ -167,8 +167,8 @@ For reliable spawn and checkpoint behavior:
 ### Selecting components
 
 A top-level component mapping both activates a component and supplies its
-constructor configuration. Existing mappings, including empty mappings, remain
-valid:
+constructor configuration. Use an empty mapping to activate a root component
+that needs no settings:
 
 ```yaml
 train:
@@ -176,56 +176,53 @@ train:
 metrics: {}
 ```
 
-For components that need no configuration, list their names under the special
-`components` entry instead:
-
-```yaml
-components:
-  - model
-  - dataloader
-  - train
-```
-
-The list must contain unique, non-empty component names or virtual alias roles.
-Every name must resolve to a registered component. If a name appears in both
-places, its explicit mapping wins. The framework recursively activates
-resources, hooks, steps, and wrapped hooks required by the selected roots, using
-an empty configuration for each automatically activated component. Unrelated
-registered components stay inactive. If an automatically activated component
-requires constructor settings, add its top-level mapping.
+The framework recursively activates resources, hooks, steps, and wrapped hooks
+required by those roots. A missing dependency is constructed automatically and
+without arguments only when its effective constructor is the inherited
+`Component.__init__`. If its class or a component base class defines another
+constructor, add a top-level mapping for it. Unrelated registered components
+stay inactive. The former top-level `components` list is no longer supported;
+configs that contain it receive a migration error.
 
 `TrainingSession` activates `logger` and `checkpointer` by default.
 `AnalysisSession` instead activates `trained_model` and its analysis-specific
-`logger`. Both special entries and component dependencies support aliases.
+`logger`. Both special entries and component dependencies support component
+bindings.
 
-### Component aliases
+### Component bindings
 
-Use the session-level `aliases` mapping to substitute a registered implementation
-for the component name expected by configuration and dependency decorators:
+Use the session-level `component_bindings` mapping to bind a component role
+used by defaults and dependency decorators to a registered implementation:
 
 ```yaml
-aliases:
+component_bindings:
   optimizer: my_custom_optimizer
 
-optimizer:
+my_custom_optimizer:
   learning_rate: 0.001
 ```
 
-The mapping direction is `expected_name: registered_name`. In this example,
+The mapping direction is `role_name: registered_name`. In this example,
 `my_custom_optimizer` must be registered, while `optimizer` may be either a
-registered name or a virtual role. When configuration is needed, it remains
-under `optimizer`; otherwise the role may be selected through `components`, a
-dependency, or a built-in default without a separate mapping. Dependencies such
-as `@requires_step("optimizer")` resolve to `my_custom_optimizer`. The actual
-registered name is used in component state and
-shown in the execution graph, which also includes an `ALIASES` section.
+registered name or a virtual role. Configuration belongs under the registered
+implementation name; defining `optimizer` as a top-level component is rejected.
+Without explicit configuration, the role may still be activated by a dependency
+or built-in default when normal constructor rules permit it. Dependencies such
+as `@requires_step("optimizer")` resolve to `my_custom_optimizer`. The
+registered name is used in component state and shown in the execution graph,
+which also includes a `COMPONENT BINDINGS` section.
 
-Aliases are session-scoped and one-to-one. Alias chains, cycles, unknown or
-ambiguous targets, category changes, and configuring both names are rejected.
-Built-in defaults such as `logger` and `checkpointer` can be replaced through the
-same mechanism. `ddp.parallel_components` may contain either expected or actual
-names; an aliased DDP resource must support the same `config` and `rank`
-construction interface as the built-in resource.
+Bindings are session-scoped and one-to-one. Binding chains, cycles, unknown or
+ambiguous targets, category changes, and top-level role configuration are
+rejected. Built-in defaults such as `logger` and `checkpointer` can be replaced
+through the same mechanism. `ddp.parallel_components` may contain either role
+or implementation names; a bound DDP resource must support the same `config`
+and `rank` construction interface as the built-in resource.
+
+The former `aliases` key is deprecated but temporarily accepted with the same
+role-to-implementation direction. It cannot be combined with
+`component_bindings`, and configuration still belongs under the implementation
+name.
 
 ## Component dependencies
 
@@ -271,7 +268,8 @@ class OuterHook(LifecycleHook):
 
 If `outer` wraps `inner`, pre-session and pre-iteration callbacks run outer
 then inner, while post-iteration and post-session callbacks run inner then outer.
-Wrapping names support session aliases. Hooks must share a lifecycle phase. For
+Wrapping names support session component bindings. Hooks must share a lifecycle
+phase. For
 two iteration-capable hooks, the wrapper's `call_every` must be a positive
 multiple of the wrapped hook's value. This lets the wrapper run less often while
 ensuring it never runs on an iteration where the wrapped hook does not run.
@@ -283,8 +281,8 @@ relationships without a shared lifecycle phase; cadence mismatches; and cycles.
 The resulting order controls resource setup, hook callbacks, and step execution.
 Teardown and post-iteration hook callbacks use reverse order.
 
-Selecting a component automatically activates its recursive dependency and
-wrapping-target closure with empty configurations. Activation follows dependency
-edges outward: selecting a wrapped hook alone does not select hooks that wrap it.
-For DDP, secondary ranks retain the same closure for each root named in
-`ddp.parallel_components`.
+Activating a component automatically activates its recursive dependency and
+wrapping-target closure when each omitted dependency uses the inherited
+component constructor. Activation follows dependency edges outward: activating
+a wrapped hook alone does not activate hooks that wrap it. For DDP, secondary
+ranks retain the same closure for each root named in `ddp.parallel_components`.

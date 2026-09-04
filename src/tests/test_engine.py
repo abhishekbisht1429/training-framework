@@ -229,7 +229,7 @@ def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_p
             "device": "cpu",
             "components_package": COMPONENTS_PACKAGE,
         },
-        "aliases": {"model": "it_3d45_model"},
+        "component_bindings": {"model": "it_3d45_model"},
         "ddp": {
             "world_size": 2,
             "backend": "gloo",
@@ -237,7 +237,7 @@ def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_p
             "master_addr": "localhost",
             "master_port": "12355"
         },
-        "model": {},
+        "it_3d45_model": {},
         "it_3d45_train": {},
         "it_3d45_rank0_resource": {},
         "it_3d45_rank0_step": {},

@@ -179,8 +179,14 @@ sessions:
 ```
 
 Every top-level key inside a session, other than the reserved `session_type`,
-`session_config`, `session_kwargs`, `components`, and `aliases` entries, must
-match a component visible to the active session type.
+`session_config`, `session_kwargs`, and `component_bindings` entries, must
+match a component visible to the active session type. A binding maps a role name
+to a registered implementation, and component configuration belongs under that
+implementation name. The former `aliases` key remains accepted with a
+deprecation warning. Use an empty mapping for a config-free root.
+Required components that inherit `Component.__init__` are activated without a
+mapping; required components with a custom constructor must have one. The former
+top-level `components` list is rejected with migration guidance.
 
 ### 4. Create the entry point
 

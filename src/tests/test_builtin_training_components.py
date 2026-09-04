@@ -86,10 +86,10 @@ def _training_config(tmp_path, *, max_iterations=3):
             tmp_path,
             max_iterations=max_iterations,
         ),
-        "aliases": {
+        "component_bindings": {
             "model": "public_test_model",
         },
-        "model": {"initial_weight": 1.0},
+        "public_test_model": {"initial_weight": 1.0},
         "ddp": {
             "world_size": 1,
             "backend": "gloo",
@@ -211,8 +211,8 @@ def test_data_manager_runs_through_public_session_lifecycle(
             pass
 
     config = _training_config(tmp_path)
-    config["aliases"]["dataset"] = "public_test_dataset"
-    config["dataset"] = {"size": 4}
+    config["component_bindings"]["dataset"] = "public_test_dataset"
+    config["public_test_dataset"] = {"size": 4}
     config["data_manager"] = {
         "batch_size": 4,
         "num_workers": 0,
@@ -255,9 +255,6 @@ def test_data_manager_runs_through_public_session_lifecycle(
 def test_ddp_resource_activates_its_model_dependency(tmp_path):
     @resource("model")
     class UnconfiguredModel(Resource):
-        def __init__(self, config):
-            self.config = dict(config)
-
         def setup(self, session):
             pass
 
@@ -275,8 +272,7 @@ def test_ddp_resource_activates_its_model_dependency(tmp_path):
         },
     })
 
-    model = session.get_resource("model")
-    assert model.config == {}
+    assert session.has_resource("model")
     graph = session.execution_graph()
     assert graph.index("Resource.model.setup()") < graph.index(
         "Resource.ddp.setup()"

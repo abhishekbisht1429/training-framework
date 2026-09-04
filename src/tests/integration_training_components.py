@@ -235,6 +235,10 @@ class RankResultHook(LifecycleHook):
     def __init__(self, config: dict):
         self.call_every = 1
         self._output_dir = Path(config["output_dir"])
+        progress_dir = config.get("progress_dir")
+        self._progress_dir = (
+            Path(progress_dir) if progress_dir is not None else None
+        )
         self._observations: list[dict[str, float | int]] = []
 
     @override
@@ -256,6 +260,10 @@ class RankResultHook(LifecycleHook):
             "target": float(session.iteration_context["targets"].item()),
             "loss": float(session.iteration_context["loss"].detach().item()),
         })
+        if self._progress_dir is not None:
+            rank = session.get_resource("ddp").rank
+            self._progress_dir.mkdir(parents=True, exist_ok=True)
+            (self._progress_dir / f"rank_{rank}.progress").touch()
 
     @override
     def post_session(self, session: TrainingSession) -> None:

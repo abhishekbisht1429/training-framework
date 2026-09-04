@@ -212,8 +212,8 @@ def test_wraps_resolves_session_aliases(tmp_path):
 
     config = _session_config(tmp_path)
     config.update({
-        "aliases": {"inner_role": "actual_inner"},
-        "inner_role": {"call_every": 2},
+        "component_bindings": {"inner_role": "actual_inner"},
+        "actual_inner": {"call_every": 2},
         "alias_outer": {"call_every": 2},
     })
     session = TrainingSession(config)

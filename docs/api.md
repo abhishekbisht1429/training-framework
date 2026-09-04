@@ -79,7 +79,8 @@ The engine monitors workers while leaving the context.
 | `device` | Active `torch.device` |
 | `session_context` | Session-lifetime shared dictionary |
 | `iteration_context` | Current-iteration shared dictionary; context-only |
-| `component_aliases` | Copy of the session's expected-to-actual alias bindings |
+| `component_bindings` | Copy of the session's role-to-implementation bindings |
+| `component_aliases` | Deprecated compatibility property for `component_bindings` |
 | `resolve_component_name(name)` | Resolve an expected or actual component name to its registered name |
 | `get_resource(name)` | Retrieve a configured resource |
 | `has_resource(name)` | Test whether a resource is present |

@@ -1,5 +1,6 @@
 import os
 import random
+import warnings
 from abc import abstractmethod
 from collections.abc import Mapping
 from copy import deepcopy
@@ -10,13 +11,13 @@ import numpy as np
 import torch
 
 from training_framework.components import (
-    Component,
     Hook,
     Resource,
     Stateful,
     Step,
     format_execution_graph,
 )
+from training_framework.components.config import component_bindings_from_config
 from training_framework.session.components import SessionComponents
 from training_framework.session.config import (
     SessionConfig,
@@ -105,12 +106,12 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _set_component_collections(
             self,
             *,
-            aliases: dict[str, str] | None = None,
+            component_bindings: Mapping[str, str] | None = None,
     ) -> None:
-        if aliases is None:
-            aliases = self._config.get("aliases", {})
+        if component_bindings is None:
+            component_bindings = component_bindings_from_config(self._config)
         self._components = SessionComponents(
-            aliases=aliases,
+            component_bindings=component_bindings,
             session_type=self._session_type,
         )
 
@@ -192,7 +193,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
         self._init_transient_infra()
         restored_components = SessionComponents(
-            aliases=self._config.get("aliases", {}),
+            component_bindings=component_bindings_from_config(self._config),
             session_type=self._session_type,
         )
         restored_components.set_state(state["components_state"])
@@ -328,7 +329,16 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     @property
     def component_aliases(self) -> dict[str, str]:
-        return self._components.alias_bindings
+        warnings.warn(
+            "Session.component_aliases is deprecated; use component_bindings",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.component_bindings
+
+    @property
+    def component_bindings(self) -> dict[str, str]:
+        return self._components.bindings
 
     def resolve_component_name(self, name: str) -> str:
         return self._components.resolve_name(name)
@@ -351,7 +361,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             hooks=self.get_all_hooks(),
             steps=self.get_all_steps(),
             max_iterations=self.session_config.max_iterations,
-            aliases=self._components.aliases,
+            component_bindings=self._components.component_bindings,
             session_type=self._session_type,
         )
 

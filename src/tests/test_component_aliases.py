@@ -8,6 +8,8 @@ from tests.test_utils import COMPONENTS_PACKAGE, register_test_components
 from training_framework.engine import Configurator
 from training_framework.engine import load_session_for_worker
 from training_framework.components import (
+    ComponentAliases,
+    ComponentBindings,
     Hook,
     Resource,
     SessionHook,
@@ -18,6 +20,7 @@ from training_framework.components import (
     requires_step,
     resource,
     step,
+    topological_sort_of_components,
 )
 from training_framework.session import TrainingSession
 
@@ -33,7 +36,7 @@ def _session_config(tmp_path, *, components_package="training_framework.componen
     }
 
 
-def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
+def test_component_bindings_substitute_dependencies_and_public_names(tmp_path):
     @resource("custom_model")
     class CustomModel(Resource):
         def __init__(self, config):
@@ -77,14 +80,14 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
 
     config = {
         "session_config": _session_config(tmp_path),
-        "aliases": {
+        "component_bindings": {
             "model": "custom_model",
             "metrics": "custom_metrics",
             "optimizer_step": "custom_optimizer",
         },
-        "model": {"label": "primary"},
-        "metrics": {"prefix": "train"},
-        "optimizer_step": {"learning_rate": 0.001},
+        "custom_model": {"label": "primary"},
+        "custom_metrics": {"prefix": "train"},
+        "custom_optimizer": {"learning_rate": 0.001},
         "consumer": {},
     }
 
@@ -96,7 +99,7 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
     assert model_component.label == "primary"
     assert session.has_resource("model")
     assert session.has_resource("custom_model")
-    assert session.component_aliases == config["aliases"]
+    assert session.component_bindings == config["component_bindings"]
     assert session.resolve_component_name("optimizer_step") == "custom_optimizer"
 
     hook_names = {component.name for component in session.get_all_hooks()}
@@ -107,7 +110,7 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
     assert "optimizer_step" not in step_names
 
     graph = session.execution_graph()
-    assert "ALIASES" in graph
+    assert "COMPONENT BINDINGS" in graph
     assert "optimizer_step -> custom_optimizer" in graph
     assert "requires: Resource.custom_model" in graph
     assert "requires: Hook.custom_metrics" in graph
@@ -128,7 +131,7 @@ def test_aliases_substitute_components_dependencies_and_public_names(tmp_path):
     assert not session.has_resource("model")
 
 
-def test_alias_replaces_a_default_component_without_duplicate(tmp_path):
+def test_binding_replaces_a_default_component_without_duplicate(tmp_path):
     @hook("custom_logger")
     class CustomLogger(Hook):
         def __init__(self, config):
@@ -136,8 +139,8 @@ def test_alias_replaces_a_default_component_without_duplicate(tmp_path):
 
     session = TrainingSession({
         "session_config": _session_config(tmp_path),
-        "aliases": {"logger": "custom_logger"},
-        "logger": {"destination": "memory"},
+        "component_bindings": {"logger": "custom_logger"},
+        "custom_logger": {"destination": "memory"},
     })
 
     hooks = {component.name: component for component in session.get_all_hooks()}
@@ -146,7 +149,7 @@ def test_alias_replaces_a_default_component_without_duplicate(tmp_path):
     assert "checkpointer" in hooks
 
 
-def test_aliases_survive_pickle_and_state_round_trips(tmp_path):
+def test_component_bindings_survive_pickle_and_state_round_trips(tmp_path):
     @step("checkpoint_actual")
     class CheckpointStep(Step):
         def __init__(self, config):
@@ -157,8 +160,10 @@ def test_aliases_survive_pickle_and_state_round_trips(tmp_path):
 
     config = {
         "session_config": _session_config(tmp_path),
-        "aliases": {"checkpoint_role": "checkpoint_actual"},
-        "checkpoint_role": {"label": "restored"},
+        "component_bindings": {
+            "checkpoint_role": "checkpoint_actual",
+        },
+        "checkpoint_actual": {"label": "restored"},
     }
     session = TrainingSession(config)
 
@@ -166,7 +171,7 @@ def test_aliases_survive_pickle_and_state_round_trips(tmp_path):
     from_pickle = pickle.loads(pickle.dumps(session))
 
     for restored in (from_state, from_pickle):
-        assert restored.component_aliases == config["aliases"]
+        assert restored.component_bindings == config["component_bindings"]
         assert restored.resolve_component_name("checkpoint_role") == (
             "checkpoint_actual"
         )
@@ -177,14 +182,14 @@ def test_aliases_survive_pickle_and_state_round_trips(tmp_path):
         assert "checkpoint_role -> checkpoint_actual" in restored.execution_graph()
 
 
-def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
+def test_ddp_parallel_components_accept_bound_role_names(tmp_path):
     register_test_components()
     config = {
         "session_config": _session_config(
             tmp_path,
             components_package=COMPONENTS_PACKAGE,
         ),
-        "aliases": {
+        "component_bindings": {
             "model": "it_3d45_model",
             "train_role": "it_3d45_train",
         },
@@ -195,8 +200,8 @@ def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
             "master_addr": "localhost",
             "master_port": "12355",
         },
-        "model": {},
-        "train_role": {},
+        "it_3d45_model": {},
+        "it_3d45_train": {},
         "it_3d45_rank0_resource": {},
         "it_3d45_rank0_step": {},
         "it_3d45_rank0_hook": {"call_every": 1},
@@ -221,19 +226,19 @@ def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("aliases", "component_configs", "error_type", "match"),
+    ("bindings", "component_configs", "error_type", "match"),
     (
         pytest.param([], {}, TypeError, "must be a mapping", id="not-a-mapping"),
         pytest.param(
             {"role": 1},
-            {"role": {}},
+            {"target": {}},
             TypeError,
             "strings to strings",
             id="non-string",
         ),
         pytest.param(
             {"role": "missing"},
-            {"role": {}},
+            {},
             ValueError,
             "not a registered component",
             id="unknown-target",
@@ -254,30 +259,30 @@ def test_ddp_parallel_components_accept_expected_alias_names(tmp_path):
         ),
         pytest.param(
             {"first": "target", "second": "target"},
-            {"first": {}, "second": {}},
+            {"target": {}},
             ValueError,
-            "cannot both target",
+            "cannot both bind",
             id="duplicate-target",
         ),
         pytest.param(
             {"first": "second", "second": "target"},
-            {"first": {}, "second": {}},
+            {"target": {}},
             ValueError,
             "chains and cycles",
             id="alias-chain",
         ),
         pytest.param(
             {"role": "target"},
-            {"role": {}, "target": {}},
+            {"role": {}},
             ValueError,
-            "not both",
-            id="expected-and-actual-configured",
+            "Configure the implementation name",
+            id="role-configured",
         ),
     ),
 )
-def test_invalid_alias_mappings_are_rejected(
+def test_invalid_component_bindings_are_rejected(
         tmp_path,
-        aliases,
+        bindings,
         component_configs,
         error_type,
         match,
@@ -292,7 +297,7 @@ def test_invalid_alias_mappings_are_rejected(
 
     config = {
         "session_config": _session_config(tmp_path),
-        "aliases": aliases,
+        "component_bindings": bindings,
         **component_configs,
     }
 
@@ -300,7 +305,7 @@ def test_invalid_alias_mappings_are_rejected(
         TrainingSession(config)
 
 
-def test_alias_target_names_are_globally_unique_across_categories():
+def test_binding_target_names_are_globally_unique_across_categories():
     @step("ambiguous")
     class AmbiguousStep(Step):
         def __init__(self, config):
@@ -322,7 +327,7 @@ def test_alias_target_names_are_globally_unique_across_categories():
                 pass
 
 
-def test_alias_dependency_must_resolve_to_the_required_category(tmp_path):
+def test_bound_dependency_must_resolve_to_the_required_category(tmp_path):
     @hook("actual_hook")
     class ActualHook(Hook):
         def __init__(self, config):
@@ -340,8 +345,8 @@ def test_alias_dependency_must_resolve_to_the_required_category(tmp_path):
     with pytest.raises(RuntimeError, match="not registered as a Step"):
         TrainingSession({
             "session_config": _session_config(tmp_path),
-            "aliases": {"virtual_step": "actual_hook"},
-            "virtual_step": {},
+            "component_bindings": {"virtual_step": "actual_hook"},
+            "actual_hook": {},
             "consumer": {},
         })
 
@@ -350,12 +355,85 @@ def test_configurator_excludes_special_entries_from_component_configs():
     configurator = Configurator.__new__(Configurator)
     configurator._session_configs = [{
         "session_config": {"max_iterations": 1},
-        "aliases": {"role": "target"},
-        "components": ["no_config"],
-        "role": {"value": 3},
+        "component_bindings": {"role": "target"},
+        "no_config": {},
+        "target": {"value": 3},
     }]
 
     assert configurator.get_all_component_configs(0) == {
         "no_config": {},
-        "role": {"value": 3},
+        "target": {"value": 3},
     }
+
+
+def test_deprecated_alias_config_uses_actual_component_name(tmp_path):
+    @step("legacy_target")
+    class LegacyTarget(Step):
+        def __init__(self, config):
+            self.value = config["value"]
+
+        def run(self, session):
+            pass
+
+    with pytest.warns(DeprecationWarning, match="component_bindings"):
+        session = TrainingSession({
+            "session_config": _session_config(tmp_path),
+            "aliases": {"legacy_role": "legacy_target"},
+            "legacy_target": {"value": 7},
+        })
+
+    assert session.resolve_component_name("legacy_role") == "legacy_target"
+    assert {
+        component.name for component in session.get_all_steps()
+    } == {"legacy_target"}
+
+    with pytest.warns(DeprecationWarning, match="component_bindings"):
+        restored = TrainingSession.from_state(session.get_state())
+    assert restored.resolve_component_name("legacy_role") == "legacy_target"
+
+
+def test_alias_and_component_bindings_config_cannot_be_combined(tmp_path):
+    with pytest.raises(ValueError, match="not both"):
+        TrainingSession({
+            "session_config": _session_config(tmp_path),
+            "component_bindings": {},
+            "aliases": {},
+        })
+
+
+def test_deprecated_python_alias_apis_remain_available(tmp_path):
+    @step("python_api_target")
+    class PythonApiTarget(Step):
+        def run(self, session):
+            pass
+
+    with pytest.warns(DeprecationWarning, match="ComponentAliases"):
+        legacy_bindings = ComponentAliases(
+            {"python_api_role": "python_api_target"},
+            session_type="training",
+        )
+
+    assert isinstance(legacy_bindings, ComponentBindings)
+    with pytest.warns(DeprecationWarning, match="is_alias"):
+        assert legacy_bindings.is_alias("python_api_role")
+    with pytest.warns(DeprecationWarning, match="aliases"):
+        order = topological_sort_of_components(
+            aliases=legacy_bindings,
+            components=[PythonApiTarget],
+            session_type="training",
+        )
+    assert order == {"Step.python_api_target": 0}
+    with pytest.raises(ValueError, match="not both"):
+        topological_sort_of_components(
+            ComponentBindings(session_type="training"),
+            aliases={},
+            session_type="training",
+        )
+
+    session = TrainingSession({
+        "session_config": _session_config(tmp_path),
+        "component_bindings": {"python_api_role": "python_api_target"},
+        "python_api_target": {},
+    })
+    with pytest.warns(DeprecationWarning, match="component_aliases"):
+        assert session.component_aliases == session.component_bindings
