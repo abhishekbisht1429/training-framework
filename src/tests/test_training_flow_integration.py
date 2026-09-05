@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -344,13 +345,20 @@ def test_staggered_stop_request_keeps_ddp_ranks_iteration_aligned(
 ):
     _register_integration_components()
     output_dir = tmp_path / "stopped-rank-results"
-    ready_dir = tmp_path / "rank-ready"
+    delay_dir = tmp_path / "rank-delay"
     session_config = _ddp_session_config(
         tmp_path,
         output_dir,
         max_iterations=100_000,
-        ready_dir=ready_dir,
     )
+    session_config["ddp"]["parallel_components"].append(
+        "integration_rank_delay"
+    )
+    session_config["integration_rank_delay"] = {
+        "rank": 1,
+        "delay": 2.5,
+        "marker_dir": str(delay_dir),
+    }
     config_path = tmp_path / "stopped-training.yaml"
     config_path.write_text(
         yaml.safe_dump({"sessions": [session_config]}),
@@ -385,13 +393,15 @@ def test_staggered_stop_request_keeps_ddp_ranks_iteration_aligned(
         staggered_request_stop,
     )
 
+    stop_thread = None
     with TrainingEngine(Configurator()) as engine:
         engine.start_session()
-        _wait_for_paths([
-            ready_dir / "rank_0.ready",
-            ready_dir / "rank_1.ready",
-        ])
-        engine.request_stop_all()
+        _wait_for_paths([delay_dir / "rank_1.delaying"])
+        stop_thread = threading.Thread(target=engine.request_stop_all)
+        stop_thread.start()
+
+    stop_thread.join(timeout=5.0)
+    assert not stop_thread.is_alive()
 
     results = [
         json.loads(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import override
 
@@ -221,6 +222,44 @@ class RankReadyHook(SessionHook):
         rank = session.get_resource("ddp").rank
         self._ready_dir.mkdir(parents=True, exist_ok=True)
         (self._ready_dir / f"rank_{rank}.ready").touch()
+
+    @override
+    def post_session(self, session: TrainingSession) -> None:
+        return None
+
+
+@hook("integration_rank_delay")
+@requires_resource("ddp")
+class HeartbeatingRankDelayHook(LifecycleHook):
+    """Delay one rank while keeping its worker heartbeat active."""
+
+    def __init__(self, config: dict):
+        self.call_every = 1
+        self._rank = int(config["rank"])
+        self._delay = float(config["delay"])
+        self._marker_dir = Path(config["marker_dir"])
+
+    @override
+    def pre_session(self, session: TrainingSession) -> None:
+        return None
+
+    @override
+    def pre_iteration_callback(self, session: TrainingSession) -> None:
+        return None
+
+    @override
+    def post_iteration_callback(self, session: TrainingSession) -> None:
+        if session.iteration != 1:
+            return
+        if session.get_resource("ddp").rank != self._rank:
+            return
+
+        self._marker_dir.mkdir(parents=True, exist_ok=True)
+        (self._marker_dir / f"rank_{self._rank}.delaying").touch()
+        deadline = time.monotonic() + self._delay
+        while time.monotonic() < deadline:
+            session.send_heartbeat("Delaying rank before stop synchronization")
+            time.sleep(0.05)
 
     @override
     def post_session(self, session: TrainingSession) -> None:
