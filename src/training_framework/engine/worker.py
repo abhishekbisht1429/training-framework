@@ -9,6 +9,10 @@ from torch import distributed, multiprocessing
 from training_framework.session import Session, TrainingSession
 
 
+_STOP_SYNC_GRACE_PERIOD = 0.001
+_STOP_SYNC_POLL_INTERVAL = 0.005
+
+
 def load_session_for_worker(
         session_state,
         rank,
@@ -70,10 +74,17 @@ def _stop_requested(session: Session, stop_event) -> bool:
         device=control_device,
     )
     session.send_heartbeat("Synchronizing worker stop state")
-    distributed.all_reduce(
+    stop_sync = distributed.all_reduce(
         stop_flag,
         op=distributed.ReduceOp.MAX,
+        async_op=True,
     )
+    poll_started = time.monotonic()
+    while not stop_sync.is_completed():
+        session.send_heartbeat("Synchronizing worker stop state")
+        if time.monotonic() - poll_started >= _STOP_SYNC_GRACE_PERIOD:
+            time.sleep(_STOP_SYNC_POLL_INTERVAL)
+    stop_sync.wait()
     return bool(stop_flag.item())
 
 
@@ -92,7 +103,8 @@ def session_process_worker(
             session_update_params=kwargs.get("session_update_params"),
         )
         session.set_dist_manager_err_conn(error_conn)
-        session.set_heartbeat_interval(10.0)
+        heartbeat_timeout = kwargs["heartbeat_timeout"]
+        session.set_heartbeat_interval(min(10.0, heartbeat_timeout / 3))
         with session:
             while True:
                 if _stop_requested(session, stop_event):

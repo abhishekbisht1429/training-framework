@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from training_framework.engine import (
     TrainingEngine,
     load_session_for_worker,
 )
+from training_framework.engine import worker as worker_module
 from training_framework.session import TrainingSession
 from tests.test_utils import (
     COMPONENTS_PACKAGE,
@@ -83,6 +85,79 @@ def test_spawned_non_ddp_worker_honors_stop_request(tmp_path):
     wrapper.join()
 
     assert exitcode == 0
+
+
+@pytest.mark.parametrize(
+    ("monotonic_times", "expected_sleeps"),
+    [
+        ([0.0, 0.0005, 0.0009], []),
+        ([0.0, 0.001, 0.002], [0.005, 0.005]),
+    ],
+)
+def test_ddp_stop_wait_keeps_worker_heartbeat_active(
+    monkeypatch,
+    monotonic_times,
+    expected_sleeps,
+):
+    heartbeat_stages = []
+
+    class Session:
+        device = None
+
+        @staticmethod
+        def has_resource(name):
+            return name == "ddp"
+
+        @staticmethod
+        def get_resource(name):
+            assert name == "ddp"
+            return SimpleNamespace(backend="gloo")
+
+        @staticmethod
+        def send_heartbeat(stage):
+            heartbeat_stages.append(stage)
+
+    class StopSync:
+        def __init__(self):
+            self.polls_remaining = 2
+            self.waited = False
+
+        def is_completed(self):
+            if self.polls_remaining:
+                self.polls_remaining -= 1
+                return False
+            return True
+
+        def wait(self):
+            self.waited = True
+
+    stop_sync = StopSync()
+    sleep_calls = []
+
+    def all_reduce(stop_flag, *, op, async_op):
+        assert stop_flag.item() == 1
+        assert op is worker_module.distributed.ReduceOp.MAX
+        assert async_op is True
+        return stop_sync
+
+    monkeypatch.setattr(worker_module.distributed, "all_reduce", all_reduce)
+    monotonic_times = iter(monotonic_times)
+    monkeypatch.setattr(
+        worker_module,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: next(monotonic_times),
+            sleep=sleep_calls.append,
+        ),
+    )
+
+    stop_event = SimpleNamespace(is_set=lambda: True)
+
+    assert worker_module._stop_requested(Session(), stop_event) is True
+    assert len(heartbeat_stages) > 1
+    assert set(heartbeat_stages) == {"Synchronizing worker stop state"}
+    assert stop_sync.waited is True
+    assert sleep_calls == expected_sleeps
 
 
 def test_spawned_worker_reconstructs_paused_state_and_continues_exactly(tmp_path):
