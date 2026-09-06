@@ -125,9 +125,29 @@ def _ddp_session_config(
         "integration_train": {},
         "integration_loss": {},
         "optimizer": {
-            "learning_rate": 0.1,
-            "weight_decay": 0.0,
-            "warmup_iters": 1,
+            "optimizer": {
+                "name": "AdamW",
+                "kwargs": {
+                    "lr": 0.1,
+                    "weight_decay": 0.0,
+                },
+            },
+            "lr_scheduler": {
+                "stages": [
+                    {
+                        "name": "LinearLR",
+                        "kwargs": {
+                            "start_factor": 0.001,
+                            "total_iters": "$stage_iterations",
+                        },
+                    },
+                    {
+                        "name": "CosineAnnealingLR",
+                        "kwargs": {"T_max": "$stage_iterations"},
+                    },
+                ],
+                "milestones": [1],
+            },
         },
         "integration_results": {
             "output_dir": str(output_dir),

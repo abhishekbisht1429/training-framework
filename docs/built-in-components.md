@@ -16,7 +16,7 @@ which registers all built-ins. Their classes are also importable from
 | `checkpointer` | Hook | Saves complete session checkpoints; enabled by default |
 | `ddp` | Resource | Initializes distributed execution and wraps the required `model` resource |
 | `data_manager` | Stateful resource | Creates a resumable distributed `DataLoader`; requires `dataset` and `ddp` |
-| `optimizer` | Stateful lifecycle hook | Runs AdamW and a warmup/cosine scheduler around each iteration; requires `ddp` and reads `iteration_context["loss"]` |
+| `optimizer` | Stateful lifecycle hook | Runs a configured PyTorch optimizer and optional learning-rate schedule; requires `ddp` and reads `iteration_context["loss"]` |
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations; wraps `optimizer` |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
 
@@ -51,9 +51,21 @@ data_manager:
   pin_memory: false
 
 optimizer:
-  learning_rate: 0.0003
-  weight_decay: 0.01
-  warmup_iters: 100
+  optimizer:
+    name: AdamW
+    kwargs:
+      lr: 0.0003
+      weight_decay: 0.01
+  lr_scheduler:
+    stages:
+      - name: LinearLR
+        kwargs:
+          start_factor: 0.001
+          total_iters: "$stage_iterations"
+      - name: CosineAnnealingLR
+        kwargs:
+          T_max: "$stage_iterations"
+    milestones: [100]
 
 timer:
   call_every: 10
@@ -63,6 +75,23 @@ tensorboard:
   port: 6006
   logdir: ./runs/tensorboard  # optional TensorBoard server log directory
 ```
+
+Optimizer names are resolved from `torch.optim`; scheduler names are resolved
+from `torch.optim.lr_scheduler`. Constructor options belong in each entry's
+`kwargs`. Omit `lr_scheduler` to train without a learning-rate scheduler. A
+single scheduler can specify `metric_key` to pass an
+`iteration_context[metric_key]` value to `scheduler.step(...)`; metric-driven
+schedulers cannot be used in a multi-stage pipeline.
+
+Multiple stages are combined with `SequentialLR`, so `milestones` must contain
+one strictly increasing boundary between each pair of stages. Scheduler kwargs
+may use the exact values `$max_iterations` and `$stage_iterations`, which are
+resolved when the session starts. The latter is the distance between the
+stage's surrounding milestones (or the start/end of the session).
+
+The former `learning_rate`, `weight_decay`, and `warmup_iters` optimizer fields
+are no longer accepted. Move optimizer arguments under `optimizer.kwargs` and
+describe the warmup/main schedule explicitly as shown above.
 
 `data_manager.data_iter` is available only while the session is active. It
 divides the global batch size across ranks and checkpoints delivered-batch
