@@ -291,12 +291,16 @@ def test_data_manager_stops_worker_processes_during_teardown(tmp_path):
     data_manager = session.get_resource("data_manager")
 
     with session:
-        batch = next(data_manager.data_iter)
+        data_iter = data_manager.data_iter
+        batch = next(data_iter)
         worker_pid = int(batch[0, 1].item())
         assert worker_pid != os.getpid()
         assert _process_exists(worker_pid)
 
     assert data_manager.data_iter is None
+    with pytest.raises(StopIteration):
+        next(data_iter)
+
     deadline = time.monotonic() + 5
     while _process_exists(worker_pid) and time.monotonic() < deadline:
         time.sleep(0.05)
