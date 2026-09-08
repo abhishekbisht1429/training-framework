@@ -38,11 +38,7 @@ class _ManagedDataIterator:
             return
 
         self._closed = True
-        iterator = self._iterator
         self._iterator = None
-        shutdown_workers: Any = getattr(iterator, "_shutdown_workers", None)
-        if callable(shutdown_workers):
-            shutdown_workers()
 
 
 @requires_resource("ddp")

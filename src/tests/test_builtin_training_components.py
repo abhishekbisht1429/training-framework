@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-from training_framework.components.builtin import Timer
+from training_framework.components.builtin import OptimizerHook, Timer
 from training_framework.components.builtin import distributed, observability
 from training_framework.components import (
     Resource,
@@ -98,9 +98,29 @@ def _training_config(tmp_path, *, max_iterations=3):
             "master_port": "12355",
         },
         "optimizer": {
-            "learning_rate": 0.1,
-            "weight_decay": 0.0,
-            "warmup_iters": 1,
+            "optimizer": {
+                "name": "AdamW",
+                "kwargs": {
+                    "lr": 0.1,
+                    "weight_decay": 0.0,
+                },
+            },
+            "lr_scheduler": {
+                "stages": [
+                    {
+                        "name": "LinearLR",
+                        "kwargs": {
+                            "start_factor": 0.001,
+                            "total_iters": "$stage_iterations",
+                        },
+                    },
+                    {
+                        "name": "CosineAnnealingLR",
+                        "kwargs": {"T_max": "$stage_iterations"},
+                    },
+                ],
+                "milestones": [1],
+            },
         },
         "public_test_loss": {"target": 0.0},
     }
@@ -467,3 +487,197 @@ def test_pickled_optimizer_state_matches_uninterrupted_training(
         ]["last_epoch"]
         == 3
     )
+
+
+def _optimizer_test_session(model, *, max_iterations, iteration_context=None):
+    ddp = SimpleNamespace(wrapped_model=model)
+    return SimpleNamespace(
+        get_resource=lambda name: ddp,
+        session_config=SimpleNamespace(max_iterations=max_iterations),
+        iteration_context=(iteration_context or {}),
+    )
+
+
+def test_optimizer_can_be_configured_without_a_scheduler():
+    model = nn.Linear(1, 1, bias=False)
+    hook = OptimizerHook({
+        "optimizer": {
+            "name": "SGD",
+            "kwargs": {"lr": 0.25},
+        },
+    })
+    session = _optimizer_test_session(model, max_iterations=1)
+    initial_weight = model.weight.detach().clone()
+
+    hook.pre_session(session)
+    hook.pre_iteration_callback(session)
+    session.iteration_context["loss"] = (
+        model(torch.ones(1, 1)).square().sum()
+    )
+    hook.post_iteration_callback(session)
+
+    assert not torch.equal(model.weight.detach(), initial_weight)
+    state = hook.get_state()
+    assert state["optimizer_state"]["param_groups"][0]["lr"] == 0.25
+    assert state["lr_scheduler_state"] is None
+
+    hook.post_session(session)
+    restored = pickle.loads(pickle.dumps(hook))
+    restored_state = restored.get_state()
+    assert restored_state["optimizer_state"]["param_groups"][0]["lr"] == 0.25
+    assert restored_state["lr_scheduler_state"] is None
+
+
+def test_scheduler_pipeline_resolves_runtime_stage_lengths():
+    model = nn.Linear(1, 1, bias=False)
+    hook = OptimizerHook({
+        "optimizer": {
+            "name": "SGD",
+            "kwargs": {"lr": 0.2},
+        },
+        "lr_scheduler": {
+            "stages": [
+                {
+                    "name": "LinearLR",
+                    "kwargs": {
+                        "start_factor": 0.5,
+                        "total_iters": "$stage_iterations",
+                    },
+                },
+                {
+                    "name": "CosineAnnealingLR",
+                    "kwargs": {"T_max": "$stage_iterations"},
+                },
+            ],
+            "milestones": [2],
+        },
+    })
+    session = _optimizer_test_session(model, max_iterations=5)
+    hook.pre_session(session)
+
+    for _ in range(5):
+        hook.pre_iteration_callback(session)
+        session.iteration_context["loss"] = (
+            model(torch.ones(1, 1)).square().sum()
+        )
+        hook.post_iteration_callback(session)
+
+    assert hook.get_state()["lr_scheduler_state"]["last_epoch"] == 5
+
+
+def test_metric_scheduler_reads_the_configured_iteration_value():
+    model = nn.Linear(1, 1, bias=False)
+    hook = OptimizerHook({
+        "optimizer": {
+            "name": "SGD",
+            "kwargs": {"lr": 0.2},
+        },
+        "lr_scheduler": {
+            "stages": [{
+                "name": "ReduceLROnPlateau",
+                "kwargs": {
+                    "mode": "min",
+                    "patience": 0,
+                    "factor": 0.5,
+                },
+            }],
+            "metric_key": "validation_loss",
+        },
+    })
+    session = _optimizer_test_session(model, max_iterations=2)
+    hook.pre_session(session)
+
+    for metric in (1.0, 2.0):
+        hook.pre_iteration_callback(session)
+        session.iteration_context.update({
+            "loss": model(torch.ones(1, 1)).square().sum(),
+            "validation_loss": metric,
+        })
+        hook.post_iteration_callback(session)
+
+    assert (
+        hook.get_state()["optimizer_state"]["param_groups"][0]["lr"]
+        == 0.1
+    )
+
+
+def test_metric_scheduler_reports_a_missing_iteration_value():
+    model = nn.Linear(1, 1, bias=False)
+    hook = OptimizerHook({
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
+        "lr_scheduler": {
+            "stages": [{"name": "ReduceLROnPlateau"}],
+            "metric_key": "validation_loss",
+        },
+    })
+    session = _optimizer_test_session(model, max_iterations=1)
+    hook.pre_session(session)
+    session.iteration_context["loss"] = (
+        model(torch.ones(1, 1)).square().sum()
+    )
+
+    with pytest.raises(KeyError, match="validation_loss"):
+        hook.post_iteration_callback(session)
+
+
+def test_scheduler_milestones_are_bounded_by_the_session():
+    model = nn.Linear(1, 1, bias=False)
+    hook = OptimizerHook({
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
+        "lr_scheduler": {
+            "stages": [
+                {"name": "LinearLR"},
+                {"name": "CosineAnnealingLR", "kwargs": {"T_max": 1}},
+            ],
+            "milestones": [2],
+        },
+    })
+    session = _optimizer_test_session(model, max_iterations=2)
+
+    with pytest.raises(ValueError, match="less than"):
+        hook.pre_session(session)
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            {"learning_rate": 0.1},
+            "Legacy optimizer fields are no longer supported",
+        ),
+        (
+            {"optimizer": {"name": "NotAnOptimizer"}},
+            "Unknown optimizer class",
+        ),
+        (
+            {
+                "optimizer": {"name": "AdamW"},
+                "lr_scheduler": {
+                    "stages": [
+                        {"name": "LinearLR"},
+                        {"name": "CosineAnnealingLR"},
+                    ],
+                    "milestones": [],
+                },
+            },
+            "exactly one entry between each pair of stages",
+        ),
+        (
+            {
+                "optimizer": {"name": "AdamW"},
+                "lr_scheduler": {
+                    "stages": [
+                        {"name": "LinearLR"},
+                        {"name": "CosineAnnealingLR"},
+                    ],
+                    "milestones": [1],
+                    "metric_key": "loss",
+                },
+            },
+            "supported only for a single scheduler stage",
+        ),
+    ],
+)
+def test_optimizer_configuration_errors_are_actionable(config, message):
+    with pytest.raises((TypeError, ValueError), match=message):
+        OptimizerHook(config)
