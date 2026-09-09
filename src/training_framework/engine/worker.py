@@ -9,7 +9,7 @@ from torch import distributed, multiprocessing
 from training_framework.session import Session, TrainingSession
 
 
-_STOP_SYNC_GRACE_PERIOD = 0.001
+_STOP_SYNC_GRACE_PERIOD = 0.01
 _STOP_SYNC_POLL_INTERVAL = 0.005
 
 
