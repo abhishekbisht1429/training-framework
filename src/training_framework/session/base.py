@@ -48,6 +48,7 @@ from training_framework.util import (
     context_exit,
     import_all_modules,
     requires_context,
+    timestamp_str,
 )
 
 
@@ -84,6 +85,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         )
 
         self._iteration = 0
+        self._extension_config_history_pending = False
 
         torch.manual_seed(self._session_config.rng_seed)
         random.seed(self._session_config.rng_seed)
@@ -167,6 +169,9 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             "components_state": self._components.get_state(),
             "session_context": deepcopy(self._session_context),
             "init_args": self._init_args,
+            "extension_config_history_pending": (
+                self._extension_config_history_pending
+            ),
         }
         state.update(self._get_session_type_state())
         state.update(capture_rng_state())
@@ -190,6 +195,10 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             self._session_config,
         ) = self._configuration_from_state(state)
         self._iteration = state["iteration"]
+        self._extension_config_history_pending = state.get(
+            "extension_config_history_pending",
+            False,
+        )
 
         self._init_transient_infra()
         restored_components = SessionComponents(
@@ -466,6 +475,13 @@ class Session(Stateful, metaclass=CaptureInitMeta):
                 self.session_config.session_dir,
                 self.full_config,
             )
+            if self._extension_config_history_pending:
+                write_session_config(
+                    self.session_config.session_dir,
+                    self.full_config,
+                    filename=f"config_extension_{timestamp_str()}.yaml",
+                )
+                self._extension_config_history_pending = False
 
         self._phase = SessionPhase.READY
         return self

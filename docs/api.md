@@ -36,7 +36,8 @@ samplers.
 | `mode` | `new`, `resume`, or `extend` |
 | `session_configs` | Deep copy of parsed YAML session definitions in the new operation |
 | `checkpoint_path` | Checkpoint path in resume or extend operations |
-| `new_max_iters` | New iteration limit in the extend operation |
+| `extension_overrides` | Session-relative dotlist overrides in the extend operation |
+| `new_max_iters` | Deprecated positional iteration limit, when supplied |
 | `heartbeat_timeout` | Worker heartbeat deadline |
 | `process_timeout_on_join` | Graceful process-join timeout |
 | `debug` | Whether the parent only joins workers without monitoring them |
@@ -53,7 +54,7 @@ selects the concrete session implementation.
 | `TrainingEngine(configurator)` | Create a process manager from CLI configuration |
 | `start_session()` | Start all worker ranks for the active session; requires engine context |
 | `register_session(config, *, session_type="training", session_kwargs=None)` | Construct a registered session type and its worker wrappers |
-| `load_session(path, session_update_params=None)` | Load a checkpoint and prepare worker wrappers |
+| `load_session(path, session_update_params=None)` | Load a checkpoint, optionally apply extension overrides, and prepare worker wrappers |
 | `request_stop_all()` | Request cooperative shutdown of started workers |
 
 Normal usage is:

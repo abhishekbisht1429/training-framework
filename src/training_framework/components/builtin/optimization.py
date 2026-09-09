@@ -4,9 +4,12 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
 
-from torch import nn, optim
+from torch import empty, nn, optim
 
-from training_framework.components import StatefulLifeCycleHook
+from training_framework.components import (
+    ExtendableComponent,
+    StatefulLifeCycleHook,
+)
 from training_framework.components import hook, requires_resource
 
 if TYPE_CHECKING:
@@ -108,7 +111,7 @@ def _resolve_placeholders(
 
 @hook("optimizer", session_type="training")
 @requires_resource("ddp")
-class OptimizerHook(StatefulLifeCycleHook):
+class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
 
     def __init__(self, config):
         self.call_every = 1
@@ -322,6 +325,75 @@ class OptimizerHook(StatefulLifeCycleHook):
                 )
             self._lr_scheduler.load_state_dict(scheduler_state)
         self._restored_state = None
+
+    @override
+    def apply_extension_config(
+            self,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        unsupported = {
+            path for path in changed_paths
+            if len(path) < 3 or path[:2] != ("optimizer", "kwargs")
+        }
+        if unsupported:
+            names = ", ".join(".".join(path) for path in sorted(unsupported))
+            raise ValueError(
+                "Optimizer session extension does not allow changes to: "
+                + names
+            )
+
+        optimizer_spec, scheduler_config = self._normalize_config(config)
+        if optimizer_spec["name"] != self._optimizer_spec["name"]:
+            raise ValueError(
+                "Optimizer class cannot change during session extension"
+            )
+        if scheduler_config != self._scheduler_config:
+            raise ValueError(
+                "Learning-rate scheduler configuration cannot change during "
+                "session extension"
+            )
+        if self._optimizer is not None:
+            raise RuntimeError(
+                "Optimizer configuration cannot change while the session "
+                "is active"
+            )
+
+        optimizer_class = _resolve_class(
+            optim,
+            optimizer_spec["name"],
+            optim.Optimizer,
+            "optimizer",
+        )
+        try:
+            optimizer_class(
+                [nn.Parameter(empty(1))],
+                **deepcopy(optimizer_spec["kwargs"]),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Invalid kwargs for optimizer "
+                f"{optimizer_spec['name']!r}: {error}"
+            ) from error
+
+        changed_keys = {path[2] for path in changed_paths}
+        optimizer_kwargs = optimizer_spec["kwargs"]
+        missing = sorted(changed_keys - optimizer_kwargs.keys())
+        if missing:
+            raise ValueError(
+                "Optimizer kwargs cannot be removed during session extension: "
+                + ", ".join(missing)
+            )
+
+        if self._restored_state is not None:
+            optimizer_state = self._restored_state.get("optimizer_state")
+            if optimizer_state is not None:
+                for group in optimizer_state.get("param_groups", []):
+                    for key in changed_keys:
+                        group[key] = deepcopy(optimizer_kwargs[key])
+
+        self._optimizer_spec = optimizer_spec
+        self._scheduler_config = scheduler_config
 
     @override
     def pre_iteration_callback(self, session: Session) -> None:

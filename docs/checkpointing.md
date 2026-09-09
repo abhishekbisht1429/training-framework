@@ -52,11 +52,23 @@ The engine loads the session in the parent, recovers the saved DDP world size wh
 ### Extend
 
 ```bash
-python -m my_project.train --extend-session <checkpoint-path> <new-max-iterations>
+python -m my_project.train \
+  --extend-session <checkpoint-path> \
+  --override \
+  session_config.max_iterations=5000 \
+  optimizer.optimizer.kwargs.lr=0.0001
 ```
 
-The session is restored as in the resume operation, then each worker receives the new maximum iteration count before training starts.
-Extension is training-specific; the checkpoint must contain a `TrainingSession`.
+The session is restored as in the resume operation, then safe overrides are
+applied before worker state is captured. Extension is training-specific; the
+checkpoint must contain a `TrainingSession`. Components reject changes by
+default and must implement `ExtendableComponent` to opt in. The built-in
+optimizer, logger, and checkpointer allow their documented training/cadence
+settings while model, DDP, and data-manager configuration remains immutable.
+
+The effective configuration replaces `config.yaml` and is also preserved in a
+timestamped `config_extension_*.yaml` file. The legacy positional maximum
+iteration argument remains temporarily available with a deprecation warning.
 
 ### Checkpoint safety
 

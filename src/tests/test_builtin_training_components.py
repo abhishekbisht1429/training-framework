@@ -638,6 +638,47 @@ def test_scheduler_milestones_are_bounded_by_the_session():
         hook.pre_session(session)
 
 
+def test_optimizer_extension_preserves_state_and_replaces_hyperparameters():
+    model = nn.Linear(1, 1, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.2, momentum=0.9)
+    model(torch.ones(1, 1)).sum().backward()
+    optimizer.step()
+    optimizer_state = optimizer.state_dict()
+
+    hook = OptimizerHook({
+        "optimizer": {
+            "name": "SGD",
+            "kwargs": {"lr": 0.2, "momentum": 0.9},
+        },
+    })
+    hook.set_state({
+        "optimizer_state": optimizer_state,
+        "lr_scheduler_state": None,
+    })
+    original_momentum = optimizer_state["state"][0]["momentum_buffer"].clone()
+
+    hook.apply_extension_config(
+        {
+            "optimizer": {
+                "name": "SGD",
+                "kwargs": {"lr": 0.05, "momentum": 0.8},
+            },
+        },
+        frozenset({
+            ("optimizer", "kwargs", "lr"),
+            ("optimizer", "kwargs", "momentum"),
+        }),
+    )
+    extended_state = pickle.loads(pickle.dumps(hook)).get_state()
+
+    assert extended_state["optimizer_state"]["param_groups"][0]["lr"] == 0.05
+    assert extended_state["optimizer_state"]["param_groups"][0]["momentum"] == 0.8
+    torch.testing.assert_close(
+        extended_state["optimizer_state"]["state"][0]["momentum_buffer"],
+        original_momentum,
+    )
+
+
 @pytest.mark.parametrize(
     ("config", "message"),
     [

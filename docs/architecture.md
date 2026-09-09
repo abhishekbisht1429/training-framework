@@ -14,7 +14,7 @@ TrainingEngine
     |
     +-- resolve each --config entry through its registered session_type
     +-- restore a checkpointed Session for --resume-session
-    +-- restore and extend TrainingSession for --extend-session
+    +-- restore TrainingSession and validate opt-in overrides for --extend-session
     |
     +-- capture session state
     |

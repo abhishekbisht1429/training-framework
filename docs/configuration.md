@@ -64,7 +64,8 @@ python -m my_project.train \
   'sessions[0].logger.log_every=25'
 ```
 
-Overrides are applied to `--config` session definitions.
+With `--config`, overrides are applied to the selected `sessions[]`
+definitions.
 
 ### Resume a checkpoint
 
@@ -75,12 +76,31 @@ python -m my_project.train \
 
 ### Extend a checkpoint
 
-To restore a checkpoint and replace its maximum iteration count:
+To restore one training checkpoint and change extension-safe hyperparameters,
+use overrides relative to that session (without a `sessions[0]` prefix):
 
 ```bash
 python -m my_project.train \
-  --extend-session ./runs/session_.../checkpoints/<checkpoint-name> 5000
+  --extend-session ./runs/session_.../checkpoints/<checkpoint-name> \
+  --override \
+  session_config.max_iterations=5000 \
+  optimizer.optimizer.kwargs.lr=0.0001 \
+  logger.log_every=25
 ```
+
+The built-in mutable settings are `session_config.max_iterations`, optimizer
+constructor values under `optimizer.optimizer.kwargs`, `logger.log_every`,
+and `checkpointer.checkpoint_every` / `checkpoint_first`. Optimizer state such
+as momentum buffers and step counters is retained; only explicitly overridden
+parameter-group values are replaced. Optimizer class and scheduler changes are
+rejected, as are model, DDP, data-manager, component-binding, and other session
+changes unless a custom component explicitly opts into extension.
+
+The positional form `--extend-session CHECKPOINT NEW_MAX_ITERATIONS` remains
+available with a deprecation warning.
+
+Rank zero rewrites `config.yaml` with the effective configuration and also
+creates `config_extension_<timestamp>.yaml` in the session directory.
 
 ## Process-monitoring options
 

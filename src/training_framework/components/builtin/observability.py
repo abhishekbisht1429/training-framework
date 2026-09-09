@@ -4,11 +4,14 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from torch.utils.tensorboard import SummaryWriter
 
 from training_framework.components import (
+    ExtendableComponent,
     LifecycleHook,
     Resource,
     hook,
@@ -22,7 +25,7 @@ if TYPE_CHECKING:
 
 
 @hook("logger")
-class Logger(LifecycleHook):
+class Logger(LifecycleHook, ExtendableComponent):
 
     def __init__(self, config: dict):
         self._config = config
@@ -60,6 +63,20 @@ class Logger(LifecycleHook):
 
     def __setstate__(self, state: Any) -> None:
         self.__init__(state["config"])
+
+    def apply_extension_config(
+            self,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        unsupported = changed_paths - {("log_every",)}
+        if unsupported:
+            names = ", ".join(".".join(path) for path in sorted(unsupported))
+            raise ValueError(
+                "Logger session extension does not allow changes to: " + names
+            )
+        self._config = deepcopy(dict(config))
+        self.call_every = self._config["log_every"]
 
 
 @resource("tensorboard")

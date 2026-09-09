@@ -2,6 +2,7 @@
 
 from training_framework.components.base import (
     Component,
+    ExtendableComponent,
     Hook,
     IterationHook,
     LifecycleHook,
@@ -39,6 +40,7 @@ __all__ = [
     "Component",
     "ComponentAliases",
     "ComponentBindings",
+    "ExtendableComponent",
     "Hook",
     "IterationHook",
     "LifecycleHook",

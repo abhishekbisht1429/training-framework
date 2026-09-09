@@ -4,6 +4,7 @@ from typing import Any
 
 from training_framework.components import (
     Component,
+    ExtendableComponent,
     Hook,
     IterationHook,
     Resource,
@@ -100,6 +101,63 @@ class SessionComponents:
             restored_components[name] = component
 
         self.components = restored_components
+
+    def config_for_extension(self, name: str) -> dict[str, Any]:
+        resolved_name = self.resolve_name(name)
+        component = self.components.get(resolved_name)
+        if component is None:
+            raise ValueError(
+                f"Component '{name}' is not active and cannot be extended"
+            )
+        init_args = getattr(component, "_init_args")
+        args = init_args["args"]
+        kwargs = init_args["kwargs"]
+        if args and isinstance(args[0], Mapping):
+            return dict(args[0])
+        if isinstance(kwargs.get("config"), Mapping):
+            return dict(kwargs["config"])
+        raise ValueError(
+            f"Component '{resolved_name}' was not constructed from a "
+            "configuration mapping and cannot be extended"
+        )
+
+    def apply_extension_config(
+            self,
+            name: str,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        resolved_name = self.resolve_name(name)
+        component = self.components.get(resolved_name)
+        if component is None:
+            raise ValueError(
+                f"Component '{name}' is not active and cannot be extended"
+            )
+        if not isinstance(component, ExtendableComponent):
+            raise ValueError(
+                f"Component '{resolved_name}' does not allow configuration "
+                "changes during session extension"
+            )
+
+        effective_config = dict(config)
+        component.apply_extension_config(effective_config, changed_paths)
+
+        init_args = getattr(component, "_init_args")
+        args = list(init_args["args"])
+        kwargs = dict(init_args["kwargs"])
+        if args and isinstance(args[0], Mapping):
+            args[0] = effective_config
+        elif isinstance(kwargs.get("config"), Mapping):
+            kwargs["config"] = effective_config
+        else:
+            raise ValueError(
+                f"Component '{resolved_name}' was not constructed from a "
+                "configuration mapping and cannot be extended"
+            )
+        component._init_args = {
+            "args": tuple(args),
+            "kwargs": kwargs,
+        }
 
     def _merge_components(self, components, expected_type) -> None:
         for name, component in (components or {}).items():

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
 
 import torch
 
-from training_framework.components import LifecycleHook, Stateful
+from training_framework.components import (
+    ExtendableComponent,
+    LifecycleHook,
+    Stateful,
+)
 from training_framework.components import hook
 from training_framework.util import timestamp_str
 
@@ -14,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @hook("checkpointer")
-class Checkpointer(LifecycleHook, Stateful):
+class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
 
     def __init__(self, config: dict):
         self._config = config
@@ -60,6 +66,23 @@ class Checkpointer(LifecycleHook, Stateful):
     @override
     def set_state(self, state: Any) -> None:
         self._config = state["config"]
+        self.call_every = self._config["checkpoint_every"]
+
+    @override
+    def apply_extension_config(
+            self,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        allowed = {("checkpoint_every",), ("checkpoint_first",)}
+        unsupported = changed_paths - allowed
+        if unsupported:
+            names = ", ".join(".".join(path) for path in sorted(unsupported))
+            raise ValueError(
+                "Checkpointer session extension does not allow changes to: "
+                + names
+            )
+        self._config = deepcopy(dict(config))
         self.call_every = self._config["checkpoint_every"]
 
     @classmethod

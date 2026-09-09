@@ -286,3 +286,19 @@ wrapping-target closure when each omitted dependency uses the inherited
 component constructor. Activation follows dependency edges outward: activating
 a wrapped hook alone does not activate hooks that wrap it. For DDP, secondary
 ranks retain the same closure for each root named in `ddp.parallel_components`.
+
+## Session-extension configuration
+
+Component configuration is immutable when extending a checkpoint unless the
+component implements the exported `ExtendableComponent` interface. Its
+`apply_extension_config(config, changed_paths)` method receives the merged
+component mapping and the component-relative leaf paths that changed. The
+method must reject unsafe paths and update any persisted state that duplicates
+configuration. The framework updates the component's captured constructor
+configuration after the method succeeds so later checkpoints reconstruct it
+with the effective values.
+
+The built-in optimizer uses this contract to retain optimizer tensors and step
+counters while changing explicitly overridden parameter-group values. Logger
+and checkpointer use it for safe cadence changes. Model, DDP, data-manager, and
+all custom components that do not opt in remain immutable.

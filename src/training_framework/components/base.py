@@ -46,6 +46,19 @@ class Component(ABC, metaclass=ComponentMeta):
         raise NotImplementedError
 
 
+class ExtendableComponent(ABC):
+    """Opt a component into safe configuration changes during extension."""
+
+    @abstractmethod
+    def apply_extension_config(
+            self,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        """Validate and apply an effective config to a restored component."""
+        raise NotImplementedError
+
+
 class Stateful(ABC):
     _PICKLE_VERSION_KEY = "__training_framework_pickle_version__"
     _PICKLE_VERSION = 1

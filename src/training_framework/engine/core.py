@@ -13,6 +13,7 @@ from training_framework.engine.worker import SessionProcessWrapper
 from training_framework.session import (
     TRAINING_SESSION_TYPE,
     Session,
+    TrainingSession,
     normalize_session_type,
     session_class_for_type,
 )
@@ -32,6 +33,25 @@ class TrainingEngine:
     ):
         session = Checkpointer.load_checkpoint(checkpoint_path)
 
+        if session_update_params is not None:
+            if not isinstance(session, TrainingSession):
+                raise TypeError(
+                    "Session extension updates require a TrainingSession"
+                )
+            if "overrides" in session_update_params:
+                session.apply_extension_overrides(
+                    session_update_params["overrides"]
+                )
+            elif "max_iterations" in session_update_params:
+                session.apply_extension_overrides((
+                    "session_config.max_iterations="
+                    f"{session_update_params['max_iterations']}",
+                ))
+            else:
+                raise ValueError(
+                    "Unsupported session extension update parameters"
+                )
+
         if session.has_resource("ddp"):
             world_size = session.get_resource("ddp").world_size
         else:
@@ -41,7 +61,6 @@ class TrainingEngine:
             SessionProcessWrapper(
                 session=session,
                 rank=rank,
-                session_update_params=session_update_params,
                 heartbeat_timeout=self._configurator.heartbeat_timeout,
             )
             for rank in range(world_size)
@@ -171,11 +190,17 @@ class TrainingEngine:
                     session_kwargs=session_kwargs,
                 )
         elif self._configurator.mode == "extend":
+            if hasattr(self._configurator, "extension_overrides"):
+                update_params = {
+                    "overrides": self._configurator.extension_overrides,
+                }
+            else:
+                update_params = {
+                    "max_iterations": self._configurator.new_max_iters,
+                }
             self.load_session(
                 checkpoint_path=self._configurator.checkpoint_path,
-                session_update_params={
-                    "max_iterations": self._configurator.new_max_iters,
-                },
+                session_update_params=update_params,
             )
         elif self._configurator.mode == "resume":
             self.load_session(self._configurator.checkpoint_path)

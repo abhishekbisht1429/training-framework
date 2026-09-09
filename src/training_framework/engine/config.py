@@ -1,4 +1,5 @@
 import argparse
+import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 
@@ -18,8 +19,12 @@ class Configurator:
         group.add_argument("--config", help="Path to session config file")
         group.add_argument(
             "--extend-session",
-            nargs=2,
-            help="Path to session checkpoint to extend",
+            nargs="+",
+            metavar="VALUE",
+            help=(
+                "Path to session checkpoint to extend, optionally followed "
+                "by the deprecated positional maximum iteration count"
+            ),
         )
         group.add_argument(
             "--resume-session",
@@ -44,6 +49,7 @@ class Configurator:
         self._session_configs = None
         self._checkpoint_path = None
         self._new_max_iters = None
+        self._extension_overrides = None
         self._mode = None
 
         if self._args.config:
@@ -54,8 +60,45 @@ class Configurator:
             self._session_configs = OmegaConf.to_container(config)["sessions"]
         elif self._args.extend_session:
             self._mode = "extend"
-            self._checkpoint_path = self._args.extend_session[0]
-            self._new_max_iters = int(self._args.extend_session[1])
+            values = self._args.extend_session
+            if len(values) > 2:
+                self._parser.error(
+                    "--extend-session accepts CHECKPOINT and an optional "
+                    "deprecated NEW_MAX_ITERATIONS value"
+                )
+            self._checkpoint_path = values[0]
+            overrides = list(self._args.override or [])
+            if len(values) == 2:
+                warnings.warn(
+                    "The positional NEW_MAX_ITERATIONS argument is deprecated; "
+                    "use --override session_config.max_iterations=VALUE",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                try:
+                    self._new_max_iters = int(values[1])
+                except ValueError:
+                    self._parser.error(
+                        "The deprecated positional NEW_MAX_ITERATIONS value "
+                        "must be an integer"
+                    )
+                if any(
+                    item.split("=", 1)[0].strip()
+                    == "session_config.max_iterations"
+                    for item in overrides
+                ):
+                    self._parser.error(
+                        "max_iterations cannot be supplied both positionally "
+                        "and through --override"
+                    )
+                overrides.append(
+                    f"session_config.max_iterations={self._new_max_iters}"
+                )
+            if not overrides:
+                self._parser.error(
+                    "--extend-session requires at least one --override"
+                )
+            self._extension_overrides = tuple(overrides)
         elif self._args.resume_session:
             self._mode = "resume"
             self._checkpoint_path = self._args.resume_session
@@ -116,9 +159,15 @@ class Configurator:
 
     @property
     def new_max_iters(self):
-        if not self._new_max_iters:
+        if self._new_max_iters is None:
             raise KeyError("Cannot use this property in the current operation!")
         return self._new_max_iters
+
+    @property
+    def extension_overrides(self):
+        if self._extension_overrides is None:
+            raise KeyError("Cannot use this property in the current operation!")
+        return tuple(self._extension_overrides)
 
     @property
     def process_timeout_on_join(self):
