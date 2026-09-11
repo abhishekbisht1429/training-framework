@@ -121,7 +121,7 @@ def test_engine_dispatches_mixed_session_types_and_constructor_kwargs(
     captured_sessions = []
 
     class Wrapper:
-        def __init__(self, *, session, rank, heartbeat_timeout):
+        def __init__(self, *, session, rank, heartbeat_timeout, **kwargs):
             self.session = session
             captured_sessions.append(session)
 

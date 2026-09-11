@@ -10,6 +10,10 @@ from training_framework.engine.supervision import (
     process_ready_waitables,
 )
 from training_framework.engine.worker import SessionProcessWrapper
+from training_framework.engine.worker import (
+    _STOP_SYNC_GRACE_PERIOD,
+    _STOP_SYNC_POLL_INTERVAL,
+)
 from training_framework.session import (
     TRAINING_SESSION_TYPE,
     Session,
@@ -24,6 +28,16 @@ class TrainingEngine:
     def __init__(self, configurator: Configurator):
         self._configurator = configurator
         self._timeout_on_interrupt = configurator.process_timeout_on_join
+        self._stop_sync_grace_period = getattr(
+            configurator,
+            "stop_sync_grace_period",
+            _STOP_SYNC_GRACE_PERIOD,
+        )
+        self._stop_sync_poll_interval = getattr(
+            configurator,
+            "stop_sync_poll_interval",
+            _STOP_SYNC_POLL_INTERVAL,
+        )
         self._session_process_wrappers: list[SessionProcessWrapper] = []
 
     def load_session(
@@ -62,6 +76,8 @@ class TrainingEngine:
                 session=session,
                 rank=rank,
                 heartbeat_timeout=self._configurator.heartbeat_timeout,
+                stop_sync_grace_period=self._stop_sync_grace_period,
+                stop_sync_poll_interval=self._stop_sync_poll_interval,
             )
             for rank in range(world_size)
         ]
@@ -110,6 +126,8 @@ class TrainingEngine:
                 ),
                 rank=rank,
                 heartbeat_timeout=self._configurator.heartbeat_timeout,
+                stop_sync_grace_period=self._stop_sync_grace_period,
+                stop_sync_poll_interval=self._stop_sync_poll_interval,
             )
             for rank in range(world_size)
         ]

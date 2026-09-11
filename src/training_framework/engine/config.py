@@ -1,4 +1,5 @@
 import argparse
+import math
 import warnings
 from collections.abc import Mapping
 from copy import deepcopy
@@ -12,6 +13,24 @@ from training_framework.components.config import (
 
 
 class Configurator:
+    @staticmethod
+    def _non_negative_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0:
+            raise argparse.ArgumentTypeError(
+                "must be a finite, non-negative number"
+            )
+        return parsed
+
+    @staticmethod
+    def _positive_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise argparse.ArgumentTypeError(
+                "must be a finite number greater than zero"
+            )
+        return parsed
+
     def __init__(self):
         self._parser = argparse.ArgumentParser()
 
@@ -38,6 +57,23 @@ class Configurator:
             help="Wait for worker processes using joins without monitoring",
         )
         self._parser.add_argument("--heartbeat-timeout", type=float, default=30.0)
+        self._parser.add_argument(
+            "--stop-sync-grace-period",
+            type=self._non_negative_finite_float,
+            default=0.01,
+            help=(
+                "Seconds to poll a DDP stop collective before sleeping"
+            ),
+        )
+        self._parser.add_argument(
+            "--stop-sync-poll-interval",
+            type=self._positive_finite_float,
+            default=0.005,
+            help=(
+                "Seconds to sleep between DDP stop-collective polls after "
+                "the grace period"
+            ),
+        )
         self._parser.add_argument(
             "--process_timeout_on_join",
             type=float,
@@ -180,6 +216,14 @@ class Configurator:
     @property
     def heartbeat_timeout(self):
         return self._args.heartbeat_timeout
+
+    @property
+    def stop_sync_grace_period(self):
+        return self._args.stop_sync_grace_period
+
+    @property
+    def stop_sync_poll_interval(self):
+        return self._args.stop_sync_poll_interval
 
     @property
     def debug(self):

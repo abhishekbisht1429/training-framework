@@ -31,6 +31,8 @@ class _EngineConfig:
     checkpoint_path: str | None = None
     new_max_iters: int | None = None
     heartbeat_timeout: float = 10.0
+    stop_sync_grace_period: float = 0.01
+    stop_sync_poll_interval: float = 0.005
     debug: bool = False
 
 
@@ -153,7 +155,12 @@ def test_ddp_stop_wait_keeps_worker_heartbeat_active(
 
     stop_event = SimpleNamespace(is_set=lambda: True)
 
-    assert worker_module._stop_requested(Session(), stop_event) is True
+    assert worker_module._stop_requested(
+        Session(),
+        stop_event,
+        stop_sync_grace_period=0.001,
+        stop_sync_poll_interval=0.005,
+    ) is True
     assert len(heartbeat_stages) > 1
     assert set(heartbeat_stages) == {"Synchronizing worker stop state"}
     assert stop_sync.waited is True
@@ -253,10 +260,20 @@ def test_debug_mode_starts_and_joins_workers_without_monitoring(
             self.closed = True
 
     class Wrapper:
-        def __init__(self, *, session, rank, heartbeat_timeout):
+        def __init__(
+                self,
+                *,
+                session,
+                rank,
+                heartbeat_timeout,
+                stop_sync_grace_period,
+                stop_sync_poll_interval,
+        ):
             self.started = False
             self.joined = False
             self.process = Process()
+            self.stop_sync_grace_period = stop_sync_grace_period
+            self.stop_sync_poll_interval = stop_sync_poll_interval
             wrappers.append(self)
 
         def start(self):
@@ -280,6 +297,8 @@ def test_debug_mode_starts_and_joins_workers_without_monitoring(
             session_config(tmp_path / "first", max_iterations=1),
             session_config(tmp_path / "second", max_iterations=1),
         ),
+        stop_sync_grace_period=0.02,
+        stop_sync_poll_interval=0.007,
         debug=True,
     )
 
@@ -288,6 +307,11 @@ def test_debug_mode_starts_and_joins_workers_without_monitoring(
 
     assert len(wrappers) == 2
     assert all(wrapper.started and wrapper.joined for wrapper in wrappers)
+    assert all(
+        wrapper.stop_sync_grace_period == 0.02
+        and wrapper.stop_sync_poll_interval == 0.007
+        for wrapper in wrappers
+    )
     assert all(wrapper.process.closed for wrapper in wrappers)
     assert monitor_calls == []
 

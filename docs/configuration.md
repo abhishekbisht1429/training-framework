@@ -108,13 +108,21 @@ creates `config_extension_<timestamp>.yaml` in the session directory.
 python -m my_project.train \
   --config my_project/config.yaml \
   --heartbeat-timeout 60 \
+  --stop-sync-grace-period 0.01 \
+  --stop-sync-poll-interval 0.005 \
   --process_timeout_on_join 30
 ```
 
 | Argument | Default | Meaning |
 |---|---:|---|
 | `--heartbeat-timeout` | `30.0` | Maximum seconds a live worker may go without a heartbeat |
+| `--stop-sync-grace-period` | `0.01` | Seconds to poll a DDP stop collective before sleeping |
+| `--stop-sync-poll-interval` | `0.005` | Sleep duration between later DDP stop-collective polls |
 | `--process_timeout_on_join` | `30.0` | Graceful-shutdown period before surviving workers are terminated |
+
+The stop-sync grace period must be a finite non-negative value. The poll
+interval must be finite and greater than zero. These are process-runtime
+settings and are not written into session configuration or checkpoints.
 
 The three operations, `--config`, `--resume-session`, and
 `--extend-session`, are mutually exclusive and one is required. New-session

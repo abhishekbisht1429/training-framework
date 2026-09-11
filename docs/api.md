@@ -39,6 +39,8 @@ samplers.
 | `extension_overrides` | Session-relative dotlist overrides in the extend operation |
 | `new_max_iters` | Deprecated positional iteration limit, when supplied |
 | `heartbeat_timeout` | Worker heartbeat deadline |
+| `stop_sync_grace_period` | Busy-poll duration before a pending DDP stop collective sleeps |
+| `stop_sync_poll_interval` | Sleep duration between pending DDP stop-collective polls |
 | `process_timeout_on_join` | Graceful process-join timeout |
 | `debug` | Whether the parent only joins workers without monitoring them |
 | `get_component_config(session_index, key)` | Return a deep copy of one component mapping, or `{}` for a listed no-config component |

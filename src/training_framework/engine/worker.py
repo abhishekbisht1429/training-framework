@@ -57,7 +57,13 @@ def load_session_for_worker(
     return session
 
 
-def _stop_requested(session: Session, stop_event) -> bool:
+def _stop_requested(
+        session: Session,
+        stop_event,
+        *,
+        stop_sync_grace_period: float = _STOP_SYNC_GRACE_PERIOD,
+        stop_sync_poll_interval: float = _STOP_SYNC_POLL_INTERVAL,
+) -> bool:
     local_stop_requested = stop_event.is_set()
     if not session.has_resource("ddp"):
         return local_stop_requested
@@ -82,8 +88,8 @@ def _stop_requested(session: Session, stop_event) -> bool:
     poll_started = time.monotonic()
     while not stop_sync.is_completed():
         session.send_heartbeat("Synchronizing worker stop state")
-        if time.monotonic() - poll_started >= _STOP_SYNC_GRACE_PERIOD:
-            time.sleep(_STOP_SYNC_POLL_INTERVAL)
+        if time.monotonic() - poll_started >= stop_sync_grace_period:
+            time.sleep(stop_sync_poll_interval)
     stop_sync.wait()
     return bool(stop_flag.item())
 
@@ -105,9 +111,22 @@ def session_process_worker(
         session.set_dist_manager_err_conn(error_conn)
         heartbeat_timeout = kwargs["heartbeat_timeout"]
         session.set_heartbeat_interval(min(10.0, heartbeat_timeout / 3))
+        stop_sync_grace_period = kwargs.get(
+            "stop_sync_grace_period",
+            _STOP_SYNC_GRACE_PERIOD,
+        )
+        stop_sync_poll_interval = kwargs.get(
+            "stop_sync_poll_interval",
+            _STOP_SYNC_POLL_INTERVAL,
+        )
         with session:
             while True:
-                if _stop_requested(session, stop_event):
+                if _stop_requested(
+                        session,
+                        stop_event,
+                        stop_sync_grace_period=stop_sync_grace_period,
+                        stop_sync_poll_interval=stop_sync_poll_interval,
+                ):
                     break
                 try:
                     next(session)
