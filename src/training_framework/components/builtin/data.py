@@ -6,12 +6,23 @@ from typing import TYPE_CHECKING, Any, override
 import torch
 from torch.utils.data import DataLoader
 
-from training_framework.components import StatefulResource
+from training_framework.components import Resource, StatefulResource
 from training_framework.dataloader import DistributedInfiniteSampler
-from training_framework.components import requires_resource, resource
+from training_framework.components import requires_resource, resource, role
 
 if TYPE_CHECKING:
     from training_framework.session import Session
+
+
+role(
+    "dataset",
+    Resource,
+    description=(
+        "the training dataset; a Resource yielding samples for "
+        "DataManager's DataLoader"
+    ),
+    session_type="training",
+)
 
 
 class _ManagedDataIterator:

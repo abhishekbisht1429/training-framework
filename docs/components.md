@@ -29,6 +29,11 @@ class DatasetResource(Resource):
         self.dataset = None
 ```
 
+`dataset` above is an example of a declared role: the built-in `DataManager`
+requires a `dataset` Resource but the framework ships no implementation for
+it. See [Component bindings](#component-bindings) for how such roles are
+declared and satisfied.
+
 Resources are set up before session hooks and torn down in reverse resource order.
 
 If a resource's own `setup()` raises, the framework calls its
@@ -223,6 +228,37 @@ The former `aliases` key is deprecated but temporarily accepted with the same
 role-to-implementation direction. It cannot be combined with
 `component_bindings`, and configuration still belongs under the implementation
 name.
+
+### Declaring abstract roles
+
+Some component names, like `dataset` and `model`, are required by built-in
+dependencies (`@requires_resource(...)`) with no built-in implementation.
+Declare such a name explicitly with `role(name, category, *, description=None,
+session_type=None, overwrite=False)` from `training_framework.components`:
+
+```python
+from training_framework.components import Resource, role
+
+role(
+    "dataset",
+    Resource,
+    description="the training dataset; a Resource yielding batches",
+    session_type="training",
+)
+```
+
+`category` must be `Resource`, `Hook`, or `Step`.
+`training_framework.components.builtin.data` declares `dataset` this way;
+`training_framework.components.builtin.distributed` declares `model`.
+Declaring a role is optional — `@requires_resource`, `@requires_hook`,
+`@requires_step`, and `@wraps` accept any name whether or not it is
+declared — but a declared role improves the error raised when nothing
+satisfies it, naming the expected category and description and explaining
+how to implement it (`@resource('name', ...)`, etc.) or bind an existing
+implementation (`component_bindings: {name: implementation}`). Redeclaring a
+name without `overwrite=True` raises `ValueError`, matching
+`@resource`/`@hook`/`@step`. `role_registry(session_type=None)` returns the
+roles declared and visible to a session type, mirroring `component_registry()`.
 
 ## Component dependencies
 

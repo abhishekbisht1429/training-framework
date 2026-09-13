@@ -7,11 +7,19 @@ from typing import TYPE_CHECKING, Any, override
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from training_framework.components import Resource, requires_resource, resource
+from training_framework.components import Resource, requires_resource, resource, role
 from training_framework.util import requires_context
 
 if TYPE_CHECKING:
     from training_framework.session import Session
+
+
+role(
+    "model",
+    Resource,
+    description="the model being trained; a Resource exposing an nn.Module",
+    session_type="training",
+)
 
 
 @requires_resource("model")

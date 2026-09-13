@@ -20,7 +20,9 @@ from training_framework.components.registry import (
     ComponentBindings,
     _coalesce_component_bindings,
     _component_type,
+    _missing_role_message,
     component_registry,
+    role_registry,
     topological_sort_of_components,
 )
 from training_framework.session.config import TRAINING_SESSION_TYPE, normalize_session_type
@@ -39,6 +41,7 @@ class SessionComponents:
     ):
         self.session_type = normalize_session_type(session_type)
         self.registry = component_registry(self.session_type)
+        self.roles = role_registry(self.session_type)
         self.components: dict[str, Component] = {}
         self._merge_components(resources, Resource)
         self._merge_components(hooks, Hook)
@@ -215,6 +218,8 @@ class SessionComponents:
             self,
             name: str,
             expected_type: type[Component] | None = None,
+            *,
+            consumer: type[Component] | None = None,
     ) -> tuple[str, type[Component]]:
         resolved_name = self.resolve_name(name)
         component_class = self.registry.get(resolved_name)
@@ -223,6 +228,17 @@ class SessionComponents:
                 raise ValueError(
                     f"No step, hook or resource registered with name "
                     f"'{resolved_name}'!"
+                )
+            declared_role = self.roles.get(resolved_name)
+            if declared_role is not None and declared_role.category is expected_type:
+                raise RuntimeError(
+                    _missing_role_message(
+                        category=expected_type,
+                        name=name,
+                        resolved_name=resolved_name,
+                        declared_role=declared_role,
+                        consumer=consumer,
+                    )
                 )
             raise RuntimeError(
                 f"unmet prerequisite! {expected_type.__name__} '{name}' "
@@ -299,6 +315,7 @@ class SessionComponents:
                     self._registered_component_class(
                         dependency_name,
                         dependency_type,
+                        consumer=component_class,
                     )
                     activate(dependency_name)
 
@@ -342,6 +359,7 @@ class SessionComponents:
                 self._registered_component_class(
                     dependency_name,
                     dependency_type,
+                    consumer=component_class,
                 )
                 visit(dependency_name)
 

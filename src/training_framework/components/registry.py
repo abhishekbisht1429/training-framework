@@ -1,6 +1,7 @@
 import warnings
 from collections import ChainMap
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
 from training_framework.components.base import Component, Hook, Resource, Step
 from training_framework.components.config import reserved_config_names
@@ -11,6 +12,7 @@ from training_framework.components.graph import (
 
 
 _COMPONENT_TYPES = (Resource, Hook, Step)
+_ROLE_DECORATOR_NAMES = {Resource: "resource", Hook: "hook", Step: "step"}
 TRAINING_SESSION_TYPE = "training"
 ANALYSIS_SESSION_TYPE = "analysis"
 _SHARED_COMPONENT_REGISTRY: dict[str, type[Component]] = {}
@@ -20,6 +22,44 @@ _ANALYSIS_COMPONENT_REGISTRY = _SESSION_COMPONENT_REGISTRIES.setdefault(
     ANALYSIS_SESSION_TYPE,
     {},
 )
+
+
+@dataclass(frozen=True)
+class RoleDeclaration:
+    """Describe an abstract component role with no required implementation."""
+
+    name: str
+    category: type[Component]
+    description: str | None = None
+
+
+_SHARED_ROLE_REGISTRY: dict[str, RoleDeclaration] = {}
+_SESSION_ROLE_REGISTRIES: dict[str, dict[str, RoleDeclaration]] = {}
+
+
+def _missing_role_message(
+        *,
+        category: type[Component],
+        name: str,
+        resolved_name: str,
+        declared_role: RoleDeclaration,
+        consumer: type[Component] | None = None,
+) -> str:
+    consumer_clause = (
+        f" by {consumer.__name__}" if consumer is not None else ""
+    )
+    description = (
+        f": {declared_role.description}" if declared_role.description else ""
+    )
+    decorator_name = _ROLE_DECORATOR_NAMES[category]
+    return (
+        f"Role '{resolved_name}' ({category.__name__}{description}) is "
+        f"required{consumer_clause} but has no implementation registered. "
+        f"Implement a {category.__name__} subclass and register it via "
+        f"@{decorator_name}('{resolved_name}', ...), or bind an existing "
+        "implementation via component_bindings: "
+        f"{{'{name}': '<implementation_name>'}}."
+    )
 
 
 def _normalize_component_session_type(session_type: str | None) -> str | None:
@@ -50,6 +90,25 @@ def component_registry(
         return _SHARED_COMPONENT_REGISTRY
     scoped = _SESSION_COMPONENT_REGISTRIES.setdefault(normalized, {})
     return ChainMap(scoped, _SHARED_COMPONENT_REGISTRY)
+
+
+def _registration_role_registry(
+        session_type: str | None,
+) -> dict[str, RoleDeclaration]:
+    normalized = _normalize_component_session_type(session_type)
+    if normalized is None:
+        return _SHARED_ROLE_REGISTRY
+    return _SESSION_ROLE_REGISTRIES.setdefault(normalized, {})
+
+
+def role_registry(
+        session_type: str | None = None,
+) -> Mapping[str, RoleDeclaration]:
+    normalized = _normalize_component_session_type(session_type)
+    if normalized is None:
+        return _SHARED_ROLE_REGISTRY
+    scoped = _SESSION_ROLE_REGISTRIES.setdefault(normalized, {})
+    return ChainMap(scoped, _SHARED_ROLE_REGISTRY)
 
 
 def _component_type(component: Component | type[Component]) -> type[Component]:
@@ -94,6 +153,13 @@ def _component(
             )
 
         registered_type = _component_type(cls)
+        declared_role = _registration_role_registry(session_type).get(name)
+        if declared_role is not None and declared_role.category is not registered_type:
+            raise ValueError(
+                f"Cannot register {registered_type.__name__} '{name}'; "
+                f"'{name}' is declared as a {declared_role.category.__name__} "
+                "role"
+            )
         if name in registry:
             existing_type = _component_type(registry[name])
             if not overwrite:
@@ -158,6 +224,39 @@ def step(
     )
 
 
+def role(
+        name: str,
+        category: type[Component],
+        *,
+        description: str | None = None,
+        session_type: str | None = None,
+        overwrite: bool = False,
+) -> RoleDeclaration:
+    """Declare `name` as an abstract role expecting a `category` implementation.
+
+    Records that some component depends on `name` as a Resource, Hook, or
+    Step without registering a concrete implementation. Application code
+    satisfies the role with @resource/@hook/@step under the same name, or
+    under a different name bound via `component_bindings`. Declaring a role
+    is optional: @requires_resource/@requires_hook/@requires_step accept any
+    name whether or not it has been declared as a role.
+    """
+    if category not in _COMPONENT_TYPES:
+        raise TypeError(
+            "role() category must be Resource, Hook, or Step; got "
+            f"{getattr(category, '__name__', category)!r}"
+        )
+
+    registry = _registration_role_registry(session_type)
+    if name in registry and not overwrite:
+        scope = session_type or "shared"
+        raise ValueError(f"Role '{name}' already declared in '{scope}' scope")
+
+    declaration = RoleDeclaration(name, category, description)
+    registry[name] = declaration
+    return declaration
+
+
 class ComponentBindings:
     """Bind session-scoped component roles to registered implementations."""
 
@@ -177,6 +276,7 @@ class ComponentBindings:
         normalized = _normalize_component_session_type(session_type)
         self._session_type = normalized
         self._registry = component_registry(normalized)
+        self._roles = role_registry(normalized)
         self._bindings = dict(bindings)
         self._validate()
 
@@ -233,6 +333,17 @@ class ComponentBindings:
                 raise ValueError(
                     f"Component binding '{role_name}' -> "
                     f"'{implementation_name}' changes the component category"
+                )
+            declared_role = self._roles.get(role_name)
+            if (
+                    declared_role is not None
+                    and declared_role.category is not implementation_type
+            ):
+                raise ValueError(
+                    f"Component binding '{role_name}' -> "
+                    f"'{implementation_name}' binds {implementation_type.__name__} "
+                    f"'{implementation_name}' to role '{role_name}' declared as "
+                    f"{declared_role.category.__name__}"
                 )
 
             targets[implementation_name] = role_name
@@ -415,10 +526,12 @@ def topological_sort_of_components(
         session_type=normalized,
     )
     registry = component_registry(normalized)
+    roles = role_registry(normalized)
     return topological_sort_components(
         binding_resolver=binding_resolver,
         registry=registry,
         components=components,
+        roles=roles,
     )
 
 

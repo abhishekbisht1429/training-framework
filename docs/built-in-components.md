@@ -20,6 +20,11 @@ which registers all built-ins. Their classes are also importable from
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations; wraps `optimizer` |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
 
+`dataset` and `model` are declared roles (see [Component
+bindings](components.md#component-bindings)) with no built-in
+implementation; register a `Resource` under that name, or bind one via
+`component_bindings`, before activating `data_manager` or `ddp`.
+
 The training defaults are equivalent to:
 
 ```yaml
@@ -107,7 +112,8 @@ See [Session-extension configuration](components.md#session-extension-configurat
 `data_manager.data_iter` is available only while the session is active. It
 divides the global batch size across ranks and checkpoints delivered-batch
 progress. A dataset resource may provide a callable `collate_fn(batch)` method
-to control batching:
+to control batching (this registers the implementation directly under the
+declared `dataset` role's name):
 
 ```python
 from torch.utils.data import Dataset

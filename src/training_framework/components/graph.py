@@ -1,5 +1,6 @@
 from collections import deque
 from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 from training_framework.components.base import (
     Component,
@@ -9,6 +10,35 @@ from training_framework.components.base import (
     SessionHook,
     Step,
 )
+
+if TYPE_CHECKING:
+    from training_framework.components.registry import RoleDeclaration
+
+
+_ROLE_DECORATOR_NAMES = {Resource: "resource", Hook: "hook", Step: "step"}
+
+
+def _missing_role_message(
+        *,
+        category: type[Component],
+        name: str,
+        resolved_name: str,
+        declared_role: "RoleDeclaration",
+        consumer: Component | type[Component],
+) -> str:
+    consumer_class = consumer if isinstance(consumer, type) else type(consumer)
+    description = (
+        f": {declared_role.description}" if declared_role.description else ""
+    )
+    decorator_name = _ROLE_DECORATOR_NAMES[category]
+    return (
+        f"Role '{resolved_name}' ({category.__name__}{description}) is "
+        f"required by {consumer_class.__name__} but has no implementation "
+        f"registered. Implement a {category.__name__} subclass and register "
+        f"it via @{decorator_name}('{resolved_name}', ...), or bind an "
+        "existing implementation via component_bindings: "
+        f"{{'{name}': '<implementation_name>'}}."
+    )
 
 
 def _is_component_type(
@@ -81,7 +111,9 @@ def topological_sort_components(
         binding_resolver,
         registry: Mapping[str, type[Component]],
         components: Iterable[Component | type[Component]] | None,
+        roles: "Mapping[str, RoleDeclaration] | None" = None,
 ) -> dict[str, int]:
+    roles = roles or {}
     session_scoped = components is not None
     selected_components = (
         list(registry.values())
@@ -111,6 +143,24 @@ def topological_sort_components(
                         registered_class is None
                         or not issubclass(registered_class, required_type)
                 ):
+                    declared_role = (
+                        roles.get(resolved_name)
+                        if registered_class is None
+                        else None
+                    )
+                    if (
+                            declared_role is not None
+                            and declared_role.category is required_type
+                    ):
+                        raise RuntimeError(
+                            _missing_role_message(
+                                category=required_type,
+                                name=required_name,
+                                resolved_name=resolved_name,
+                                declared_role=declared_role,
+                                consumer=component,
+                            )
+                        )
                     raise RuntimeError(
                         f"unmet prerequisite! {required_type.__name__} "
                         f"'{required_name}' resolves to '{resolved_name}', which "
@@ -136,6 +186,19 @@ def topological_sort_components(
             resolved_name = binding_resolver.resolve(wrapped_name)
             registered_class = registry.get(resolved_name)
             if registered_class is None or not issubclass(registered_class, Hook):
+                declared_role = (
+                    roles.get(resolved_name) if registered_class is None else None
+                )
+                if declared_role is not None and declared_role.category is Hook:
+                    raise RuntimeError(
+                        _missing_role_message(
+                            category=Hook,
+                            name=wrapped_name,
+                            resolved_name=resolved_name,
+                            declared_role=declared_role,
+                            consumer=wrapper,
+                        )
+                    )
                 raise RuntimeError(
                     f"invalid wraps target! Hook '{wrapped_name}' resolves to "
                     f"'{resolved_name}', which is not registered as a Hook."
