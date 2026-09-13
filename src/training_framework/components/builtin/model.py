@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import os
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, cast
 
 from training_framework.components import Resource, resource
 from training_framework.components.builtin.checkpointing import Checkpointer
@@ -14,10 +16,35 @@ if TYPE_CHECKING:
 class TrainedModel(Resource):
     """Expose the model resource restored from a training-session checkpoint."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: Mapping):
+        super().__init__(config)
+        if not isinstance(config, Mapping):
+            raise TypeError("trained_model config must be a mapping")
+        checkpoint_path = config.get("model_checkpoint_path")
+        if checkpoint_path is None:
+            raise ValueError(
+                "trained_model.model_checkpoint_path is required"
+            )
+        try:
+            normalized_path = os.fspath(cast(Any, checkpoint_path))
+        except TypeError as error:
+            raise TypeError(
+                "trained_model.model_checkpoint_path must be a string or "
+                "path-like object"
+            ) from error
+        if not isinstance(normalized_path, str):
+            raise TypeError(
+                "trained_model.model_checkpoint_path must resolve to a "
+                "string path"
+            )
+        if not os.path.isfile(normalized_path):
+            raise FileNotFoundError(
+                f"Model checkpoint does not exist: {normalized_path}"
+            )
+
         self._source_session = None
         self._model: Any = None
-        self._model_checkpoint_path = config["model_checkpoint_path"]
+        self._model_checkpoint_path = normalized_path
 
     @property
     @requires_context

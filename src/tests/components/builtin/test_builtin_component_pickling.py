@@ -242,6 +242,24 @@ def test_pickled_trained_model_loads_an_evaluation_model(tmp_path):
         _ = restored.model
 
 
+def test_trained_model_validates_its_checkpoint_config(tmp_path):
+    checkpoint_path = tmp_path / "training-session.pt"
+    checkpoint_path.touch()
+
+    TrainedModel({"model_checkpoint_path": checkpoint_path})
+
+    with pytest.raises(TypeError, match="config must be a mapping"):
+        TrainedModel(None)
+    with pytest.raises(ValueError, match="model_checkpoint_path is required"):
+        TrainedModel({})
+    with pytest.raises(TypeError, match="string or path-like"):
+        TrainedModel({"model_checkpoint_path": object()})
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        TrainedModel({
+            "model_checkpoint_path": tmp_path / "missing.pt",
+        })
+
+
 def test_pickled_config_dumper_writes_the_session_configuration(tmp_path):
     restored = pickle.loads(pickle.dumps(ConfigDumper()))
     session = SimpleNamespace(

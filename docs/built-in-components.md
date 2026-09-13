@@ -163,8 +163,17 @@ present and terminates the partially started process.
 | `trained_model` | Resource | Loads the `model` role from the source training checkpoint; enabled by default |
 | `logger` | Hook | Prints `Analysis iteration <current>/<maximum>`; enabled by default |
 
-These names live in the analysis registry and therefore do not conflict with
-training components that use the same names.
+The analysis logger lives in the analysis registry. `trained_model` is shared
+and can be activated by any session type. Analysis sessions activate it by
+default, so an unbound analysis session must provide:
+
+```yaml
+trained_model:
+  model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
+```
+
+The path must reference an existing, trusted framework `TrainingSession`
+checkpoint whose `model` resource provides `to(device)` and `eval()`.
 
 ## Infinite samplers
 

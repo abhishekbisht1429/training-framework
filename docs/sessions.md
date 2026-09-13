@@ -100,14 +100,14 @@ class ReportStep(Step):
         ...
 ```
 
-An analysis configuration uses the same `sessions` structure. The built-in
-`trained_model` resource and analysis logger are default roots, so only
-application analysis components need to be selected explicitly:
+An analysis configuration uses the same `sessions` structure. The shared
+`trained_model` resource and analysis logger are default roots. Because the
+trained-model resource has no default checkpoint, configure its checkpoint
+path in the component mapping:
 
 ```yaml
 sessions:
   - session_type: analysis
-    model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
 
     session_config:
       rng_seed: 42
@@ -116,6 +116,9 @@ sessions:
       components_package: my_project.analysis_components
       device: cpu
       show_execution_graph: true
+
+    trained_model:
+      model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
 
     report:
       output_path: ./analysis-runs/report.json
@@ -127,9 +130,6 @@ For direct execution, construct the concrete analysis subclass:
 from training_framework.session import AnalysisSession
 
 
-analysis_config["model_checkpoint_path"] = (
-    "./runs/session_.../checkpoints/<checkpoint-name>"
-)
 session = AnalysisSession(analysis_config)
 ```
 
@@ -139,10 +139,10 @@ Run the analysis entry through the same generic config path:
 python -m my_project.train --config my_project/analysis.yaml
 ```
 
-The checkpoint must contain a framework `TrainingSession`, not a standalone
-model state dictionary. The source session must expose a model through the
-`model` resource role, directly or through a component binding, and that
-resource must
+The configured `trained_model.model_checkpoint_path` must identify a framework
+`TrainingSession` checkpoint, not a standalone model state dictionary. The
+source session must expose a model through the `model` resource role, directly
+or through a component binding, and that resource must
 provide `to(device)` and `eval()`. During analysis setup, `trained_model` loads
 the source session on CPU, moves the recovered model to the analysis device,
 places it in evaluation mode, and exposes it through

@@ -10,3 +10,7 @@
 
 ## Making Local changes
 - Unless explicitly told not to do so, you can make changes in the current checkout branch. You don't have to create some background worktree for that.
+- Never commit changes by yourself. Always ask permission to do so.
+
+## Running commands
+- Unless requires run all commands in silent mode without any verbose, wherever possible.

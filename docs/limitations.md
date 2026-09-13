@@ -27,3 +27,5 @@
 11. **An unavailable CUDA device currently falls back to CPU.** Validate the final `session.device` in application code when silent fallback is undesirable.
 
 12. **TensorBoard is an external process.** Starting it requires an available executable and port, and including it in DDP parallel components would start one server per retained rank.
+
+13. **Legacy analysis checkpoint-path ownership is unsupported.** Analysis configurations must place the source checkpoint at `trained_model.model_checkpoint_path`. The removed top-level `model_checkpoint_path` entry and `AnalysisSession.model_checkpoint_path` property are not compatibility aliases. Analysis-session checkpoints that rely only on the removed session-level state must be recreated or explicitly migrated before loading.

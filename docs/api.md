@@ -74,9 +74,8 @@ The engine monitors workers while leaving the context.
 |---|---|
 | `Session` | Abstract base implementing the shared component and iteration lifecycle |
 | `TrainingSession(config)` | Concrete training session with logger/checkpointer defaults and extension support |
-| `AnalysisSession(config)` | Concrete analysis session with trained-model/logger defaults |
+| `AnalysisSession(config)` | Concrete analysis session with trained-model/logger defaults; configure the checkpoint under `trained_model.model_checkpoint_path` |
 | `session_type` | Registered string identifying the concrete session workflow |
-| `AnalysisSession.model_checkpoint_path` | Source training checkpoint used by analysis |
 | `session_config` | Frozen `SessionConfig` containing seed, directory, and max iterations |
 | `iteration` | Current completed/in-progress iteration counter |
 | `device` | Active `torch.device` |
