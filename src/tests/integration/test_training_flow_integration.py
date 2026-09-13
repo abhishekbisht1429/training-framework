@@ -19,8 +19,8 @@ from training_framework.engine import Configurator
 from training_framework.engine import SessionProcessWrapper, TrainingEngine
 
 
-_COMPONENTS_PACKAGE = "tests.integration_training_components"
-_INTEGRATION_RUNNER = "tests.integration_training_runner"
+_COMPONENTS_PACKAGE = "tests.integration.integration_training_components"
+_INTEGRATION_RUNNER = "tests.integration.integration_training_runner"
 
 
 pytestmark = pytest.mark.skipif(
@@ -191,7 +191,7 @@ def _run_sigint_training_flow(tmp_path, *, process_group: bool) -> None:
         "10",
     ]
     environment = os.environ.copy()
-    source_root = str(Path(__file__).parents[1])
+    source_root = str(Path(__file__).parents[2])
     inherited_pythonpath = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = os.pathsep.join(
         path

@@ -12,7 +12,7 @@ import torch
 from training_framework.session import TrainingSession
 
 
-_COMPONENTS_PACKAGE = "tests.integration_training_components"
+_COMPONENTS_PACKAGE = "tests.integration.integration_training_components"
 
 
 def _register_integration_components() -> None:
