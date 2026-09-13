@@ -93,6 +93,17 @@ The former `learning_rate`, `weight_decay`, and `warmup_iters` optimizer fields
 are no longer accepted. Move optimizer arguments under `optimizer.kwargs` and
 describe the warmup/main schedule explicitly as shown above.
 
+`--extend-session` overrides may change `optimizer.optimizer.kwargs` values
+(the optimizer class itself cannot change) and may replace `lr_scheduler`
+entirely. Overriding `optimizer.optimizer.kwargs.lr` while leaving
+`lr_scheduler` unchanged scales the active stage's base learning rate(s) by
+the same ratio as the override, keeping its schedule progress; a multi-stage
+schedule's not-yet-reached stage is unaffected and runs its own originally
+configured base once it activates. Changing `lr_scheduler` itself
+(scheduler class, stages, milestones, or `metric_key`) restarts its schedule
+from the extension point; optimizer tensors and step counts are unaffected.
+See [Session-extension configuration](components.md#session-extension-configuration).
+
 `data_manager.data_iter` is available only while the session is active. It
 divides the global batch size across ranks and checkpoints delivered-batch
 progress. A dataset resource may provide a callable `collate_fn(batch)` method

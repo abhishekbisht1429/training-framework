@@ -299,6 +299,18 @@ configuration after the method succeeds so later checkpoints reconstruct it
 with the effective values.
 
 The built-in optimizer uses this contract to retain optimizer tensors and step
-counters while changing explicitly overridden parameter-group values. Logger
-and checkpointer use it for safe cadence changes. Model, DDP, data-manager, and
-all custom components that do not opt in remain immutable.
+counters while changing explicitly overridden parameter-group values, and to
+allow the `lr_scheduler` configuration to change entirely (a different
+scheduler class, stages, milestones, or `metric_key`). A changed `lr_scheduler`
+restarts its schedule from the extension point (`last_epoch` and any per-stage
+progress reset) since old scheduler state cannot be assumed compatible with a
+different schedule shape; optimizer tensors and step counters are unaffected.
+Changing `optimizer.optimizer.kwargs.lr` while `lr_scheduler` is left unchanged
+instead scales the currently active stage's stored base learning rate(s) by
+the same ratio as the override, preserving its schedule progress and whatever
+multiplier it is currently applying (mid-warmup, a decay factor, ...). A
+multi-stage schedule's not-yet-reached stage is left untouched by this and
+runs its own originally configured base once it activates, since it has no
+"current lr" of its own to preserve. Logger and checkpointer use the contract
+for safe cadence changes. Model, DDP, data-manager, and all custom components
+that do not opt in remain immutable.

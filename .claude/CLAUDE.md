@@ -7,3 +7,6 @@
 
 ## HANDOFF.md
  - Use .context/HANDOFF.md to save some context for unfinished tasks. Keep this file as concise as possible.
+
+## Making Local changes
+- Unless explicitly told not to do so, you can make changes in the current checkout branch. You don't have to create some background worktree for that.

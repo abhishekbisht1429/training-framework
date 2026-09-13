@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
@@ -31,6 +32,52 @@ _RUNTIME_PLACEHOLDERS = frozenset({
 
 def _unknown_keys(config: Mapping, allowed: frozenset[str]) -> list[str]:
     return sorted(str(key) for key in set(config) - allowed)
+
+
+def _supports_extension_path(path: tuple[str, ...]) -> bool:
+    if path[:2] == ("optimizer", "kwargs") and len(path) >= 3:
+        return True
+    return bool(path) and path[0] == "lr_scheduler"
+
+
+def _rebase_scheduler_lrs(state: Mapping, new_lr: float) -> None:
+    """Rescale a serialized scheduler state so its current lr becomes
+    ``new_lr``, preserving the schedule's relative progress.
+
+    Used when an extension changes the optimizer's ``lr`` while the
+    lr_scheduler configuration is unchanged. Overwriting ``base_lrs`` with
+    ``new_lr`` directly would ignore whatever multiplier the schedule is
+    currently applying (mid-warmup, a decay factor other than 1, ...), so
+    each base lr is instead scaled by the ratio between ``new_lr`` and the
+    lr the schedule last computed (``_last_lr``). ``_last_lr`` itself is set
+    to ``new_lr`` so the override is visible immediately.
+
+    For a SequentialLR, only the currently active stage (per ``_milestones``
+    and ``last_epoch``) is rebased this way. A stage that has not started
+    yet carries no meaningful "current lr" of its own to preserve — its
+    ``_last_lr`` is a leftover from when every stage was independently
+    constructed, not a value it ever actually ran at — so it is left alone
+    and uses its own originally configured base once it activates.
+
+    A no-op for scheduler kinds with no ``base_lrs`` (e.g.
+    ReduceLROnPlateau, which reads the optimizer's current lr directly).
+    """
+    schedulers = state.get("_schedulers")
+    if schedulers:
+        milestones = state.get("_milestones", [])
+        last_epoch = state.get("last_epoch", 0)
+        active_index = bisect_right(milestones, last_epoch)
+        _rebase_scheduler_lrs(schedulers[active_index], new_lr)
+        return
+    if "base_lrs" not in state:
+        return
+    base_lrs = state["base_lrs"]
+    last_lr = state.get("_last_lr", base_lrs)
+    state["base_lrs"] = [
+        base * (new_lr / current) if current else new_lr
+        for base, current in zip(base_lrs, last_lr)
+    ]
+    state["_last_lr"] = [new_lr] * len(last_lr)
 
 
 def _require_mapping(value: Any, path: str) -> Mapping:
@@ -305,17 +352,46 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 f"Invalid kwargs for optimizer "
                 f"{self._optimizer_spec['name']!r}: {error}"
             ) from error
-        self._lr_scheduler = self._prepare_scheduler(
-            self._optimizer, session.session_config.max_iterations
-        )
-        self._restore_state()
+        scheduler_state = None
+        if self._restored_state is not None:
+            scheduler_state = self._restored_state.get("lr_scheduler_state")
 
-    def _restore_state(self):
+        if scheduler_state is None:
+            # No prior scheduler state will be layered on afterward (first
+            # run, or an extension replaced the scheduler): restore the
+            # optimizer's lr first, so a freshly constructed scheduler's
+            # own initial-step application (e.g. a LinearLR/ConstantLR
+            # warmup factor) uses the correct base — nothing will
+            # overwrite it afterward.
+            self._restore_optimizer_state()
+            self._lr_scheduler = self._prepare_scheduler(
+                self._optimizer, session.session_config.max_iterations
+            )
+            self._restore_scheduler_state()
+        else:
+            # An existing scheduler state is restored afterward via
+            # load_state_dict, which only syncs the scheduler's own
+            # counters (base_lrs, last_epoch, ...) and never touches
+            # optimizer.param_groups. So the optimizer_state restore must
+            # run last: it's what puts the correct current lr back after
+            # the fresh scheduler's construction-time initial step
+            # overwrote it with its own (stale, epoch-0) value.
+            self._lr_scheduler = self._prepare_scheduler(
+                self._optimizer, session.session_config.max_iterations
+            )
+            self._restore_optimizer_state()
+            self._restore_scheduler_state()
+
+    def _restore_optimizer_state(self):
         if self._restored_state is None:
             return
         optimizer_state = self._restored_state.get("optimizer_state")
         if optimizer_state is not None:
             self._optimizer.load_state_dict(optimizer_state)
+
+    def _restore_scheduler_state(self):
+        if self._restored_state is None:
+            return
         scheduler_state = self._restored_state.get("lr_scheduler_state")
         if scheduler_state is not None:
             if self._lr_scheduler is None:
@@ -333,8 +409,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             changed_paths: frozenset[tuple[str, ...]],
     ) -> None:
         unsupported = {
-            path for path in changed_paths
-            if len(path) < 3 or path[:2] != ("optimizer", "kwargs")
+            path for path in changed_paths if not _supports_extension_path(path)
         }
         if unsupported:
             names = ", ".join(".".join(path) for path in sorted(unsupported))
@@ -347,11 +422,6 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
         if optimizer_spec["name"] != self._optimizer_spec["name"]:
             raise ValueError(
                 "Optimizer class cannot change during session extension"
-            )
-        if scheduler_config != self._scheduler_config:
-            raise ValueError(
-                "Learning-rate scheduler configuration cannot change during "
-                "session extension"
             )
         if self._optimizer is not None:
             raise RuntimeError(
@@ -366,7 +436,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             "optimizer",
         )
         try:
-            optimizer_class(
+            validation_optimizer = optimizer_class(
                 [nn.Parameter(empty(1))],
                 **deepcopy(optimizer_spec["kwargs"]),
             )
@@ -375,22 +445,66 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 f"Invalid kwargs for optimizer "
                 f"{optimizer_spec['name']!r}: {error}"
             ) from error
+        # The effective base lr for a clean scheduler restart below: reads
+        # back whatever the optimizer actually resolved to, whether that
+        # came from an explicit `lr` kwarg or the optimizer class's own
+        # PyTorch default (e.g. AdamW's 0.001 when `lr` is omitted).
+        effective_lr = validation_optimizer.param_groups[0].get("lr")
 
-        changed_keys = {path[2] for path in changed_paths}
+        changed_kwarg_keys = {
+            path[2] for path in changed_paths
+            if path[:2] == ("optimizer", "kwargs")
+        }
         optimizer_kwargs = optimizer_spec["kwargs"]
-        missing = sorted(changed_keys - optimizer_kwargs.keys())
+        missing = sorted(changed_kwarg_keys - optimizer_kwargs.keys())
         if missing:
             raise ValueError(
                 "Optimizer kwargs cannot be removed during session extension: "
                 + ", ".join(missing)
             )
 
+        scheduler_changed = scheduler_config != self._scheduler_config
+
         if self._restored_state is not None:
             optimizer_state = self._restored_state.get("optimizer_state")
             if optimizer_state is not None:
                 for group in optimizer_state.get("param_groups", []):
-                    for key in changed_keys:
+                    for key in changed_kwarg_keys:
                         group[key] = deepcopy(optimizer_kwargs[key])
+
+            if scheduler_changed:
+                # New schedule shape/class: old scheduler state is not
+                # guaranteed compatible, so restart schedule progress from
+                # the extension point.
+                self._restored_state["lr_scheduler_state"] = None
+                if (
+                        scheduler_config is not None
+                        and optimizer_state is not None
+                        and effective_lr is not None
+                ):
+                    # A replacement (or newly added) scheduler must start
+                    # its own clean schedule from the effective base lr,
+                    # not wherever the old scheduler's progress (e.g. a
+                    # cosine decay's midpoint) left the optimizer. This
+                    # matters even when `lr` itself wasn't part of this
+                    # extension -- including when it was never configured
+                    # at all and the optimizer is using its own PyTorch
+                    # default: leaving group['lr'] at the old scheduler's
+                    # current value would corrupt LinearLR/ConstantLR-style
+                    # schedulers, which scale *current* group['lr'] (not
+                    # base_lrs/initial_lr) at construction time. Also sync
+                    # `initial_lr`, the analogous stale value schedulers
+                    # that key off base_lrs (e.g. CosineAnnealingWarmRestarts)
+                    # would otherwise fall back to via LRScheduler.__init__'s
+                    # setdefault.
+                    for group in optimizer_state.get("param_groups", []):
+                        group["lr"] = deepcopy(effective_lr)
+                        if "initial_lr" in group:
+                            group["initial_lr"] = deepcopy(effective_lr)
+            elif "lr" in changed_kwarg_keys:
+                scheduler_state = self._restored_state.get("lr_scheduler_state")
+                if scheduler_state is not None:
+                    _rebase_scheduler_lrs(scheduler_state, optimizer_kwargs["lr"])
 
         self._optimizer_spec = optimizer_spec
         self._scheduler_config = scheduler_config
@@ -439,7 +553,11 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
     def set_state(self, state: Any) -> None:
         self._restored_state = deepcopy(state)
         if self._optimizer is not None:
-            self._restore_state()
+            # The optimizer and scheduler already exist here (no fresh
+            # scheduler construction involved), so restore order doesn't
+            # matter the way it does in pre_session.
+            self._restore_optimizer_state()
+            self._restore_scheduler_state()
 
     @override
     def get_state(self) -> Any:
