@@ -153,7 +153,7 @@ def _component(
             )
 
         registered_type = _component_type(cls)
-        declared_role = _registration_role_registry(session_type).get(name)
+        declared_role = role_registry(session_type).get(name)
         if declared_role is not None and declared_role.category is not registered_type:
             raise ValueError(
                 f"Cannot register {registered_type.__name__} '{name}'; "
@@ -251,6 +251,15 @@ def role(
     if name in registry and not overwrite:
         scope = session_type or "shared"
         raise ValueError(f"Role '{name}' already declared in '{scope}' scope")
+
+    registered_class = component_registry(session_type).get(name)
+    if registered_class is not None:
+        registered_type = _component_type(registered_class)
+        if registered_type is not category:
+            raise ValueError(
+                f"Cannot declare role '{name}' as {category.__name__}; "
+                f"'{name}' is already registered as a {registered_type.__name__}"
+            )
 
     declaration = RoleDeclaration(name, category, description)
     registry[name] = declaration

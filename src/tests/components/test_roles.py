@@ -83,6 +83,22 @@ def test_role_overwrite_replaces_declaration():
     assert updated.description == "new"
 
 
+def test_role_rejects_category_mismatch_against_registered_component():
+    resource("already_registered")(make_resource_class("AlreadyRegistered"))
+
+    with pytest.raises(ValueError, match="already registered as a Resource"):
+        role("already_registered", Step)
+
+
+def test_component_registration_checks_role_registry_across_scopes():
+    role("shared_declared_role", Resource)
+
+    with pytest.raises(ValueError, match="declared as a Resource role"):
+        hook("shared_declared_role", session_type="training")(
+            make_hook_class("CrossScopeHook")
+        )
+
+
 def test_role_registry_is_session_scoped_like_component_registry():
     role("scoped_role", Resource, session_type="training")
 
