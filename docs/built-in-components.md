@@ -162,6 +162,7 @@ present and terminates the partially started process.
 |---|---|---|
 | `trained_model` | Resource | Loads the `model` role from the source training checkpoint; enabled by default |
 | `logger` | Hook | Prints `Analysis iteration <current>/<maximum>`; enabled by default |
+| `layer_inspector` | Resource | Captures forward-pass input/output of selected `trained_model` layers via forward hooks; requires `trained_model`; not enabled by default |
 
 The analysis logger lives in the analysis registry. `trained_model` is shared
 and can be activated by any session type. Analysis sessions activate it by
@@ -174,6 +175,60 @@ trained_model:
 
 The path must reference an existing, trusted framework `TrainingSession`
 checkpoint whose `model` resource provides `to(device)` and `eval()`.
+
+### `layer_inspector`
+
+`layer_inspector` automates the boilerplate of analyzing individual layers of
+`trained_model.model` — finding the right layers and managing forward-hook
+registration/removal — so an analysis `Step` can focus on interpreting
+whatever the layer produced (an attention heatmap is one example; the
+component itself renders nothing). It lives in the analysis registry and
+requires `trained_model`; it is not activated by default, so it needs an
+explicit top-level entry:
+
+```yaml
+layer_inspector:
+  name_patterns:            # optional list[str], regex via re.search against
+    - "encoder\\.layer\\.\\d+\\.attention$"    # the name from model.named_modules()
+  module_types:              # optional list[str], dotted paths resolved to classes
+    - torch.nn.MultiheadAttention
+  always_call: false          # optional, default false; forwarded to register_forward_hook
+```
+
+At least one of `name_patterns` or `module_types` is required. Layers are
+selected as the union of both: any module whose `model.named_modules()` name
+matches one of `name_patterns`, or whose type matches one of `module_types`
+(each entry a fully-qualified dotted path, since YAML cannot hold a Python
+class). A module matched by both registers exactly one hook. If nothing
+matches, `setup()` raises `ValueError` rather than silently doing nothing.
+
+A `Step` reads captures through the resource:
+
+```python
+inspector = session.get_resource("layer_inspector")
+model = session.get_resource("trained_model").model
+
+model(some_input)  # triggers the registered forward hooks
+
+for layer_name, captures in inspector.captures.items():
+    for capture in captures:
+        ...  # capture.input_args, capture.input_kwargs, capture.output
+```
+
+`inspector.matched_layer_names` is the full, static set of layers selected
+during `setup()`. `inspector.captures` is sparse — keyed only by layers that
+actually ran a forward pass — and accumulates every forward pass within the
+current iteration, in call order; it is cleared automatically at each
+iteration boundary (backed by `session.iteration_context`), so an iteration
+that never triggers a forward pass sees an empty mapping rather than stale
+data from a previous one.
+
+Captured `input_args`/`input_kwargs`/`output` are live tensor references, not
+detached copies — gradients remain enabled by default in analysis sessions,
+so a captured tensor still carries its autograd graph if the triggering
+forward pass wasn't run under `torch.no_grad()`. This is deliberate: a
+gradient/attribution-style analysis needs the live graph. A Step that doesn't
+need it should run its forward pass under `torch.no_grad()` itself.
 
 ## Infinite samplers
 

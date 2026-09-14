@@ -150,6 +150,13 @@ places it in evaluation mode, and exposes it through
 attribution-style analyses. Analysis does not activate the training
 checkpointer by default.
 
+`layer_inspector` is an available opt-in building block for analysis `Step`s
+that need per-layer activations — it automates layer discovery and
+forward-hook lifecycle management, leaving interpretation of the captured
+tensors (heatmaps or anything else) to the `Step`. See [`layer_inspector` in
+Built-in components](built-in-components.md#layer_inspector) for its
+configuration and API.
+
 Only load trusted checkpoints because session loading uses unrestricted Python
 deserialization.
 

@@ -12,6 +12,7 @@ from training_framework.components import StatefulResource, resource
 from training_framework.components.builtin import (
     AnalysisLogger,
     Checkpointer,
+    LayerInspector,
     Logger,
     Tensorboard,
     TrainedModel,
@@ -43,6 +44,14 @@ class _PickleRoundTripModel(nn.Module, StatefulResource):
     def set_state(self, state):
         with torch.no_grad():
             self.weight.copy_(state["weight"])
+
+
+class _StubAnalysisSession(SimpleNamespace):
+    """Enough of Session for LayerInspector's own lifecycle to run against."""
+
+    def get_resource(self, name):
+        assert name == "trained_model"
+        return self.trained_model
 
 
 def _session_config(tmp_path):
@@ -240,6 +249,42 @@ def test_pickled_trained_model_loads_an_evaluation_model(tmp_path):
     restored.teardown(analysis_session)
     with pytest.raises(RuntimeError, match="not initialized yet"):
         _ = restored.model
+
+
+def test_pickled_layer_inspector_captures_matched_layer_forward_pass(tmp_path):
+    resource("pickle_round_trip_model")(_PickleRoundTripModel)
+    source = TrainingSession({
+        "session_config": _session_config(tmp_path / "source"),
+        "component_bindings": {"model": "pickle_round_trip_model"},
+        "pickle_round_trip_model": {"initial_weight": 2.0},
+    })
+    checkpoint_path = tmp_path / "training-session.pt"
+    torch.save(source, checkpoint_path)
+
+    trained_model = TrainedModel({
+        "model_checkpoint_path": str(checkpoint_path),
+    })
+    trained_model.setup(SimpleNamespace(device=torch.device("cpu")))
+
+    restored = pickle.loads(pickle.dumps(LayerInspector({
+        "name_patterns": [r"^$"],  # the root module itself
+    })))
+    inspection_session = _StubAnalysisSession(
+        trained_model=trained_model,
+        iteration_context={},
+    )
+
+    restored.setup(inspection_session)
+    assert restored.matched_layer_names == ("",)
+
+    trained_model.model(torch.tensor(3.0))
+    capture = restored.captures[""][0]
+    torch.testing.assert_close(capture.output, torch.tensor(6.0))
+
+    restored.teardown(inspection_session)
+    assert restored.matched_layer_names == ()
+
+    trained_model.teardown(SimpleNamespace())
 
 
 def test_trained_model_validates_its_checkpoint_config(tmp_path):

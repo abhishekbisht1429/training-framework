@@ -4,6 +4,10 @@ from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.components.builtin.analysis import AnalysisLogger
 from training_framework.components.builtin.data import DataManager
 from training_framework.components.builtin.distributed import DDPResource
+from training_framework.components.builtin.layer_inspection import (
+    LayerCapture,
+    LayerInspector,
+)
 from training_framework.components.builtin.model import TrainedModel
 from training_framework.components.builtin.observability import (
     Logger,
@@ -17,6 +21,8 @@ __all__ = [
     "Checkpointer",
     "DataManager",
     "DDPResource",
+    "LayerCapture",
+    "LayerInspector",
     "Logger",
     "OptimizerHook",
     "Tensorboard",
