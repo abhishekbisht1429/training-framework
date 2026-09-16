@@ -538,6 +538,13 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             else:
                 self._lr_scheduler.step(metric)
 
+    @property
+    def current_lrs(self) -> list[float] | None:
+        """Current learning rate of each param group; None when inactive."""
+        if self._optimizer is None:
+            return None
+        return [group["lr"] for group in self._optimizer.param_groups]
+
     @override
     def post_session(self, session: Session):
         self._restored_state = self.get_state()

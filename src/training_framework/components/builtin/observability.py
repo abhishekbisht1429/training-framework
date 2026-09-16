@@ -50,10 +50,27 @@ class Logger(LifecycleHook, ExtendableComponent):
         print(*args, **kwargs, file=self._log_file)
 
     def pre_iteration_callback(self, session: Session) -> None:
-        self.print(
+        line = (
             f"Iteration {session.iteration}/"
             f"{session.session_config.max_iterations}"
         )
+        lrs = self._current_lrs(session)
+        if lrs is not None:
+            line += " | lr: " + ", ".join(f"{lr:.3e}" for lr in lrs)
+        self.print(line)
+
+    @staticmethod
+    def _current_lrs(session: Session) -> list[float] | None:
+        # Duck-typed so any hook exposing `current_lrs` (e.g. OptimizerHook,
+        # whatever name it is bound under) is picked up.
+        get_all_hooks = getattr(session, "get_all_hooks", None)
+        if get_all_hooks is None:
+            return None
+        for session_hook in get_all_hooks():
+            lrs = getattr(session_hook, "current_lrs", None)
+            if lrs is not None:
+                return lrs
+        return None
 
     def post_iteration_callback(self, session: Session) -> None:
         pass

@@ -118,6 +118,29 @@ def test_pickled_logger_writes_progress(
     assert log_path.read_text() == expected_line
 
 
+def test_logger_appends_current_lr_when_optimizer_active(tmp_path):
+    log_path = tmp_path / "Logger.log"
+    logger = Logger({"log_every": 1, "log_file": str(log_path)})
+    hooks = [
+        SimpleNamespace(),
+        SimpleNamespace(current_lrs=None),
+        SimpleNamespace(current_lrs=[1e-3, 5e-4]),
+    ]
+    session = SimpleNamespace(
+        iteration=2,
+        session_config=SimpleNamespace(max_iterations=5),
+        get_all_hooks=lambda: hooks,
+    )
+
+    logger.pre_session(session)
+    logger.pre_iteration_callback(session)
+    logger.post_session(session)
+
+    assert log_path.read_text() == (
+        "Iteration 2/5 | lr: 1.000e-03, 5.000e-04\n"
+    )
+
+
 def test_pickled_tensorboard_can_start_and_release_runtime_handles(
         tmp_path,
         monkeypatch,

@@ -92,9 +92,27 @@ The built-in mutable settings are `session_config.max_iterations`, optimizer
 constructor values under `optimizer.optimizer.kwargs`, `logger.log_every`,
 and `checkpointer.checkpoint_every` / `checkpoint_first`. Optimizer state such
 as momentum buffers and step counters is retained; only explicitly overridden
-parameter-group values are replaced. Optimizer class and scheduler changes are
-rejected, as are model, DDP, data-manager, component-binding, and other session
-changes unless a custom component explicitly opts into extension.
+parameter-group values are replaced. The optimizer class cannot change, and
+existing optimizer kwargs cannot be removed. Model, DDP, data-manager,
+component-binding, and other session changes are rejected unless a custom
+component explicitly opts into extension.
+
+`optimizer.lr_scheduler` may be replaced entirely; the new schedule restarts
+from the extension point. To drop scheduling and continue at a fixed learning
+rate, set it to `null`:
+
+```bash
+python -m my_project.train \
+  --extend-session ./runs/session_.../checkpoints/<checkpoint-name> \
+  --override \
+  session_config.max_iterations=5000 \
+  optimizer.lr_scheduler=null
+```
+
+Without a scheduler, training continues at the learning rate stored in the
+checkpoint (the last value the scheduler set) and it stays fixed. Add
+`optimizer.optimizer.kwargs.lr=<value>` to pin a different fixed rate. Keys
+must be removed with `=null`; the `~key` deletion syntax is not supported.
 
 The positional form `--extend-session CHECKPOINT NEW_MAX_ITERATIONS` remains
 available with a deprecation warning.

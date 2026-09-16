@@ -528,6 +528,31 @@ def test_optimizer_can_be_configured_without_a_scheduler():
     assert restored_state["lr_scheduler_state"] is None
 
 
+def test_optimizer_current_lrs_tracks_scheduler_while_active():
+    model = nn.Linear(1, 1, bias=False)
+    hook = OptimizerHook({
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}},
+        "lr_scheduler": {
+            "stages": [{
+                "name": "StepLR",
+                "kwargs": {"step_size": 1, "gamma": 0.5},
+            }],
+        },
+    })
+    session = _optimizer_test_session(model, max_iterations=2)
+    assert hook.current_lrs is None
+
+    hook.pre_session(session)
+    assert hook.current_lrs == [1.0]
+    hook.pre_iteration_callback(session)
+    session.iteration_context["loss"] = model(torch.ones(1, 1)).sum()
+    hook.post_iteration_callback(session)
+    assert hook.current_lrs == [0.5]
+
+    hook.post_session(session)
+    assert hook.current_lrs is None
+
+
 def test_scheduler_pipeline_resolves_runtime_stage_lengths():
     model = nn.Linear(1, 1, bias=False)
     hook = OptimizerHook({

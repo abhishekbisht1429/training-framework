@@ -12,7 +12,7 @@ which registers all built-ins. Their classes are also importable from
 
 | Name | Kind | Purpose and dependencies |
 |---|---|---|
-| `logger` | Hook | Prints `Iteration <current>/<maximum>`; enabled by default |
+| `logger` | Hook | Prints `Iteration <current>/<maximum>`, followed by ` \| lr: <lr>` (one value per param group) when `optimizer` is active; enabled by default |
 | `checkpointer` | Hook | Saves complete session checkpoints; enabled by default |
 | `ddp` | Resource | Initializes distributed execution and wraps the required `model` resource |
 | `data_manager` | Stateful resource | Creates a resumable distributed `DataLoader`; requires `dataset` and `ddp` |
@@ -107,6 +107,9 @@ schedule's not-yet-reached stage is unaffected and runs its own originally
 configured base once it activates. Changing `lr_scheduler` itself
 (scheduler class, stages, milestones, or `metric_key`) restarts its schedule
 from the extension point; optimizer tensors and step counts are unaffected.
+Setting `optimizer.lr_scheduler=null` removes scheduling: training continues
+at the learning rate stored in the checkpoint, held fixed (combine with
+`optimizer.optimizer.kwargs.lr=<value>` to pin a different rate).
 See [Session-extension configuration](components.md#session-extension-configuration).
 
 `data_manager.data_iter` is available only while the session is active. It
