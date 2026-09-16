@@ -399,3 +399,44 @@ def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_p
     assert "it_3d45_train" in rank_one_step_names
     assert "it_3d45_rank0_step" not in rank_one_step_names
     assert "it_3d45_rank0_hook" not in rank_one_hook_names
+
+
+def _slow_step_config(tmp_path, *, ping: bool) -> dict[str, Any]:
+    return {
+        "session_config": {
+            "rng_seed": 5,
+            "sessions_dir": str(tmp_path),
+            "max_iterations": 2,
+            "device": "cpu",
+            "components_package": COMPONENTS_PACKAGE,
+        },
+        "it_3d45_slow": {"seconds": 8.0, "ping": ping},
+    }
+
+
+def test_long_stage_that_pings_outlives_heartbeat_timeout(tmp_path):
+    register_test_components()
+    engine_config = _EngineConfig(
+        mode="new",
+        session_configs=(_slow_step_config(tmp_path, ping=True),),
+        heartbeat_timeout=5.0,
+    )
+
+    with TrainingEngine(engine_config) as engine:
+        engine.start_session()
+
+
+def test_long_stage_without_pings_times_out_naming_the_stage(tmp_path):
+    register_test_components()
+    engine_config = _EngineConfig(
+        mode="new",
+        session_configs=(_slow_step_config(tmp_path, ping=False),),
+        heartbeat_timeout=5.0,
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match=r"rank=0 .*made no progress.*stage 'Running .*it_3d45_slow",
+    ):
+        with TrainingEngine(engine_config) as engine:
+            engine.start_session()

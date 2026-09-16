@@ -22,7 +22,8 @@ TrainingEngine
     |       +-- reconstruct the concrete Session subtype from state
     |       +-- configure rank-specific DDP resource, when enabled
     |       +-- run resources, hooks, and steps
-    |       +-- send heartbeats and errors to the parent
+    |       +-- mark stage progress in shared memory
+    |       +-- send errors to the parent
     |
     +-- spawn worker processes rank 1..N-1 for DDP
     |       +-- reconstruct the same session state
@@ -31,7 +32,7 @@ TrainingEngine
     |
     +-- monitor worker pipes and process sentinels
             +-- propagate worker failures
-            +-- detect heartbeat timeouts
+            +-- poll worker progress and detect heartbeat timeouts
             +-- coordinate graceful shutdown
             +-- terminate or kill unresponsive workers
 ```
@@ -56,14 +57,22 @@ For each worker, the parent:
 2. passes the state to a new interpreter;
 3. reconstructs the correct subtype with `Session.from_state()`;
 4. starts the training or analysis lifecycle in that child process; and
-5. watches both the worker's message pipe and process sentinel.
+5. watches the worker's progress beacon, error pipe, and process sentinel.
 
-The worker sends:
+Each worker reports through two channels:
 
-- **heartbeat messages**, including PID, iteration, and the current component stage; and
-- **error messages**, including rank, exception type, message, and traceback.
+- **Progress beacon** — a small lock-free shared-memory record (sequence counter, iteration, stage label). The framework marks it before every resource setup/teardown, session hook, iteration hook, and step, and on every `session.send_heartbeat(stage)` call. Marking is a few shared-memory writes with no pickling or syscall, so it happens at every stage.
+- **Error pipe** — error messages including rank, exception type, message, and traceback.
 
-The worker heartbeat interval is currently fixed at 10 seconds. The parent timeout is configurable with `--heartbeat-timeout`.
+The parent polls each beacon at least once per second (more often for short timeouts). Any sequence change counts as progress and resets that worker's deadline. When no progress is seen for `--heartbeat-timeout` seconds, the parent raises a `TimeoutError` naming the rank, PID, iteration, and the stage the worker was stuck in, for example:
+
+```text
+Worker rank=0 pid=4242 made no progress for 30.4s (iteration 17, stage 'Running Step.validate')
+```
+
+While workers progress, the parent prints at most one status line per rank every `min(10, heartbeat_timeout / 3)` seconds.
+
+A single long component call, such as a full validation pass, does not change stages on its own. Call `session.send_heartbeat("…")` periodically inside such loops, or raise `--heartbeat-timeout` above the longest uninterrupted operation.
 
 On interruption, worker failure, or heartbeat timeout, the engine:
 

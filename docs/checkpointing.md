@@ -39,7 +39,7 @@ hook, it saves on:
 - PyTorch CPU RNG state; and
 - CUDA RNG state.
 
-Transient infrastructure, such as the selected device, iteration context, manager pipe, and heartbeat timer, is recreated in each worker.
+Transient infrastructure, such as the selected device, iteration context, error pipe, and progress beacon, is recreated in each worker.
 
 ### Resume
 

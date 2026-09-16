@@ -133,7 +133,7 @@ python -m my_project.train \
 
 | Argument | Default | Meaning |
 |---|---:|---|
-| `--heartbeat-timeout` | `30.0` | Maximum seconds a live worker may go without a heartbeat |
+| `--heartbeat-timeout` | `30.0` | Maximum seconds a live worker may go without a stage change or `session.send_heartbeat()` call |
 | `--stop-sync-grace-period` | `0.01` | Seconds to poll a DDP stop collective before sleeping |
 | `--stop-sync-poll-interval` | `0.005` | Sleep duration between later DDP stop-collective polls |
 | `--process_timeout_on_join` | `30.0` | Graceful-shutdown period before surviving workers are terminated |

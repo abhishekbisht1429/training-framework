@@ -4,6 +4,10 @@ from multiprocessing.connection import wait
 from typing import Any
 
 
+_MAX_PROGRESS_POLL_INTERVAL = 1.0
+_MAX_STATUS_INTERVAL = 10.0
+
+
 def join_or_terminate(wrappers: list, timeout: float) -> None:
     print(
         f"Waiting up to {timeout:.1f}s for "
@@ -102,19 +106,12 @@ def process_ready_waitables(waitables, ready_waitables):
             try:
                 message = ready_waitable.recv()
                 if isinstance(message, dict):
-                    if message.get("type") == "heartbeat":
-                        print(
-                            f"Heartbeat received from Process rank "
-                            f"{wrapper.rank}. - {message}"
-                        )
-                        wrapper.reset_deadline()
-                    else:
-                        waitables.pop(ready_waitable, None)
-                        ready_waitable.close()
-                        failure = RuntimeError(
-                            f"Worker pid={wrapper.process.pid} failed:\n"
-                            f"{message}"
-                        )
+                    waitables.pop(ready_waitable, None)
+                    ready_waitable.close()
+                    failure = RuntimeError(
+                        f"Worker pid={wrapper.process.pid} failed:\n"
+                        f"{message}"
+                    )
                 else:
                     print(f"Unknown message type received! {message}")
             except EOFError:
@@ -152,6 +149,25 @@ def process_ready_waitables(waitables, ready_waitables):
     return failure
 
 
+def _report_progress(wrapper, now: float, last_status_times: dict) -> None:
+    status_interval = min(
+        _MAX_STATUS_INTERVAL,
+        wrapper.heartbeat_timeout / 3,
+    )
+    last_status_time = last_status_times.get(wrapper.rank)
+    if (
+            last_status_time is not None
+            and now - last_status_time < status_interval
+    ):
+        return
+    last_status_times[wrapper.rank] = now
+    print(
+        f"Worker rank={wrapper.rank}: iteration {wrapper.last_iteration}, "
+        f"stage {wrapper.last_stage!r}",
+        flush=True,
+    )
+
+
 def monitor_processes(
         wrappers: list,
         *,
@@ -167,6 +183,7 @@ def monitor_processes(
 
     failure = None
     interrupted = False
+    last_status_times = {}
     try:
         while waitables:
             if failure:
@@ -180,9 +197,17 @@ def monitor_processes(
             if not active:
                 break
 
+            poll_interval = min(
+                _MAX_PROGRESS_POLL_INTERVAL,
+                min(wrapper.heartbeat_timeout for wrapper in active) / 10,
+            )
             timeout = max(
                 0.0,
-                min(wrapper.deadline for wrapper in active) - time.monotonic(),
+                min(
+                    poll_interval,
+                    min(wrapper.deadline for wrapper in active)
+                    - time.monotonic(),
+                ),
             )
             ready = wait(waitables, timeout=timeout)
 
@@ -190,6 +215,9 @@ def monitor_processes(
                 failure = process_ready(waitables, ready)
 
             now = time.monotonic()
+            for wrapper in active:
+                if wrapper.check_progress(now):
+                    _report_progress(wrapper, now, last_status_times)
             timed_out_wrappers = [
                 wrapper
                 for wrapper in active
@@ -201,9 +229,11 @@ def monitor_processes(
                     key=lambda item: item.deadline,
                 )
                 failure = TimeoutError(
-                    f"Worker pid={wrapper.process.pid} missed its "
-                    f"heartbeat deadline by "
-                    f"{now - wrapper.deadline:.1f}s"
+                    f"Worker rank={wrapper.rank} pid={wrapper.process.pid} "
+                    f"made no progress for "
+                    f"{now - wrapper.last_progress_time:.1f}s "
+                    f"(iteration {wrapper.last_iteration}, "
+                    f"stage {wrapper.last_stage!r})"
                 )
     except KeyboardInterrupt:
         print("Interrupted!")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, override
 
@@ -223,6 +224,24 @@ class FailingStep(Step):
         fail_at = int(self.config.get("fail_at", 1))
         if session.iteration == fail_at:
             raise RuntimeError(self.config.get("message", "intentional worker failure"))
+
+
+@step("it_3d45_slow")
+class SlowStep(Step):
+    """Block on the first iteration, optionally pinging the supervisor."""
+
+    def __init__(self, config: dict):
+        self.config = dict(config)
+
+    @override
+    def run(self, session: TrainingSession) -> None:
+        if session.iteration != 1:
+            return
+        deadline = time.monotonic() + float(self.config["seconds"])
+        while time.monotonic() < deadline:
+            if self.config.get("ping", False):
+                session.send_heartbeat("Slow step still working")
+            time.sleep(0.05)
 
 
 @resource("it_3d45_rank0_resource")

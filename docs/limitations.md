@@ -16,7 +16,14 @@
 
 6. **Spawn requires importable and serializable definitions.** Define worker targets and component classes at module scope. Constructor arguments, state returned by `get_state()`, and checkpointed session-context values must be serializable.
 
-7. **Heartbeat detection happens between framework stages.** A single long-running component call can exceed the deadline without sending another heartbeat. Set `--heartbeat-timeout` above the longest expected uninterrupted setup, hook, step, or teardown operation.
+7. **Progress is detected between framework stages.** A single long-running component call can exceed the deadline without marking progress. Call `session.send_heartbeat(...)` periodically inside long loops — it is a cheap shared-memory write, so once per batch is fine — or set `--heartbeat-timeout` above the longest uninterrupted setup, hook, step, or teardown operation:
+
+   ```python
+   def run(self, session):
+       for batch_index, batch in enumerate(validation_loader):
+           session.send_heartbeat(f"validate batch {batch_index}")
+           ...
+   ```
 
 8. **Graceful stopping occurs between iterations.** Non-DDP workers use their local stop event. DDP workers make a rank-wide stop decision before each iteration, so every rank may complete one final synchronized iteration when a request races with that decision. Work already inside a component or collective must finish or wait until the join timeout causes termination.
 

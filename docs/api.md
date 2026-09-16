@@ -38,7 +38,7 @@ samplers.
 | `checkpoint_path` | Checkpoint path in resume or extend operations |
 | `extension_overrides` | Session-relative dotlist overrides in the extend operation |
 | `new_max_iters` | Deprecated positional iteration limit, when supplied |
-| `heartbeat_timeout` | Worker heartbeat deadline |
+| `heartbeat_timeout` | Seconds a worker may go without marking progress |
 | `stop_sync_grace_period` | Busy-poll duration before a pending DDP stop collective sleeps |
 | `stop_sync_poll_interval` | Sleep duration between pending DDP stop-collective polls |
 | `process_timeout_on_join` | Graceful process-join timeout |
@@ -81,6 +81,7 @@ The engine monitors workers while leaving the context.
 | `device` | Active `torch.device` |
 | `session_context` | Session-lifetime shared dictionary |
 | `iteration_context` | Current-iteration shared dictionary; context-only |
+| `send_heartbeat(stage)` | Mark worker progress with a stage label; call periodically inside long-running components (no-op outside a spawned worker) |
 | `component_bindings` | Copy of the session's role-to-implementation bindings |
 | `component_aliases` | Deprecated compatibility property for `component_bindings` |
 | `resolve_component_name(name)` | Resolve an expected or actual component name to its registered name |

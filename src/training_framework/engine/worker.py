@@ -7,6 +7,7 @@ import torch
 from torch import distributed, multiprocessing
 
 from training_framework.session import Session, TrainingSession
+from training_framework.session.progress import ProgressBeacon
 
 
 _STOP_SYNC_GRACE_PERIOD = 0.01
@@ -99,6 +100,7 @@ def session_process_worker(
         rank: int,
         stop_event,
         error_conn,
+        progress_beacon,
         **kwargs,
 ) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -109,8 +111,7 @@ def session_process_worker(
             session_update_params=kwargs.get("session_update_params"),
         )
         session.set_dist_manager_err_conn(error_conn)
-        heartbeat_timeout = kwargs["heartbeat_timeout"]
-        session.set_heartbeat_interval(min(10.0, heartbeat_timeout / 3))
+        session.set_progress_beacon(progress_beacon)
         stop_sync_grace_period = kwargs.get(
             "stop_sync_grace_period",
             _STOP_SYNC_GRACE_PERIOD,
@@ -166,6 +167,7 @@ class SessionProcessWrapper:
         context = multiprocessing.get_context("spawn")
         self._stop_event = context.Event()
         self._recv_conn, self._send_conn = context.Pipe(duplex=False)
+        self._progress_beacon = ProgressBeacon(context)
         self._session_process = context.Process(
             name=f"training-session-rank-{rank}",
             target=session_process_worker,
@@ -174,12 +176,17 @@ class SessionProcessWrapper:
                 rank,
                 self._stop_event,
                 self._send_conn,
+                self._progress_beacon,
             ),
             kwargs=kwargs,
         )
         self._started = False
         self._heartbeat_timeout = kwargs["heartbeat_timeout"]
         self._deadline = time.monotonic() + self._heartbeat_timeout
+        self._last_seq = 0
+        self._last_iteration = 0
+        self._last_stage = "Starting worker"
+        self._last_progress_time = time.monotonic()
 
     @property
     def error_conn(self):
@@ -201,8 +208,37 @@ class SessionProcessWrapper:
     def deadline(self) -> float:
         return self._deadline
 
+    @property
+    def heartbeat_timeout(self) -> float:
+        return self._heartbeat_timeout
+
+    @property
+    def last_iteration(self) -> int:
+        return self._last_iteration
+
+    @property
+    def last_stage(self) -> str:
+        return self._last_stage
+
+    @property
+    def last_progress_time(self) -> float:
+        return self._last_progress_time
+
     def reset_deadline(self):
         self._deadline = time.monotonic() + self._heartbeat_timeout
+
+    def check_progress(self, now: float | None = None) -> bool:
+        seq, iteration, stage = self._progress_beacon.snapshot()
+        if seq == self._last_seq:
+            return False
+        if now is None:
+            now = time.monotonic()
+        self._last_seq = seq
+        self._last_iteration = iteration
+        self._last_stage = stage
+        self._last_progress_time = now
+        self._deadline = now + self._heartbeat_timeout
+        return True
 
     def start(self) -> None:
         if self._started:

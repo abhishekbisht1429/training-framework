@@ -156,8 +156,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._successfully_setup_hook_names = set()
 
         self._dist_manager_err_conn = None
-        self._heartbeat_interval = None
-        self._last_heartbeat_time = 0.0
+        self._progress_beacon = None
 
     @override
     def get_state(self):
@@ -504,8 +503,8 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def set_dist_manager_err_conn(self, err_conn):
         self._dist_manager_err_conn = err_conn
 
-    def set_heartbeat_interval(self, interval):
-        self._heartbeat_interval = interval
+    def set_progress_beacon(self, beacon):
+        self._progress_beacon = beacon
 
     def send_heartbeat(self, stage):
         send_worker_heartbeat(self, stage)

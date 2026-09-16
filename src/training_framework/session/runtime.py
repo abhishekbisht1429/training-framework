@@ -1,5 +1,4 @@
 import os
-import time
 import traceback
 from typing import TYPE_CHECKING, Any, cast
 
@@ -77,6 +76,7 @@ def setup_resources(session: "Session") -> None:
 
 def setup_session_hooks(session: "Session") -> None:
     for component in session._session_hooks:
+        session.send_heartbeat(f"Running pre-session {component.id}")
         try:
             component.pre_session(session)
         except Exception:
@@ -91,7 +91,6 @@ def setup_session_hooks(session: "Session") -> None:
                     f"'{component.id}': {error}"
                 )
             raise
-        session.send_heartbeat(f"Running pre-session {component.id}")
         session._successfully_setup_hook_names.add(component.name)
 
 
@@ -149,16 +148,6 @@ def report_worker_exception(
 
 
 def send_heartbeat(session: "Session", stage) -> None:
-    if session._dist_manager_err_conn is None:
+    if session._progress_beacon is None:
         return
-    if (
-            time.monotonic() - session._last_heartbeat_time
-            >= session._heartbeat_interval
-    ):
-        session._dist_manager_err_conn.send({
-            "type": "heartbeat",
-            "pid": os.getpid(),
-            "iteration": session._iteration,
-            "stage": stage,
-        })
-        session._last_heartbeat_time = time.monotonic()
+    session._progress_beacon.mark(stage, session._iteration)
