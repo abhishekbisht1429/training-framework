@@ -104,6 +104,7 @@ def session_process_worker(
         **kwargs,
 ) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    session = None
     try:
         session = load_session_for_worker(
             session_state,
@@ -135,17 +136,23 @@ def session_process_worker(
                     break
     except BaseException as error:
         try:
-            error_conn.send({
-                "type": "error",
-                "rank": rank,
-                "pid": os.getpid(),
-                "exception_type": (
-                    f"{type(error).__module__}."
-                    f"{type(error).__qualname__}"
-                ),
-                "message": str(error),
-                "traceback": traceback.format_exc(),
-            })
+            # Session.__exit__ already reports failures raised while the
+            # session was active; only report the rest (e.g. load or setup).
+            if session is None or not session.worker_exception_reported:
+                error_conn.send({
+                    "type": "error",
+                    "rank": rank,
+                    "pid": os.getpid(),
+                    "exception_type": (
+                        f"{type(error).__module__}."
+                        f"{type(error).__qualname__}"
+                    ),
+                    "message": str(error),
+                    "traceback": traceback.format_exc(),
+                })
+        except OSError:
+            # The parent already closed the pipe; re-raise the real error.
+            pass
         finally:
             error_conn.close()
         raise

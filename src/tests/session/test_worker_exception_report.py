@@ -4,6 +4,7 @@ import pytest
 
 from training_framework.components import Resource, Step, resource, step
 from training_framework.session import TrainingSession
+from training_framework.session.runtime import report_worker_exception
 
 
 class _Conn:
@@ -90,7 +91,7 @@ def test_worker_exception_is_reported_and_resources_torn_down(
     assert _TeardownRecorder.torn_down is True
 
 
-def test_teardown_runs_even_if_reporting_fails(tmp_path):
+def test_closed_pipe_neither_masks_error_nor_skips_teardown(tmp_path):
     session = _session(tmp_path, with_ddp=False)
 
     class _BrokenConn:
@@ -99,8 +100,24 @@ def test_teardown_runs_even_if_reporting_fails(tmp_path):
 
     session.set_dist_manager_err_conn(_BrokenConn())
 
-    with pytest.raises(BrokenPipeError):
+    with pytest.raises(RuntimeError, match="step exploded"):
         with session:
             next(session)
 
     assert _TeardownRecorder.torn_down is True
+    assert session.worker_exception_reported is False
+
+
+def test_exception_is_reported_only_once(tmp_path):
+    session = _session(tmp_path, with_ddp=False)
+    conn = _Conn()
+    session.set_dist_manager_err_conn(conn)
+
+    with pytest.raises(RuntimeError):
+        with session:
+            next(session)
+    assert session.worker_exception_reported is True
+
+    report_worker_exception(session, RuntimeError, RuntimeError("again"))
+
+    assert len(conn.messages) == 1

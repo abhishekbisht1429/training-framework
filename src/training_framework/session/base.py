@@ -156,6 +156,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._successfully_setup_hook_names = set()
 
         self._dist_manager_err_conn = None
+        self._worker_exception_reported = False
         self._progress_beacon = None
 
     @override
@@ -503,6 +504,11 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     def set_dist_manager_err_conn(self, err_conn):
         self._dist_manager_err_conn = err_conn
+        self._worker_exception_reported = False
+
+    @property
+    def worker_exception_reported(self) -> bool:
+        return self._worker_exception_reported
 
     def set_progress_beacon(self, beacon):
         self._progress_beacon = beacon

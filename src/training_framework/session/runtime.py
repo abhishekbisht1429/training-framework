@@ -137,19 +137,26 @@ def report_worker_exception(
 ) -> None:
     if session._dist_manager_err_conn is None or exc_type is None:
         return
+    if session._worker_exception_reported:
+        return
     rank = (
         cast(Any, session.get_resource("ddp")).rank
         if session.has_resource("ddp")
         else 0
     )
-    session._dist_manager_err_conn.send({
-        "type": "error",
-        "rank": rank,
-        "pid": os.getpid(),
-        "exception_type": str(exc_type),
-        "message": str(exc_val),
-        "traceback": traceback.format_exc(),
-    })
+    try:
+        session._dist_manager_err_conn.send({
+            "type": "error",
+            "rank": rank,
+            "pid": os.getpid(),
+            "exception_type": str(exc_type),
+            "message": str(exc_val),
+            "traceback": traceback.format_exc(),
+        })
+    except OSError:
+        # The parent already closed the pipe; don't mask the real exception.
+        return
+    session._worker_exception_reported = True
 
 
 def send_heartbeat(session: "Session", stage) -> None:
