@@ -213,3 +213,94 @@ class DataManager(StatefulResource):
                 "Cannot restore DataManager state with a different batch_size"
             )
         self._sampler_state = deepcopy(state["sampler_state"])
+
+
+role(
+    "dataset",
+    Resource,
+    description=(
+        "the analysis dataset; a Resource yielding samples for the analysis "
+        "DataManager's DataLoader"
+    ),
+    session_type="analysis",
+)
+
+
+@requires_resource("dataset")
+@resource("data_manager", session_type="analysis")
+class AnalysisDataManager(Resource):
+    """Iterate a dataset once, in order, for analysis.
+
+    Unlike the training ``DataManager``, it needs no ``ddp`` resource, does
+    not shuffle or repeat, and keeps no resumable state. Exhausting
+    ``data_iter`` raises ``StopIteration`` from ``next()``, which ends the
+    analysis session.
+    """
+
+    def __init__(self, config):
+        self._batch_size = config["batch_size"]
+        self._num_workers = config.get("num_workers", 0)
+        self._pin_memory = config.get("pin_memory", False)
+        self._drop_last = config.get("drop_last", False)
+        self._dataloader: DataLoader | None = None
+        self._data_iter = None
+
+        if (
+                isinstance(self._batch_size, bool)
+                or not isinstance(self._batch_size, int)
+                or self._batch_size <= 0
+        ):
+            raise ValueError(
+                "DataManager batch_size must be a positive integer"
+            )
+        if (
+                isinstance(self._num_workers, bool)
+                or not isinstance(self._num_workers, int)
+                or self._num_workers < 0
+        ):
+            raise ValueError(
+                "DataManager num_workers must be a non-negative integer"
+            )
+        for key in ("pin_memory", "drop_last"):
+            if not isinstance(config.get(key, False), bool):
+                raise TypeError(f"DataManager {key} must be a boolean")
+
+    @property
+    def batch_size(self):
+        return self._batch_size
+
+    @property
+    def dataloader(self):
+        return self._dataloader
+
+    @property
+    def data_iter(self):
+        return self._data_iter
+
+    @override
+    def setup(self, session: Session):
+        dataset = session.get_resource("dataset")
+        if len(dataset) <= 0:
+            raise ValueError("DataManager requires a non-empty dataset")
+        collate_fn = getattr(dataset, "collate_fn", torch.stack)
+        if not callable(collate_fn):
+            raise TypeError(
+                f"Dataset resource '{type(dataset).__name__}' collate_fn "
+                "must be callable"
+            )
+
+        self._dataloader = DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=self._drop_last,
+            collate_fn=collate_fn,
+            num_workers=self._num_workers,
+            pin_memory=self._pin_memory,
+        )
+        self._data_iter = iter(self._dataloader)
+
+    @override
+    def teardown(self, session: Session):
+        self._data_iter = None
+        self._dataloader = None

@@ -15,7 +15,7 @@ which registers all built-ins. Their classes are also importable from
 | `logger` | Hook | Prints `Iteration <current>/<maximum>`, followed by ` \| lr: <lr>` (one value per param group) when `optimizer` is active; enabled by default |
 | `checkpointer` | Hook | Saves complete session checkpoints; enabled by default |
 | `ddp` | Resource | Initializes distributed execution and wraps the required `model` resource |
-| `data_manager` | Stateful resource | Creates a resumable distributed `DataLoader`; requires `dataset` and `ddp` |
+| `data_manager` | Stateful resource | Creates a resumable distributed `DataLoader`; requires `dataset` and `ddp` (analysis sessions use a [separate implementation](#analysis-data_manager)) |
 | `optimizer` | Stateful lifecycle hook | Runs a configured PyTorch optimizer and optional learning-rate schedule; requires `ddp` and reads `iteration_context["loss"]` |
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations; wraps `optimizer` |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
@@ -166,6 +166,7 @@ present and terminates the partially started process.
 | `trained_model` | Resource | Loads the `model` role from the source training checkpoint; enabled by default |
 | `logger` | Hook | Prints `Analysis iteration <current>/<maximum>`; enabled by default |
 | `layer_inspector` | Resource | Captures forward-pass input/output of selected `trained_model` layers via forward hooks; requires `trained_model`; not enabled by default |
+| `data_manager` | Resource | Iterates the `dataset` role once, in order, with a plain `DataLoader`; requires `dataset` (no `ddp`); not enabled by default |
 
 The analysis logger lives in the analysis registry. `trained_model` is shared
 and can be activated by any session type. Analysis sessions activate it by
@@ -178,6 +179,40 @@ trained_model:
 
 The path must reference an existing, trusted framework `TrainingSession`
 checkpoint whose `model` resource provides `to(device)` and `eval()`.
+
+### Analysis `data_manager`
+
+The analysis registry has its own `data_manager` (`AnalysisDataManager`),
+separate from the training one. It does not use `ddp`, does not shuffle or
+repeat, and keeps no resumable state: each sample is delivered exactly once,
+in dataset order. `dataset` is also a declared role in the analysis scope;
+register an analysis-scoped or shared `Resource` under that name, or bind one
+with `component_bindings`.
+
+```yaml
+data_manager:
+  batch_size: 32       # required, per-process batch size
+  num_workers: 0       # optional
+  pin_memory: false    # optional
+  drop_last: false     # optional; drop a final partial batch
+```
+
+While the session is active, `data_manager.data_iter` is an iterator over the
+`DataLoader` (also exposed as `data_manager.dataloader`), and the dataset's
+optional `collate_fn` is used the same way as in training. When a step calls
+`next(data_iter)` after the last batch, the `StopIteration` ends the analysis
+session cleanly, so a run stops at whichever comes first: the end of the data
+or `max_iterations`. The partial final iteration is not counted.
+
+```python
+@requires_resource("data_manager")
+@step("embed_batches", session_type="analysis")
+class EmbedBatches(Step):
+    def run(self, session):
+        batch = next(session.get_resource("data_manager").data_iter)
+        model = session.get_resource("trained_model").model
+        session.iteration_context["embeddings"] = model(batch)
+```
 
 ### `layer_inspector`
 

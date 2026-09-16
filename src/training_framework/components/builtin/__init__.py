@@ -2,7 +2,10 @@
 
 from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.components.builtin.analysis import AnalysisLogger
-from training_framework.components.builtin.data import DataManager
+from training_framework.components.builtin.data import (
+    AnalysisDataManager,
+    DataManager,
+)
 from training_framework.components.builtin.distributed import DDPResource
 from training_framework.components.builtin.layer_inspection import (
     LayerCapture,
@@ -17,6 +20,7 @@ from training_framework.components.builtin.observability import (
 from training_framework.components.builtin.optimization import OptimizerHook
 
 __all__ = [
+    "AnalysisDataManager",
     "AnalysisLogger",
     "Checkpointer",
     "DataManager",
