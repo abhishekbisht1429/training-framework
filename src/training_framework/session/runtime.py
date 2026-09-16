@@ -137,9 +137,14 @@ def report_worker_exception(
 ) -> None:
     if session._dist_manager_err_conn is None or exc_type is None:
         return
+    rank = (
+        cast(Any, session.get_resource("ddp")).rank
+        if session.has_resource("ddp")
+        else 0
+    )
     session._dist_manager_err_conn.send({
         "type": "error",
-        "rank": cast(Any, session.get_resource("ddp")).rank,
+        "rank": rank,
         "pid": os.getpid(),
         "exception_type": str(exc_type),
         "message": str(exc_val),

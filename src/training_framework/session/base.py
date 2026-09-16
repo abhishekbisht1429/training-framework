@@ -487,11 +487,12 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
-        report_worker_exception(self, exc_type, exc_val)
-
-        self._teardown_session_hooks()
-        self._teardown_resources()
-        self._session_context.clear()
+        try:
+            report_worker_exception(self, exc_type, exc_val)
+        finally:
+            self._teardown_session_hooks()
+            self._teardown_resources()
+            self._session_context.clear()
 
         if self._phase is SessionPhase.READY:
             self._phase = SessionPhase.NEW
