@@ -39,6 +39,11 @@ hook, it saves on:
 - PyTorch CPU RNG state; and
 - CUDA RNG state.
 
+Each component's state holds only what that component owns. A `ModuleResource`
+excludes every tensor reachable from a resource it linked, so weights shared
+between components are stored once, by the component that created them, and
+restored as one shared instance.
+
 Transient infrastructure, such as the selected device, iteration context, error pipe, and progress beacon, is recreated in each worker.
 
 ### Resume

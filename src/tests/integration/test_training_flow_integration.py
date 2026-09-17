@@ -441,3 +441,67 @@ def test_staggered_stop_request_keeps_ddp_ranks_iteration_aligned(
         rel=1e-6,
         abs=1e-6,
     )
+
+
+def test_full_spawned_ddp_training_flow_with_a_linked_child_model(
+    tmp_path,
+    monkeypatch,
+):
+    """DDP and the optimizer see a parameter owned by a different component."""
+    _register_integration_components()
+    output_dir = tmp_path / "rank-results"
+    session_config = _ddp_session_config(tmp_path, output_dir)
+    session_config["component_bindings"]["model"] = "integration_composed_model"
+    del session_config["integration_ddp_model"]
+    session_config["integration_composed_model"] = {}
+    session_config["integration_scale_factor"] = {"initial_weight": 0.0}
+    # integration_scale_factor is deliberately left out of parallel_components:
+    # rank>0 pruning keeps it because the model declares it as a prerequisite.
+
+    config_path = tmp_path / "training.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"sessions": [session_config]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "training-framework",
+            "--config",
+            str(config_path),
+            "--heartbeat-timeout",
+            "30",
+            "--process_timeout_on_join",
+            "10",
+        ],
+    )
+
+    with TrainingEngine(Configurator()) as engine:
+        engine.start_session()
+
+    results = [
+        json.loads(
+            (output_dir / f"rank_{rank}.json").read_text(encoding="utf-8")
+        )
+        for rank in range(2)
+    ]
+
+    assert [result["rank"] for result in results] == [0, 1]
+    # The child's parameter was trained and synchronised across both ranks.
+    assert results[0]["final_weight"] == pytest.approx(
+        results[1]["final_weight"],
+        rel=1e-6,
+        abs=1e-6,
+    )
+    assert results[0]["final_weight"] > 0.0
+    for rank_zero, rank_one in zip(
+        results[0]["observations"],
+        results[1]["observations"],
+        strict=True,
+    ):
+        assert rank_zero["prediction"] == pytest.approx(
+            rank_one["prediction"],
+            rel=1e-6,
+            abs=1e-6,
+        )

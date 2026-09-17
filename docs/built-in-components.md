@@ -292,6 +292,59 @@ forward pass wasn't run under `torch.no_grad()`. This is deliberate: a
 gradient/attribution-style analysis needs the live graph. A Step that doesn't
 need it should run its forward pass under `torch.no_grad()` itself.
 
+### `ModuleResource`
+
+`ModuleResource` is an `nn.Module` that is also a `StatefulResource`, for
+models assembled from other resources. Subclasses create their own parameters
+in `build()` and name the resources they attach in `linked_modules`; both run
+during the [link phase](components.md#linking-components-to-each-other), so a
+restored model is usable without `setup()` -- which is what `trained_model`
+relies on.
+
+```python
+@resource("text_encoder")
+class TextEncoder(ModuleResource):
+    def build(self):
+        self.embedding = nn.Embedding(self._config["vocab_size"], 256)
+
+
+@requires_resource("text_encoder")
+@resource("model")
+class CaptionedImageModel(ModuleResource):
+    linked_modules = ("text_encoder",)
+
+    def build(self):
+        self.head = nn.Linear(512, self._config["num_classes"])
+
+    def forward(self, image, tokens):
+        ...
+```
+
+| Member | Purpose |
+|---|---|
+| `linked_modules` | Resource names attached as submodules under the same attribute |
+| `build()` | Create this component's own parameters; called once, during link |
+| `attach_dependencies(components)` | Override to attach conditionally or under another attribute name |
+| `attach_linked_module(attribute, component)` | Attach one component; rejects non-modules and relinking a different child after `build()` |
+| `is_linked` / `linked_components` | Whether `build()` has run; the attribute -> component name map |
+
+**Ownership.** An attached child is a real submodule, so `model.parameters()`
+covers it and `ddp`, the optimizer and `layer_inspector` see one module tree,
+with each tensor appearing once. State is split the other way: a parent
+excludes everything reachable from a linked child, so each component
+checkpoints only the weights it created. `set_state` loads in place, which is
+what keeps a parent's references valid.
+
+A child may be shared by several models and is restored as one shared
+instance. Attaching a component as a plain submodule instead of through
+`attach_linked_module` raises `ComponentLinkError`, because its weights would
+otherwise be stored twice.
+
+**Compared with the transformer factories below:** use a `ModuleFactory` when
+a block is a private, unshared part of one composite that should be
+checkpointed inside it; use a `ModuleResource` when the block is a component
+in its own right -- independently configured, checkpointed and shareable.
+
 ### Transformer blocks
 
 `training_framework.components.builtin.transformer` provides generic

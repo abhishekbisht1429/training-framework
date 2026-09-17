@@ -55,6 +55,10 @@ def load_session_for_worker(
                 if step.name not in parallel_components:
                     session.remove_step(step.name)
 
+        # The rank-specific ddp resource and the rank>0 pruning both replace
+        # components, so re-wire before anything uses them.
+        session.relink_components()
+
     return session
 
 

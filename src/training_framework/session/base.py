@@ -122,6 +122,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             self._config,
             default_configs=self._default_component_configs(),
         )
+        self._components.link_components()
 
     def _get_session_type_state(self) -> dict[str, Any]:
         return {}
@@ -355,6 +356,15 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _component_dependency_closure(self, names) -> set[str]:
         return self._components.dependency_closure(names)
 
+    def relink_components(self) -> None:
+        """Re-run the link phase after components were added or replaced.
+
+        Only valid before the session is set up: links are frozen once
+        resources have run their setup.
+        """
+        self._raise_if_not_new()
+        self._components.link_components()
+
     def get_all_hooks(self):
         return list(self._components.hooks.values())
 
@@ -443,6 +453,8 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     @context_entry
     def __enter__(self):
         self._raise_if_finished()
+        # Honour components registered programmatically since construction.
+        self._components.ensure_linked()
 
         ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
         if self._session_settings.get("show_execution_graph", True):

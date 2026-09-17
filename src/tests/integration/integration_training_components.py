@@ -13,6 +13,7 @@ from torch import nn
 from torch.utils.data import Dataset
 from training_framework.components import (
     LifecycleHook,
+    ModuleResource,
     Resource,
     StatefulResource,
     SessionHook,
@@ -320,3 +321,29 @@ class RankResultHook(LifecycleHook):
             json.dumps(payload, sort_keys=True),
             encoding="utf-8",
         )
+
+
+@resource("integration_scale_factor")
+class ScaleFactor(ModuleResource):
+    """A linked child component that owns the only trainable parameter."""
+
+    def build(self) -> None:
+        self.weight = nn.Parameter(
+            torch.tensor([[float(self._config.get("initial_weight", 0.0))]])
+        )
+
+
+@requires_resource("integration_scale_factor")
+@resource("integration_composed_model")
+class ComposedLinearModel(ModuleResource):
+    """A model whose weights are owned entirely by a linked child resource."""
+
+    linked_modules = ("integration_scale_factor",)
+
+    @property
+    def weight(self) -> nn.Parameter:
+        return self.integration_scale_factor.weight
+
+    @override
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        return values * self.integration_scale_factor.weight

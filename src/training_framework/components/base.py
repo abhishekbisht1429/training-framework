@@ -28,6 +28,40 @@ class ComponentMeta(CaptureInitMeta):
         return cls
 
 
+class ComponentLinkError(RuntimeError):
+    """A component could not be wired to its prerequisite components."""
+
+
+class ComponentLinker(ABC):
+    """Narrow, session-free view of the active components.
+
+    Passed to :meth:`Component.link`. It deliberately exposes only component
+    lookup: there is no session, no device, and no iteration context during
+    the link phase.
+    """
+
+    @property
+    @abstractmethod
+    def session_type(self) -> str:
+        """Return the session type the components belong to."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_name(self, name: str) -> str:
+        """Return the implementation name a role name is bound to."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_resource(self, name: str) -> bool:
+        """Return whether a resource is active under ``name``."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_resource(self, name: str) -> "Resource":
+        """Return the active resource registered or bound to ``name``."""
+        raise NotImplementedError
+
+
 class Component(ABC, metaclass=ComponentMeta):
     """Common base for every executable training-framework component."""
 
@@ -37,6 +71,23 @@ class Component(ABC, metaclass=ComponentMeta):
 
     def __init__(self, config: Mapping | None = None) -> None:
         """Initialize a component that does not require configuration."""
+        pass
+
+    def link(self, components: ComponentLinker) -> None:
+        """Attach prerequisite components before any state is restored.
+
+        Called in prerequisite-first topological order on every construction
+        path -- fresh configuration, checkpoint restore, and worker fix-up --
+        so a component that holds a reference to another component keeps it
+        across a checkpoint or a process spawn.
+
+        No session exists yet: there is no device, no iteration context, and
+        no ``@requires_context`` access. Work that needs those belongs in
+        :meth:`Resource.setup`. Implementations may be called more than once
+        and must be idempotent.
+
+        The default is a no-op.
+        """
         pass
 
     @classmethod

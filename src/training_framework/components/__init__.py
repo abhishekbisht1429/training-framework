@@ -2,6 +2,8 @@
 
 from training_framework.components.base import (
     Component,
+    ComponentLinkError,
+    ComponentLinker,
     ExtendableComponent,
     Hook,
     IterationHook,
@@ -17,6 +19,7 @@ from training_framework.components.base import (
     StatefulStep,
     Step,
 )
+from training_framework.components.module import ModuleResource
 from training_framework.components.registry import (
     ANALYSIS_SESSION_TYPE,
     TRAINING_SESSION_TYPE,
@@ -43,10 +46,13 @@ __all__ = [
     "Component",
     "ComponentAliases",
     "ComponentBindings",
+    "ComponentLinkError",
+    "ComponentLinker",
     "ExtendableComponent",
     "Hook",
     "IterationHook",
     "LifecycleHook",
+    "ModuleResource",
     "Resource",
     "RoleDeclaration",
     "SessionHook",

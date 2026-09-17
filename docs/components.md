@@ -323,6 +323,45 @@ component constructor. Activation follows dependency edges outward: activating
 a wrapped hook alone does not activate hooks that wrap it. For DDP, secondary
 ranks retain the same closure for each root named in `ddp.parallel_components`.
 
+### Linking components to each other
+
+`setup(session)` is the first point where a component can reach another one,
+and it does not run when a session is restored from a checkpoint. A component
+that needs to *hold* another component therefore wires itself up in the link
+phase instead.
+
+`Component.link(components)` runs in prerequisite-first order on every
+construction path -- fresh configuration, checkpoint restore and worker
+fix-up -- so a reference captured at save time exists again at load time. The
+default is a no-op, so components that do not need it are unaffected.
+
+```python
+@requires_resource("text_encoder")
+@resource("model")
+class CaptionedImageModel(ModuleResource):
+    linked_modules = ("text_encoder",)
+
+    def build(self):
+        dim = self.text_encoder.embed_dim   # already attached
+        self.head = nn.Linear(2 * dim, self._config["num_classes"])
+```
+
+The link phase is deliberately weaker than `setup`:
+
+- There is no session, so no device, no iteration context, no
+  `@requires_context` access and no initialised process group. Work that needs
+  those stays in `setup`.
+- Lookup is restricted to declared prerequisites. Asking for a resource the
+  class did not declare with `@requires_resource` raises `ComponentLinkError`,
+  which is what makes the prerequisite-first order a guarantee.
+- It may run more than once -- registering or replacing a component marks
+  links stale, and the session re-links when it is entered -- so
+  implementations must be idempotent. Links are frozen once setup has run;
+  `session.relink_components()` raises after that.
+
+`ModuleResource` (see [built-in components](built-in-components.md#moduleresource))
+implements all of this for `nn.Module` resources.
+
 ### Missing-dependency errors
 
 When a dependency, wrapping target, configured root, binding target, or
