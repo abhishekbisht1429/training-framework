@@ -292,6 +292,98 @@ forward pass wasn't run under `torch.no_grad()`. This is deliberate: a
 gradient/attribution-style analysis needs the live graph. A Step that doesn't
 need it should run its forward pass under `torch.no_grad()` itself.
 
+### Transformer blocks
+
+`training_framework.components.builtin.transformer` provides generic
+transformer building blocks you can swap in and out. It has two layers:
+
+- `transformer/modules.py`: plain `nn.Module`s with no framework dependency
+  (`PatchEmbedding`, `LearnedPositionalEmbedding2D`,
+  `SinusoidalPositionalEmbedding2D`, `TransformerEncoder`, `AttentionPooling`,
+  `LearnedQuery`, `ConditionedQuery`).
+- `transformer/components.py`: resources that put those modules together into
+  a model.
+
+**Factories.** Each block is exposed as a `ModuleFactory`: a resource that
+holds only its config and builds a new module when `build()` is called. Its
+config keys are the module's constructor arguments. The config is checked when
+the factory is constructed by building the module on the `meta` device, so
+mistakes show up before a session runs. Factories own no weights.
+
+| Factory | Module | Fills role |
+|---|---|---|
+| `conv_patch_embedding` | `PatchEmbedding(in_channels, patch_size, embed_dim, bias=True)` | `patch_embedding` |
+| `learned_positional_embedding_2d` | `LearnedPositionalEmbedding2D(grid_size, embed_dim, init="zeros", init_std=0.02, interpolation_mode="bilinear")` | `positional_embedding` |
+| `sinusoidal_positional_embedding_2d` | `SinusoidalPositionalEmbedding2D(embed_dim, temperature=10000.0)` | `positional_embedding` |
+| `torch_transformer_encoder` | `TransformerEncoder(embed_dim, num_heads, num_layers, dim_feedforward=2048, dropout=0.1, activation="relu", norm_first=False, layer_norm_eps=1e-5, final_norm=False)` | `sequence_encoder` |
+| `attention_pooling` | `AttentionPooling(embed_dim, num_heads, dropout=0.0, bias=True, need_weights=False, average_attn_weights=True)` | `pooling` |
+| `learned_pooling_query` | `LearnedQuery(embed_dim, num_queries=1, init_std=0.02)` | `pooling_query` |
+| `conditioned_pooling_query` | `ConditionedQuery(embed_dim, inputs, hidden_dims=[], activation="gelu")` | `pooling_query` |
+
+`patch_size` and `grid_size` accept an integer or an `[h, w]` pair. A learned
+positional table is resized for inputs whose patch grid differs from
+`grid_size`. `ConditionedQuery.inputs` maps each conditioning input name to
+either `{type: patch, in_channels, patch_size, reduce: mean|max}` (an image
+crop, patch-embedded and reduced to one vector) or
+`{type: linear, in_features}` (a `(B, in_features)` vector). The encodings are
+concatenated and passed through an MLP with activations between its layers.
+
+**Models.** Two composite resources, registered for both training and analysis
+sessions, depend on the roles above. They take no config (`{}`):
+
+- `patch_transformer` requires `patch_embedding`, `positional_embedding` and
+  `sequence_encoder`. `model(images, key_padding_mask=None)` returns
+  `(B, N, embed_dim)` tokens.
+- `pooled_patch_transformer` also requires `pooling_query` and `pooling`.
+  `model(images, key_padding_mask=None, **conditioning)` passes
+  `conditioning` to the query block and returns `(B, Q, embed_dim)`.
+
+In `setup()`, the model calls `build()` on each bound factory, attaches the
+results as submodules named after their roles (`model.patch_embedding`,
+`model.sequence_encoder`, ...), checks that every block has the same
+`embed_dim`, and moves itself to the session device. The model owns every
+weight, so `ddp`, the optimizer and `layer_inspector` see one module. Its
+checkpointed state is the built blocks themselves. A restored model therefore
+works without `setup()` (which `trained_model` relies on), and `setup()` keeps
+the restored blocks instead of building new ones. Factory config can't change
+during `--extend-session`, because factories are not extendable.
+
+Bind the model and each role through `component_bindings`, and configure the
+factories by name. This example reproduces an image encoder whose output is
+pooled by a query built from an object crop and its 2D location:
+
+```yaml
+component_bindings:
+  model: pooled_patch_transformer
+  patch_embedding: conv_patch_embedding
+  positional_embedding: learned_positional_embedding_2d
+  sequence_encoder: torch_transformer_encoder
+  pooling: attention_pooling
+  pooling_query: conditioned_pooling_query
+pooled_patch_transformer: {}
+conv_patch_embedding: {in_channels: 3, patch_size: 16, embed_dim: 256}
+learned_positional_embedding_2d: {grid_size: [14, 14], embed_dim: 256}
+torch_transformer_encoder: {embed_dim: 256, num_heads: 8, num_layers: 6}
+attention_pooling: {embed_dim: 256, num_heads: 4}
+conditioned_pooling_query:
+  embed_dim: 256
+  inputs:
+    obj_patch: {type: patch, in_channels: 3, patch_size: 16, reduce: mean}
+    obj_patch_location: {type: linear, in_features: 2}
+  hidden_dims: [256]
+```
+
+```python
+pooled = model(images, obj_patch=crops, obj_patch_location=locations)  # (B, 1, 256)
+```
+
+To use a learned (CLS-style) query instead, bind
+`pooling_query: learned_pooling_query` and configure it. To use fixed
+positions, bind `positional_embedding: sinusoidal_positional_embedding_2d`.
+To add your own block, subclass `ModuleFactory`, set `module_class`, register
+the subclass with `@resource(...)`, and bind it to the role. The module must
+follow the call signature in the role's description and expose `embed_dim`.
+
 ## Infinite samplers
 
 ### `InfiniteSampler`

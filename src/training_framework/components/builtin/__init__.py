@@ -18,6 +18,11 @@ from training_framework.components.builtin.observability import (
     Timer,
 )
 from training_framework.components.builtin.optimization import OptimizerHook
+from training_framework.components.builtin.transformer import (
+    ModuleFactory,
+    PatchTransformer,
+    PooledPatchTransformer,
+)
 
 __all__ = [
     "AnalysisDataManager",
@@ -28,7 +33,10 @@ __all__ = [
     "LayerCapture",
     "LayerInspector",
     "Logger",
+    "ModuleFactory",
     "OptimizerHook",
+    "PatchTransformer",
+    "PooledPatchTransformer",
     "Tensorboard",
     "Timer",
     "TrainedModel",
