@@ -12,6 +12,7 @@ from training_framework.components.builtin.transformer import (
     LearnedQuery,
     PatchEmbedding,
     SinusoidalPositionalEmbedding2D,
+    TokenReduction,
     TransformerEncoder,
 )
 
@@ -207,14 +208,36 @@ def test_learned_query_expands_over_batch_and_rejects_conditioning():
 def _object_query(**overrides):
     kwargs = {
         "embed_dim": 8,
-        "inputs": {
-            "obj_patch": {"type": "patch", "in_channels": 3, "patch_size": 4},
-            "obj_patch_location": {"type": "linear", "in_features": 2},
+        "encoders": {
+            "obj_patch": TokenReduction(PatchEmbedding(in_channels=3, patch_size=4, embed_dim=8)),
+            "obj_patch_location": nn.Linear(2, 8),
         },
         "hidden_dims": [16],
     }
     kwargs.update(overrides)
     return ConditionedQuery(**kwargs)
+
+
+def test_token_reduction_turns_tokens_into_one_vector_per_sample():
+    tokens = PatchEmbedding(in_channels=3, patch_size=4, embed_dim=8)
+    images = torch.randn(2, 3, 8, 8)
+
+    mean = TokenReduction(tokens, reduce="mean")
+    maximum = TokenReduction(tokens, reduce="max")
+
+    assert mean(images).shape == (2, 8)
+    torch.testing.assert_close(mean(images), tokens(images).mean(dim=1))
+    torch.testing.assert_close(maximum(images), tokens(images).amax(dim=1))
+    assert mean.embed_dim == 8  # forwarded from the wrapped module
+
+
+def test_token_reduction_validates_its_module_and_output():
+    with pytest.raises(TypeError, match="expects an nn.Module"):
+        TokenReduction("not a module")
+    with pytest.raises(ValueError, match="reduce must be one of"):
+        TokenReduction(nn.Identity(), reduce="sum")
+    with pytest.raises(ValueError, match=r"expects \(B, N, D\) tokens"):
+        TokenReduction(nn.Linear(4, 4))(torch.randn(2, 4))
 
 
 def test_conditioned_query_encodes_any_crop_size_into_one_query():
@@ -225,6 +248,16 @@ def test_conditioned_query_encodes_any_crop_size_into_one_query():
 
     assert query.shape == (2, 1, 8)
     assert module.input_names == ("obj_patch", "obj_patch_location")
+
+
+def test_conditioned_query_accepts_any_module_meeting_the_output_contract():
+    class Constant(nn.Module):
+        def forward(self, value):
+            return value.new_zeros(value.shape[0], 8)
+
+    module = ConditionedQuery(embed_dim=8, encoders={"anything": Constant()})
+
+    assert module(3, anything=torch.randn(3, 5)).shape == (3, 1, 8)
 
 
 def test_conditioned_query_mlp_is_non_linear():
@@ -245,17 +278,36 @@ def test_conditioned_query_rejects_missing_extra_or_mis_batched_inputs():
         module(3, obj_patch=patch, obj_patch_location=torch.randn(2, 2))
 
 
+def test_conditioned_query_rejects_encoders_with_the_wrong_output_size():
+    with pytest.raises(ValueError, match="out_features=4, but must produce 8"):
+        ConditionedQuery(embed_dim=8, encoders={"x": nn.Linear(2, 4)})
+    with pytest.raises(ValueError, match="embed_dim=4, but must produce 8"):
+        ConditionedQuery(
+            embed_dim=8,
+            encoders={"x": TokenReduction(PatchEmbedding(3, 4, 4))},
+        )
+
+    # A module that declares nothing is checked on its first forward pass.
+    undeclared = ConditionedQuery(embed_dim=8, encoders={"x": nn.Sequential(nn.Linear(2, 4))})
+    with pytest.raises(ValueError, match=r"must return \(3, 8\) features; got \(3, 4\)"):
+        undeclared(3, x=torch.randn(3, 2))
+
+
 @pytest.mark.parametrize(
-    "inputs, match",
+    "encoders, error, match",
     [
-        ({}, "non-empty mapping"),
-        ({"bad name": {"type": "linear", "in_features": 2}}, "identifiers"),
-        ({"x": {"type": "conv"}}, "type must be one of"),
-        ({"x": {"type": "linear"}}, "missing a required key"),
-        ({"x": {"type": "linear", "in_features": 2, "extra": 1}}, "unknown keys"),
-        ({"x": {"type": "patch", "in_channels": 3, "patch_size": 4, "reduce": "sum"}}, "reduce"),
+        ({}, ValueError, "non-empty mapping"),
+        ({"bad name": nn.Linear(2, 8)}, ValueError, "identifiers"),
+        ({"x": "not a module"}, TypeError, "must be an nn.Module"),
     ],
 )
-def test_conditioned_query_validates_input_specs(inputs, match):
-    with pytest.raises(ValueError, match=match):
-        ConditionedQuery(embed_dim=8, inputs=inputs)
+def test_conditioned_query_validates_encoders(encoders, error, match):
+    with pytest.raises(error, match=match):
+        ConditionedQuery(embed_dim=8, encoders=encoders)
+
+
+def test_conditioned_query_validates_hidden_dims_and_activation():
+    with pytest.raises(ValueError, match="hidden_dims"):
+        _object_query(hidden_dims=8)
+    with pytest.raises(ValueError, match="activation must be one of"):
+        _object_query(activation="swish")

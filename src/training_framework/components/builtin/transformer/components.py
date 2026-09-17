@@ -10,6 +10,7 @@ chooses which factory fills each role.
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -34,6 +35,7 @@ from training_framework.components.builtin.transformer.modules import (
     LearnedQuery,
     PatchEmbedding,
     SinusoidalPositionalEmbedding2D,
+    TokenReduction,
     TransformerEncoder,
 )
 
@@ -154,9 +156,72 @@ class LearnedPoolingQueryFactory(ModuleFactory):
     module_class = LearnedQuery
 
 
+def _resolve_module_class(dotted_path: str, context: str) -> type[nn.Module]:
+    """Import an `nn.Module` subclass from a fully-qualified dotted path.
+
+    `layer_inspector.module_types` resolves dotted paths the same way; the two
+    could share a helper if a third caller appears.
+    """
+    if not isinstance(dotted_path, str) or "." not in dotted_path:
+        raise ValueError(
+            f"{context} must be a fully-qualified dotted path (e.g. "
+            f"'torch.nn.Linear'); got {dotted_path!r}"
+        )
+    module_path, _, attr_name = dotted_path.rpartition(".")
+    try:
+        imported = importlib.import_module(module_path)
+    except ImportError as error:
+        raise ImportError(f"{context} {dotted_path!r} could not be imported: {error}") from error
+    try:
+        resolved = getattr(imported, attr_name)
+    except AttributeError as error:
+        raise ValueError(
+            f"{context} {dotted_path!r} has no attribute {attr_name!r} in "
+            f"module {module_path!r}"
+        ) from error
+    if not isinstance(resolved, type) or not issubclass(resolved, nn.Module):
+        raise TypeError(f"{context} {dotted_path!r} does not resolve to an nn.Module subclass")
+    return resolved
+
+
 @resource("conditioned_pooling_query")
 class ConditionedPoolingQueryFactory(ModuleFactory):
+    """Build a `ConditionedQuery` whose encoders come from config.
+
+    Each entry of `inputs` describes one conditioning input: `module` is a
+    dotted path to any `nn.Module` subclass, the optional `reduce` wraps it in
+    `TokenReduction`, and every other key is passed to its constructor. Each
+    encoder must produce `embed_dim` features.
+    """
+
     module_class = ConditionedQuery
+
+    def build(self) -> nn.Module:
+        config = deepcopy(self._config)
+        inputs = config.pop("inputs", None)
+        if not isinstance(inputs, Mapping) or not inputs:
+            raise ValueError(
+                "conditioned_pooling_query.inputs must be a non-empty mapping "
+                "of input name to encoder spec"
+            )
+        encoders = {
+            name: self._build_encoder(name, spec) for name, spec in inputs.items()
+        }
+        return ConditionedQuery(encoders=encoders, **config)
+
+    @staticmethod
+    def _build_encoder(name, spec) -> nn.Module:
+        context = f"conditioned_pooling_query.inputs.{name}"
+        if not isinstance(spec, Mapping):
+            raise ValueError(f"{context} must be a mapping; got {spec!r}")
+        kwargs = deepcopy(dict(spec))
+        reduce = kwargs.pop("reduce", None)
+        module_class = _resolve_module_class(kwargs.pop("module", None), f"{context}.module")
+        try:
+            encoder = module_class(**kwargs)
+        except (TypeError, ValueError) as error:
+            raise type(error)(f"Invalid {context} config: {error}") from error
+        return encoder if reduce is None else TokenReduction(encoder, reduce=reduce)
 
 
 # Composites depend on roles with no default implementation, so, like the other

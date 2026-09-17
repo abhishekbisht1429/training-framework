@@ -20,6 +20,7 @@ from training_framework.components.builtin.transformer.modules import (
     LearnedQuery,
     PatchEmbedding,
     SinusoidalPositionalEmbedding2D,
+    TokenReduction,
     TransformerEncoder,
 )
 
@@ -40,6 +41,7 @@ __all__ = [
     "PooledPatchTransformer",
     "SinusoidalPositionalEmbedding2D",
     "SinusoidalPositionalEmbedding2DFactory",
+    "TokenReduction",
     "TorchTransformerEncoderFactory",
     "TransformerEncoder",
 ]

@@ -300,7 +300,7 @@ transformer building blocks you can swap in and out. It has two layers:
 - `transformer/modules.py`: plain `nn.Module`s with no framework dependency
   (`PatchEmbedding`, `LearnedPositionalEmbedding2D`,
   `SinusoidalPositionalEmbedding2D`, `TransformerEncoder`, `AttentionPooling`,
-  `LearnedQuery`, `ConditionedQuery`, `ClassToken`).
+  `LearnedQuery`, `ConditionedQuery`, `TokenReduction`, `ClassToken`).
 - `transformer/components.py`: resources that put those modules together into
   a model.
 
@@ -318,15 +318,43 @@ mistakes show up before a session runs. Factories own no weights.
 | `torch_transformer_encoder` | `TransformerEncoder(embed_dim, num_heads, num_layers, dim_feedforward=2048, dropout=0.1, activation="relu", norm_first=False, layer_norm_eps=1e-5, final_norm=False)` | `sequence_encoder` |
 | `attention_pooling` | `AttentionPooling(embed_dim, num_heads, dropout=0.0, bias=True, need_weights=False, average_attn_weights=True)` | `pooling` |
 | `learned_pooling_query` | `LearnedQuery(embed_dim, num_queries=1, init_std=0.02)` | `pooling_query` |
-| `conditioned_pooling_query` | `ConditionedQuery(embed_dim, inputs, hidden_dims=[], activation="gelu")` | `pooling_query` |
+| `conditioned_pooling_query` | `ConditionedQuery(embed_dim, encoders, hidden_dims=[], activation="gelu")` | `pooling_query` |
 
 `patch_size` and `grid_size` accept an integer or an `[h, w]` pair. A learned
 positional table is resized for inputs whose patch grid differs from
-`grid_size`. `ConditionedQuery.inputs` maps each conditioning input name to
-either `{type: patch, in_channels, patch_size, reduce: mean|max}` (an image
-crop, patch-embedded and reduced to one vector) or
-`{type: linear, in_features}` (a `(B, in_features)` vector). The encodings are
-concatenated and passed through an MLP with activations between its layers.
+`grid_size`.
+
+`ConditionedQuery` builds one query per sample from named conditioning
+inputs. Each input has its own encoder module, which must return
+`(B, embed_dim)` features for that input; the encodings are concatenated and
+passed through an MLP with activations between its layers. In Python you pass
+the modules directly; in config, `conditioned_pooling_query.inputs` describes
+each one:
+
+```yaml
+conditioned_pooling_query:
+  embed_dim: 256
+  inputs:
+    obj_patch:                 # the keyword this input is passed as
+      module: training_framework.components.builtin.transformer.PatchEmbedding
+      in_channels: 3           # any other key goes to the module constructor
+      patch_size: 16
+      embed_dim: 256
+      reduce: mean             # optional: wrap in TokenReduction (mean|max)
+    obj_patch_location:
+      module: torch.nn.Linear
+      in_features: 2
+      out_features: 256
+  hidden_dims: [256]
+```
+
+`module` is a dotted path to any `nn.Module` subclass, including your own, so
+conditioning is not limited to the built-in blocks. `reduce` wraps the module
+in `TokenReduction`, which turns `(B, N, D)` tokens into one `(B, D)` vector —
+that is how a patch encoder, or any other token-producing module, meets the
+contract. An encoder that declares `embed_dim` or `out_features` is checked
+when the query is built; any other module is checked on its first forward
+pass.
 
 **Models.** Two composite resources, registered for both training and analysis
 sessions, depend on the roles above. Their only config key is `class_token`
@@ -386,8 +414,16 @@ attention_pooling: {embed_dim: 256, num_heads: 4}
 conditioned_pooling_query:
   embed_dim: 256
   inputs:
-    obj_patch: {type: patch, in_channels: 3, patch_size: 16, reduce: mean}
-    obj_patch_location: {type: linear, in_features: 2}
+    obj_patch:
+      module: training_framework.components.builtin.transformer.PatchEmbedding
+      in_channels: 3
+      patch_size: 16
+      embed_dim: 256
+      reduce: mean
+    obj_patch_location:
+      module: torch.nn.Linear
+      in_features: 2
+      out_features: 256
   hidden_dims: [256]
 ```
 

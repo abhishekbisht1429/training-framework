@@ -32,6 +32,7 @@ from training_framework.components.builtin.transformer import (
     PooledPatchTransformer,
     SinusoidalPositionalEmbedding2D,
     SinusoidalPositionalEmbedding2DFactory,
+    TokenReduction,
     TorchTransformerEncoderFactory,
     TransformerEncoder,
 )
@@ -56,8 +57,18 @@ FACTORY_CONFIGS = {
     "conditioned_pooling_query": {
         "embed_dim": EMBED_DIM,
         "inputs": {
-            "obj_patch": {"type": "patch", "in_channels": 3, "patch_size": 4},
-            "obj_patch_location": {"type": "linear", "in_features": 2},
+            "obj_patch": {
+                "module": "training_framework.components.builtin.transformer.PatchEmbedding",
+                "in_channels": 3,
+                "patch_size": 4,
+                "embed_dim": EMBED_DIM,
+                "reduce": "mean",
+            },
+            "obj_patch_location": {
+                "module": "torch.nn.Linear",
+                "in_features": 2,
+                "out_features": EMBED_DIM,
+            },
         },
         "hidden_dims": [EMBED_DIM],
     },
@@ -211,13 +222,71 @@ def test_factory_reports_invalid_config_at_construction():
 
 
 def test_factory_config_is_isolated_from_callers():
-    config = {"embed_dim": EMBED_DIM, "inputs": {"x": {"type": "linear", "in_features": 2}}}
+    config = {
+        "embed_dim": EMBED_DIM,
+        "inputs": {
+            "x": {"module": "torch.nn.Linear", "in_features": 2, "out_features": EMBED_DIM},
+        },
+    }
     factory = ConditionedPoolingQueryFactory(config)
 
     config["inputs"]["x"]["in_features"] = 5
     factory.config["inputs"]["x"]["in_features"] = 7
 
     assert factory.build().encoders["x"].in_features == 2
+
+
+def test_conditioned_pooling_query_builds_encoders_from_dotted_paths():
+    factory = ConditionedPoolingQueryFactory(FACTORY_CONFIGS["conditioned_pooling_query"])
+
+    query = factory.build()
+
+    assert isinstance(query.encoders["obj_patch"], TokenReduction)
+    assert isinstance(query.encoders["obj_patch"].module, PatchEmbedding)
+    assert query.encoders["obj_patch"].reduce == "mean"
+    assert isinstance(query.encoders["obj_patch_location"], nn.Linear)
+    assert query(2, **_conditioning()).shape == (2, 1, EMBED_DIM)
+
+
+def test_conditioned_pooling_query_accepts_any_nn_module_encoder():
+    factory = ConditionedPoolingQueryFactory({
+        "embed_dim": EMBED_DIM,
+        "inputs": {
+            "sequence": {
+                "module": "torch.nn.Embedding",
+                "num_embeddings": 5,
+                "embedding_dim": EMBED_DIM,
+                "reduce": "max",
+            },
+        },
+    })
+
+    query = factory.build()
+
+    assert query(2, sequence=torch.tensor([[0, 1, 2], [3, 4, 0]])).shape == (2, 1, EMBED_DIM)
+
+
+@pytest.mark.parametrize(
+    "inputs, error, match",
+    [
+        ({}, ValueError, "inputs must be a non-empty mapping"),
+        ({"x": "nope"}, ValueError, "inputs.x must be a mapping"),
+        ({"x": {"in_features": 2}}, ValueError, "inputs.x.module must be a fully-qualified"),
+        ({"x": {"module": "Linear"}}, ValueError, "fully-qualified dotted path"),
+        ({"x": {"module": "no_such_module_xyz.Thing"}}, ImportError, "could not be imported"),
+        ({"x": {"module": "torch.nn.NotAReal"}}, ValueError, "has no attribute"),
+        ({"x": {"module": "torch.optim.SGD"}}, TypeError, "does not resolve to an nn.Module"),
+        ({"x": {"module": "torch.nn.Linear"}}, TypeError, "Invalid .*inputs.x config"),
+        (
+            {"x": {"module": "torch.nn.Linear", "in_features": 2, "out_features": 3}},
+            ValueError,
+            "must produce 8 features",
+        ),
+    ],
+)
+def test_conditioned_pooling_query_reports_bad_input_specs(inputs, error, match):
+    with pytest.raises(error, match=match):
+        ConditionedPoolingQueryFactory({"embed_dim": EMBED_DIM, "inputs": inputs})
 
 
 def test_custom_module_factory_subclass():

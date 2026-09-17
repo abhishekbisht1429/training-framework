@@ -407,31 +407,62 @@ class LearnedQuery(nn.Module):
         return self.queries.expand(batch_size, -1, -1)
 
 
+class TokenReduction(nn.Module):
+    """Reduce a wrapped module's `(B, N, D)` tokens to one `(B, D)` vector.
+
+    Lets any token-producing encoder (a patch embedding, a small transformer,
+    your own module) satisfy an interface that expects one vector per sample.
+    """
+
+    _REDUCTIONS = ("mean", "max")
+
+    def __init__(self, module: nn.Module, reduce: str = "mean") -> None:
+        super().__init__()
+        if not isinstance(module, nn.Module):
+            raise TypeError(f"TokenReduction expects an nn.Module; got {module!r}")
+        self.module = module
+        self._reduce = _choice(reduce, "reduce", self._REDUCTIONS)
+
+    @property
+    def reduce(self) -> str:
+        return self._reduce
+
+    @property
+    def embed_dim(self) -> int | None:
+        return getattr(self.module, "embed_dim", None)
+
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        tokens = self.module(*args, **kwargs)
+        if tokens.ndim != 3:
+            raise ValueError(
+                f"TokenReduction expects (B, N, D) tokens, got {tuple(tokens.shape)}"
+            )
+        return tokens.mean(dim=1) if self._reduce == "mean" else tokens.amax(dim=1)
+
+
 class ConditionedQuery(nn.Module):
     """Build one query per sample from named conditioning inputs.
 
-    `inputs` maps each input name to an encoder spec:
-    - `{"type": "patch", "in_channels", "patch_size", "reduce": "mean"|"max"}`
-      encodes a `(B, C, H, W)` image crop and reduces its patch tokens.
-    - `{"type": "linear", "in_features"}` encodes a `(B, in_features)` vector.
-
-    The encodings are concatenated in `inputs` order and passed through an MLP
+    `encoders` maps each conditioning input name to a module. Each module is
+    called with that input's value and must return `(B, embed_dim)` features;
+    wrap a token-producing module in `TokenReduction` to satisfy this. The
+    encodings are concatenated in `encoders` order and passed through an MLP
     with `hidden_dims` hidden layers. Output shape is `(B, 1, embed_dim)`.
     """
-
-    _INPUT_TYPES = ("patch", "linear")
 
     def __init__(
             self,
             embed_dim: int,
-            inputs: Mapping[str, Mapping],
+            encoders: Mapping[str, nn.Module],
             hidden_dims: Sequence[int] = (),
             activation: str = "gelu",
     ) -> None:
         super().__init__()
         self._embed_dim = _positive_int(embed_dim, "embed_dim")
-        if not isinstance(inputs, Mapping) or not inputs:
-            raise ValueError("inputs must be a non-empty mapping of input name to encoder spec")
+        if not isinstance(encoders, Mapping) or not encoders:
+            raise ValueError(
+                "encoders must be a non-empty mapping of input name to nn.Module"
+            )
         if isinstance(hidden_dims, (str, bytes)) or not isinstance(hidden_dims, Sequence):
             raise ValueError(f"hidden_dims must be a list of positive integers; got {hidden_dims!r}")
         hidden_dims = [
@@ -443,9 +474,8 @@ class ConditionedQuery(nn.Module):
         ]
 
         self.encoders = nn.ModuleDict()
-        self._reductions: dict[str, str] = {}
-        for name, spec in inputs.items():
-            self.encoders[self._input_name(name)] = self._build_encoder(name, spec)
+        for name, encoder in encoders.items():
+            self.encoders[self._checked_name(name)] = self._checked_encoder(name, encoder)
 
         dims = [len(self.encoders) * self._embed_dim, *hidden_dims, self._embed_dim]
         layers: list[nn.Module] = []
@@ -456,38 +486,24 @@ class ConditionedQuery(nn.Module):
         self.projection = nn.Sequential(*layers)
 
     @staticmethod
-    def _input_name(name) -> str:
+    def _checked_name(name) -> str:
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError(f"input names must be Python identifiers; got {name!r}")
         return name
 
-    def _build_encoder(self, name: str, spec) -> nn.Module:
-        if not isinstance(spec, Mapping):
-            raise ValueError(f"inputs.{name} must be a mapping; got {spec!r}")
-        spec = dict(spec)
-        input_type = _choice(spec.pop("type", None), f"inputs.{name}.type", self._INPUT_TYPES)
-        if input_type == "patch":
-            self._reductions[name] = _choice(
-                spec.pop("reduce", "mean"),
-                f"inputs.{name}.reduce",
-                ("mean", "max"),
-            )
-            allowed = {"in_channels", "patch_size", "bias"}
-        else:
-            allowed = {"in_features", "bias"}
-        unknown = set(spec) - allowed
-        if unknown:
-            raise ValueError(f"inputs.{name} has unknown keys: {sorted(unknown)}")
-        try:
-            if input_type == "patch":
-                return PatchEmbedding(embed_dim=self._embed_dim, **spec)
-            return nn.Linear(
-                _positive_int(spec["in_features"], f"inputs.{name}.in_features"),
-                self._embed_dim,
-                bias=bool(spec.get("bias", True)),
-            )
-        except (KeyError, TypeError) as error:
-            raise ValueError(f"inputs.{name} is missing a required key: {error}") from error
+    def _checked_encoder(self, name: str, encoder) -> nn.Module:
+        if not isinstance(encoder, nn.Module):
+            raise TypeError(f"encoders.{name} must be an nn.Module; got {encoder!r}")
+        # Modules that declare their own output size are checked up front;
+        # the rest are checked on their first forward pass.
+        for attribute in ("embed_dim", "out_features"):
+            declared = getattr(encoder, attribute, None)
+            if isinstance(declared, int) and declared != self._embed_dim:
+                raise ValueError(
+                    f"encoders.{name} has {attribute}={declared}, but must "
+                    f"produce {self._embed_dim} features"
+                )
+        return encoder
 
     @property
     def embed_dim(self) -> int:
@@ -514,11 +530,11 @@ class ConditionedQuery(nn.Module):
                     f"{value.shape[0]}, expected {batch_size}"
                 )
             features = encoder(value)
-            if name in self._reductions:
-                features = (
-                    features.mean(dim=1)
-                    if self._reductions[name] == "mean"
-                    else features.amax(dim=1)
+            if features.shape != (batch_size, self._embed_dim):
+                raise ValueError(
+                    f"Encoder for conditioning input '{name}' must return "
+                    f"({batch_size}, {self._embed_dim}) features; got "
+                    f"{tuple(features.shape)}"
                 )
             encoded.append(features)
 
@@ -533,5 +549,6 @@ __all__ = [
     "LearnedQuery",
     "PatchEmbedding",
     "SinusoidalPositionalEmbedding2D",
+    "TokenReduction",
     "TransformerEncoder",
 ]
