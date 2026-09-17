@@ -83,6 +83,62 @@ def test_learned_positional_embedding_defaults_to_zero_init():
     assert torch.count_nonzero(module.table) == 0
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        LearnedPositionalEmbedding2D(grid_size=2, embed_dim=4),
+        SinusoidalPositionalEmbedding2D(embed_dim=4),
+    ],
+    ids=["learned", "sinusoidal"],
+)
+@pytest.mark.parametrize(
+    "shape",
+    [(3, 1, 4), (3, 4, 1), (3, 5, 4), (3, 4)],
+    ids=["one_token", "one_feature", "wrong_token_count", "missing_batch_dim"],
+)
+def test_positional_embeddings_reject_token_shapes_that_would_broadcast(module, shape):
+    # A 2x2 grid needs exactly (B, 4, 4); singleton dimensions would otherwise
+    # broadcast silently into the wrong shape.
+    with pytest.raises(ValueError, match="tokens for this grid size"):
+        module(torch.zeros(*shape), (2, 2))
+
+
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), float("-inf")],
+)
+def test_non_finite_numbers_are_rejected(value):
+    with pytest.raises(ValueError, match="finite non-negative number"):
+        LearnedPositionalEmbedding2D(grid_size=2, embed_dim=4, init_std=value)
+    with pytest.raises(ValueError, match="finite non-negative number"):
+        ClassToken(embed_dim=4, init_std=value)
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        AttentionPooling(embed_dim=4, num_heads=2, dropout=value)
+    with pytest.raises(ValueError, match="finite non-negative number"):
+        SinusoidalPositionalEmbedding2D(embed_dim=8, temperature=value)
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        TransformerEncoder(embed_dim=8, num_heads=2, num_layers=1, dropout=value)
+    with pytest.raises(ValueError, match="finite positive number"):
+        TransformerEncoder(embed_dim=8, num_heads=2, num_layers=1, layer_norm_eps=value)
+
+
+@pytest.mark.parametrize("dropout", [-0.1, 1.5, 5])
+def test_dropout_outside_zero_to_one_is_rejected(dropout):
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        AttentionPooling(embed_dim=8, num_heads=2, dropout=dropout)
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        TransformerEncoder(embed_dim=8, num_heads=2, num_layers=1, dropout=dropout)
+
+
+@pytest.mark.parametrize("eps", [0, -1e-5])
+def test_non_positive_layer_norm_eps_is_rejected(eps):
+    with pytest.raises(ValueError, match="layer_norm_eps must be a finite positive number"):
+        TransformerEncoder(embed_dim=8, num_heads=2, num_layers=1, layer_norm_eps=eps)
+    with pytest.raises(ValueError, match="layer_norm_eps must be a finite positive number"):
+        TransformerEncoder(
+            embed_dim=8, num_heads=2, num_layers=1, layer_norm_eps=eps, final_norm=True,
+        )
+
+
 def test_learned_positional_embedding_validates_arguments():
     with pytest.raises(ValueError, match="init must be one of"):
         LearnedPositionalEmbedding2D(grid_size=2, embed_dim=4, init="ones")
@@ -299,6 +355,9 @@ def test_conditioned_query_rejects_encoders_with_the_wrong_output_size():
         ({}, ValueError, "non-empty mapping"),
         ({"bad name": nn.Linear(2, 8)}, ValueError, "identifiers"),
         ({"x": "not a module"}, TypeError, "must be an nn.Module"),
+        ({"forward": nn.Linear(2, 8)}, ValueError, "clashes with an attribute"),
+        ({"training": nn.Linear(2, 8)}, ValueError, "clashes with an attribute"),
+        ({"keys": nn.Linear(2, 8)}, ValueError, "clashes with an attribute"),
     ],
 )
 def test_conditioned_query_validates_encoders(encoders, error, match):

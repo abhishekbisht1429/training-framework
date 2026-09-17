@@ -6,6 +6,7 @@ on its own. `components.py` exposes them as pluggable resources.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 
 import torch
@@ -20,8 +21,37 @@ def _positive_int(value, name: str) -> int:
 
 
 def _non_negative_float(value, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        raise ValueError(f"{name} must be a non-negative number; got {value!r}")
+    if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+    ):
+        raise ValueError(
+            f"{name} must be a finite non-negative number; got {value!r}"
+        )
+    return float(value)
+
+
+def _positive_float(value, name: str) -> float:
+    if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+    ):
+        raise ValueError(f"{name} must be a finite positive number; got {value!r}")
+    return float(value)
+
+
+def _probability(value, name: str) -> float:
+    if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 <= value <= 1
+    ):
+        raise ValueError(f"{name} must be a number between 0 and 1; got {value!r}")
     return float(value)
 
 
@@ -45,6 +75,21 @@ def _choice(value, name: str, choices: Sequence[str]) -> str:
     if value not in choices:
         raise ValueError(f"{name} must be one of {list(choices)}; got {value!r}")
     return value
+
+
+def _check_token_shape(
+        tokens: torch.Tensor,
+        embeddings: torch.Tensor,
+        embed_dim: int,
+) -> None:
+    """Reject token shapes that would broadcast against `embeddings` instead
+    of lining up with them, e.g. a singleton token or feature dimension."""
+    expected = (embeddings.shape[1], embed_dim)
+    if tokens.ndim != 3 or tuple(tokens.shape[1:]) != expected:
+        raise ValueError(
+            f"Expected (B, {expected[0]}, {expected[1]}) tokens for this grid "
+            f"size, got {tuple(tokens.shape)}"
+        )
 
 
 _ACTIVATIONS: dict[str, Callable[[], nn.Module]] = {
@@ -177,7 +222,9 @@ class LearnedPositionalEmbedding2D(nn.Module):
         return table.flatten(2).transpose(1, 2)
 
     def forward(self, tokens: torch.Tensor, grid_size: Sequence[int]) -> torch.Tensor:
-        return tokens + self.embeddings(grid_size)
+        embeddings = self.embeddings(grid_size)
+        _check_token_shape(tokens, embeddings, self._embed_dim)
+        return tokens + embeddings
 
 
 class SinusoidalPositionalEmbedding2D(nn.Module):
@@ -227,11 +274,13 @@ class SinusoidalPositionalEmbedding2D(nn.Module):
         return embeddings.unsqueeze(0).to(dtype or torch.get_default_dtype())
 
     def forward(self, tokens: torch.Tensor, grid_size: Sequence[int]) -> torch.Tensor:
-        return tokens + self.embeddings(
+        embeddings = self.embeddings(
             grid_size,
             device=tokens.device,
             dtype=tokens.dtype,
         )
+        _check_token_shape(tokens, embeddings, self._embed_dim)
+        return tokens + embeddings
 
 
 class ClassToken(nn.Module):
@@ -298,16 +347,19 @@ class TransformerEncoder(nn.Module):
             d_model=self._embed_dim,
             nhead=num_heads,
             dim_feedforward=_positive_int(dim_feedforward, "dim_feedforward"),
-            dropout=_non_negative_float(dropout, "dropout"),
+            dropout=_probability(dropout, "dropout"),
             activation=_choice(activation, "activation", ("relu", "gelu")),
-            layer_norm_eps=float(layer_norm_eps),
+            layer_norm_eps=_positive_float(layer_norm_eps, "layer_norm_eps"),
             batch_first=True,
             norm_first=bool(norm_first),
         )
         self.encoder = nn.TransformerEncoder(
             layer,
             num_layers=_positive_int(num_layers, "num_layers"),
-            norm=nn.LayerNorm(self._embed_dim, eps=float(layer_norm_eps)) if final_norm else None,
+            norm=(
+                nn.LayerNorm(self._embed_dim, eps=_positive_float(layer_norm_eps, "layer_norm_eps"))
+                if final_norm else None
+            ),
             enable_nested_tensor=False,
         )
 
@@ -353,7 +405,7 @@ class AttentionPooling(nn.Module):
         self.attention = nn.MultiheadAttention(
             self._embed_dim,
             num_heads,
-            dropout=_non_negative_float(dropout, "dropout"),
+            dropout=_probability(dropout, "dropout"),
             bias=bool(bias),
             batch_first=True,
         )
@@ -440,6 +492,10 @@ class TokenReduction(nn.Module):
         return tokens.mean(dim=1) if self._reduce == "mean" else tokens.amax(dim=1)
 
 
+# Names nn.ModuleDict already uses; a conditioning input cannot take one.
+_MODULE_DICT_ATTRIBUTES = frozenset(dir(nn.ModuleDict()))
+
+
 class ConditionedQuery(nn.Module):
     """Build one query per sample from named conditioning inputs.
 
@@ -493,6 +549,11 @@ class ConditionedQuery(nn.Module):
     def _checked_name(name) -> str:
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError(f"input names must be Python identifiers; got {name!r}")
+        if name in _MODULE_DICT_ATTRIBUTES:
+            raise ValueError(
+                f"input name {name!r} clashes with an attribute of the "
+                "nn.ModuleDict holding the encoders; choose another name"
+            )
         return name
 
     def _checked_encoder(self, name: str, encoder) -> nn.Module:
