@@ -206,6 +206,34 @@ def test_layer_inspector_selects_union_of_name_and_type_matches_without_duplicat
         inspector.teardown(session)
 
 
+def test_layer_inspector_exposes_selected_layers_for_weight_inspection():
+    model = _InspectionModel({})
+    inspector = LayerInspector({
+        "name_patterns": [r"^attention$", r"^projection$"],
+    })
+    session = _FakeSession(model)
+    assert dict(inspector.layers) == {}
+
+    inspector.setup(session)
+    try:
+        layers = inspector.layers
+        assert list(layers) == list(inspector.matched_layer_names)
+        assert layers["attention"] is model.attention
+        assert layers["projection"] is model.projection
+        # Parameters are readable without a forward pass.
+        assert layers["attention"].scale is model.attention.scale
+        assert dict(layers["projection"].named_parameters()).keys() == {
+            "weight",
+            "bias",
+        }
+        with pytest.raises(TypeError):
+            layers["attention"] = model.projection  # type: ignore[index]
+    finally:
+        inspector.teardown(session)
+
+    assert dict(inspector.layers) == {}
+
+
 def test_layer_inspector_raises_when_no_layer_matches():
     model = _InspectionModel({})
     inspector = LayerInspector({"name_patterns": [r"^no_such_layer$"]})
@@ -213,6 +241,7 @@ def test_layer_inspector_raises_when_no_layer_matches():
 
     with pytest.raises(ValueError, match="matched no layers"):
         inspector.setup(session)
+    assert dict(inspector.layers) == {}
 
 
 def test_layer_inspector_captures_input_args_kwargs_and_output_per_forward_pass():
@@ -230,6 +259,9 @@ def test_layer_inspector_captures_input_args_kwargs_and_output_per_forward_pass(
         assert capture.input_args == (torch.tensor(3.0),)
         assert capture.input_kwargs == {"mask": mask}
         torch.testing.assert_close(capture.output, torch.tensor(6.5))
+        assert capture.module is model.attention
+        assert capture.module is inspector.layers["attention"]
+        assert capture.module.scale is model.attention.scale
     finally:
         inspector.teardown(session)
 
@@ -279,6 +311,7 @@ def test_layer_inspector_rolls_back_partial_hook_registration_on_setup_failure(
         inspector.setup(session)
 
     assert len(model.attention._forward_hooks) == 0
+    assert dict(inspector.layers) == {}
 
 
 # -- per-iteration clearing, driven through a real AnalysisSession -----

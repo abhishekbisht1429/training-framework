@@ -250,11 +250,26 @@ model(some_input)  # triggers the registered forward hooks
 
 for layer_name, captures in inspector.captures.items():
     for capture in captures:
-        ...  # capture.input_args, capture.input_kwargs, capture.output
+        ...  # capture.input_args, capture.input_kwargs, capture.output,
+             # capture.module (the layer itself, e.g. capture.module.weight)
 ```
 
 `inspector.matched_layer_names` is the full, static set of layers selected
-during `setup()`. `inspector.captures` is sparse — keyed only by layers that
+during `setup()`. `inspector.layers` maps each of those names to its live
+module (read-only mapping, emptied on teardown), so a Step can read a layer's
+parameters directly without a forward pass:
+
+```python
+for layer_name, layer in inspector.layers.items():
+    for param_name, param in layer.named_parameters(recurse=False):
+        ...  # e.g. param.detach().cpu() for a weight histogram
+```
+
+These are the trained model's own modules, not copies; don't modify them in
+place. Each capture also carries the same module as `capture.module`, so a
+Step can read the weights of the layer that produced `capture.output` without
+going back to the inspector. `layers` remains the way to reach weights of
+layers that did not run a forward pass this iteration. `inspector.captures` is sparse — keyed only by layers that
 actually ran a forward pass — and accumulates every forward pass within the
 current iteration, in call order; it is cleared automatically at each
 iteration boundary (backed by `session.iteration_context`), so an iteration

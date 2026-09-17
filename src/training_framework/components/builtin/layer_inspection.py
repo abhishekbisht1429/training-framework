@@ -4,6 +4,7 @@ import importlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from torch import nn
@@ -22,13 +23,19 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class LayerCapture:
-    """One forward-hook observation of a single tracked layer."""
+    """One forward-hook observation of a single tracked layer.
+
+    ``module`` is a live reference to the layer that ran (not a copy), so its
+    parameters, e.g. ``capture.module.weight``, can be read alongside the
+    captured tensors.
+    """
 
     layer_name: str
     module_type: str
     input_args: tuple[Any, ...]
     input_kwargs: dict[str, Any]
     output: Any
+    module: nn.Module
 
 
 def _resolve_module_type(dotted_path: str) -> type[nn.Module]:
@@ -115,6 +122,7 @@ class LayerInspector(Resource):
         self._always_call = bool(config.get("always_call", False))
 
         self._matched_layer_names: tuple[str, ...] = ()
+        self._layers: dict[str, nn.Module] = {}
         self._handles: dict[str, Any] = {}
         self._session: Any = None
 
@@ -122,6 +130,18 @@ class LayerInspector(Resource):
     def matched_layer_names(self) -> tuple[str, ...]:
         """The full set of layer names selected during `setup`."""
         return self._matched_layer_names
+
+    @property
+    def layers(self) -> Mapping[str, nn.Module]:
+        """Read-only mapping of each selected layer name to its live module.
+
+        Use it to inspect a layer's parameters directly, e.g.
+        ``inspector.layers[name].weight`` or ``named_parameters()``; no
+        forward pass is needed. Populated by `setup` in `matched_layer_names`
+        order and emptied by `teardown`. The modules are the trained model's
+        own, so avoid modifying them in place.
+        """
+        return MappingProxyType(self._layers)
 
     @property
     @requires_context
@@ -169,6 +189,7 @@ class LayerInspector(Resource):
             raise
 
         self._matched_layer_names = tuple(matched.keys())
+        self._layers = matched
 
     def _make_hook(self, layer_name: str):
         def hook(module: nn.Module, args, kwargs, output):
@@ -178,6 +199,7 @@ class LayerInspector(Resource):
                 input_args=args,
                 input_kwargs=dict(kwargs),
                 output=output,
+                module=module,
             )
             self.captures.setdefault(layer_name, []).append(capture)
 
@@ -194,4 +216,5 @@ class LayerInspector(Resource):
             handle.remove()
         self._handles = {}
         self._matched_layer_names = ()
+        self._layers = {}
         self._session = None
