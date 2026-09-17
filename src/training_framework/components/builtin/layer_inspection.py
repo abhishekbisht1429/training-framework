@@ -156,6 +156,23 @@ class LayerInspector(Resource):
             self._CAPTURE_CONTEXT_KEY, {}
         )
 
+    def last_capture(self, layer_name: str) -> LayerCapture | None:
+        """The most recent capture of `layer_name` this iteration, if any.
+
+        Convenience for the common one-forward-pass-per-iteration case; use
+        `captures[layer_name]` when a layer may run several times. Returns
+        None if the layer did not run this iteration, and raises KeyError if
+        `layer_name` is not one of `matched_layer_names`.
+        """
+        captures = self.captures
+        if layer_name not in self._layers:
+            raise KeyError(
+                f"'{layer_name}' is not a layer selected by layer_inspector; "
+                f"selected layers: {list(self._matched_layer_names)}"
+            )
+        layer_captures = captures.get(layer_name)
+        return layer_captures[-1] if layer_captures else None
+
     def _selects(self, name: str, module: nn.Module) -> bool:
         if self._module_types and isinstance(module, self._module_types):
             return True

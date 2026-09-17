@@ -244,6 +244,29 @@ def test_layer_inspector_raises_when_no_layer_matches():
     assert dict(inspector.layers) == {}
 
 
+def test_last_capture_returns_latest_call_none_or_rejects_unknown_layer():
+    model = _InspectionModel({})
+    inspector = LayerInspector({
+        "name_patterns": [r"^attention$", r"^projection$"],
+    })
+    session = _FakeSession(model)
+    inspector.setup(session)
+    try:
+        assert inspector.last_capture("attention") is None
+
+        model(torch.tensor(1.0))
+        model(torch.tensor(2.0))
+
+        latest = inspector.last_capture("attention")
+        assert latest is inspector.captures["attention"][-1]
+        assert latest.input_args == (torch.tensor(2.0),)
+
+        with pytest.raises(KeyError, match="'atention' is not a layer selected"):
+            inspector.last_capture("atention")
+    finally:
+        inspector.teardown(session)
+
+
 def test_layer_inspector_captures_input_args_kwargs_and_output_per_forward_pass():
     model = _InspectionModel({})
     inspector = LayerInspector({"name_patterns": [r"^attention$"]})

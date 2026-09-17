@@ -269,12 +269,21 @@ These are the trained model's own modules, not copies; don't modify them in
 place. Each capture also carries the same module as `capture.module`, so a
 Step can read the weights of the layer that produced `capture.output` without
 going back to the inspector. `layers` remains the way to reach weights of
-layers that did not run a forward pass this iteration. `inspector.captures` is sparse — keyed only by layers that
+layers that did not run a forward pass this iteration.
+
+`inspector.captures` is sparse — keyed only by layers that
 actually ran a forward pass — and accumulates every forward pass within the
 current iteration, in call order; it is cleared automatically at each
 iteration boundary (backed by `session.iteration_context`), so an iteration
 that never triggers a forward pass sees an empty mapping rather than stale
 data from a previous one.
+
+Each value is a list because a layer can run several times in one iteration
+(multiple forward passes, a reused module, step-by-step decoding). When you
+run one forward pass per iteration, `inspector.last_capture(layer_name)`
+returns the latest `LayerCapture` for that layer, or `None` if it did not run
+this iteration; it raises `KeyError` for a name that is not in
+`matched_layer_names`.
 
 Captured `input_args`/`input_kwargs`/`output` are live tensor references, not
 detached copies — gradients remain enabled by default in analysis sessions,
