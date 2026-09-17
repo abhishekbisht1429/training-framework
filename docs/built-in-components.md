@@ -327,7 +327,8 @@ positional table is resized for inputs whose patch grid differs from
 `ConditionedQuery` builds one query per sample from named conditioning
 inputs. Each input has its own encoder module, which must return
 `(B, embed_dim)` features for that input; the encodings are concatenated and
-passed through an MLP with activations between its layers. In Python you pass
+passed through an MLP with activations between its layers (`activation: null`
+or `none` makes the projection purely linear). In Python you pass
 the modules directly; in config, `conditioned_pooling_query.inputs` describes
 each one:
 

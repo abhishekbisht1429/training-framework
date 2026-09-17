@@ -306,6 +306,15 @@ def test_conditioned_query_validates_encoders(encoders, error, match):
         ConditionedQuery(embed_dim=8, encoders=encoders)
 
 
+@pytest.mark.parametrize("activation", [None, "none"])
+def test_conditioned_query_activations_are_optional(activation):
+    module = _object_query(hidden_dims=[16], activation=activation)
+
+    assert [type(layer) for layer in module.projection] == [nn.Linear, nn.Linear]
+    assert module(2, obj_patch=torch.randn(2, 3, 4, 4),
+                  obj_patch_location=torch.randn(2, 2)).shape == (2, 1, 8)
+
+
 def test_conditioned_query_validates_hidden_dims_and_activation():
     with pytest.raises(ValueError, match="hidden_dims"):
         _object_query(hidden_dims=8)

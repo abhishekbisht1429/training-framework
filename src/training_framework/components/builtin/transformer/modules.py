@@ -447,7 +447,8 @@ class ConditionedQuery(nn.Module):
     called with that input's value and must return `(B, embed_dim)` features;
     wrap a token-producing module in `TokenReduction` to satisfy this. The
     encodings are concatenated in `encoders` order and passed through an MLP
-    with `hidden_dims` hidden layers. Output shape is `(B, 1, embed_dim)`.
+    with `hidden_dims` hidden layers. `activation` may be `None` (or "none")
+    for a purely linear projection. Output shape is `(B, 1, embed_dim)`.
     """
 
     def __init__(
@@ -455,7 +456,7 @@ class ConditionedQuery(nn.Module):
             embed_dim: int,
             encoders: Mapping[str, nn.Module],
             hidden_dims: Sequence[int] = (),
-            activation: str = "gelu",
+            activation: str | None = "gelu",
     ) -> None:
         super().__init__()
         self._embed_dim = _positive_int(embed_dim, "embed_dim")
@@ -469,9 +470,12 @@ class ConditionedQuery(nn.Module):
             _positive_int(dim, f"hidden_dims[{index}]")
             for index, dim in enumerate(hidden_dims)
         ]
-        make_activation = _ACTIVATIONS[
-            _choice(activation, "activation", tuple(_ACTIVATIONS))
-        ]
+        if activation is None or activation == "none":
+            make_activation = None
+        else:
+            make_activation = _ACTIVATIONS[
+                _choice(activation, "activation", (*_ACTIVATIONS, "none"))
+            ]
 
         self.encoders = nn.ModuleDict()
         for name, encoder in encoders.items():
@@ -480,7 +484,7 @@ class ConditionedQuery(nn.Module):
         dims = [len(self.encoders) * self._embed_dim, *hidden_dims, self._embed_dim]
         layers: list[nn.Module] = []
         for index, (in_dim, out_dim) in enumerate(zip(dims, dims[1:])):
-            if index > 0:
+            if index > 0 and make_activation is not None:
                 layers.append(make_activation())
             layers.append(nn.Linear(in_dim, out_dim))
         self.projection = nn.Sequential(*layers)
