@@ -300,7 +300,7 @@ transformer building blocks you can swap in and out. It has two layers:
 - `transformer/modules.py`: plain `nn.Module`s with no framework dependency
   (`PatchEmbedding`, `LearnedPositionalEmbedding2D`,
   `SinusoidalPositionalEmbedding2D`, `TransformerEncoder`, `AttentionPooling`,
-  `LearnedQuery`, `ConditionedQuery`).
+  `LearnedQuery`, `ConditionedQuery`, `ClassToken`).
 - `transformer/components.py`: resources that put those modules together into
   a model.
 
@@ -329,7 +329,8 @@ crop, patch-embedded and reduced to one vector) or
 concatenated and passed through an MLP with activations between its layers.
 
 **Models.** Two composite resources, registered for both training and analysis
-sessions, depend on the roles above. They take no config (`{}`):
+sessions, depend on the roles above. Their only config key is `class_token`
+(see below); otherwise use `{}`:
 
 - `patch_transformer` requires `patch_embedding`, `positional_embedding` and
   `sequence_encoder`. `model(images, key_padding_mask=None)` returns
@@ -347,6 +348,23 @@ checkpointed state is the built blocks themselves. A restored model therefore
 works without `setup()` (which `trained_model` relies on), and `setup()` keeps
 the restored blocks instead of building new ones. Factory config can't change
 during `--extend-session`, because factories are not extendable.
+
+**Class token.** Set `class_token: true`, or pass `ClassToken` options such as
+`class_token: {init_std: 0.02}`, on either model to prepend one learned token.
+It is added after positional embedding, so it has no position of its own (a
+learned token doesn't need one) and positional-table resizing is unaffected.
+Outputs gain one leading token: `patch_transformer` returns
+`(B, 1 + N, embed_dim)` with the class token at `tokens[:, 0]`, and
+`pooled_patch_transformer` pools over the class token as well as the patch
+tokens. A `key_padding_mask` still covers only the `N` patch tokens; the model
+widens it so the class token is never masked. The token is saved with the
+other blocks as `model.class_token`. Like the rest of the model config, it
+can't be changed during `--extend-session`.
+
+```yaml
+patch_transformer:
+  class_token: true
+```
 
 Bind the model and each role through `component_bindings`, and configure the
 factories by name. This example reproduces an image encoder whose output is

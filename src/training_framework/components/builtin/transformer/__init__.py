@@ -14,6 +14,7 @@ from training_framework.components.builtin.transformer.components import (
 )
 from training_framework.components.builtin.transformer.modules import (
     AttentionPooling,
+    ClassToken,
     ConditionedQuery,
     LearnedPositionalEmbedding2D,
     LearnedQuery,
@@ -25,6 +26,7 @@ from training_framework.components.builtin.transformer.modules import (
 __all__ = [
     "AttentionPooling",
     "AttentionPoolingFactory",
+    "ClassToken",
     "ConditionedPoolingQueryFactory",
     "ConditionedQuery",
     "ConvPatchEmbeddingFactory",

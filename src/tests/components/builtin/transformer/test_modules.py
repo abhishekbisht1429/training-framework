@@ -6,6 +6,7 @@ from torch import nn
 
 from training_framework.components.builtin.transformer import (
     AttentionPooling,
+    ClassToken,
     ConditionedQuery,
     LearnedPositionalEmbedding2D,
     LearnedQuery,
@@ -107,6 +108,41 @@ def test_sinusoidal_positional_embedding_validates_arguments():
         SinusoidalPositionalEmbedding2D(embed_dim=6)
     with pytest.raises(ValueError, match="temperature"):
         SinusoidalPositionalEmbedding2D(embed_dim=8, temperature=1)
+
+
+# -- class token --------------------------------------------------------
+
+
+def test_class_token_prepends_one_shared_learned_token():
+    module = ClassToken(embed_dim=4)
+    tokens = torch.randn(3, 5, 4)
+
+    output, mask = module(tokens)
+
+    assert output.shape == (3, 6, 4)
+    assert mask is None
+    torch.testing.assert_close(output[:, 1:], tokens)
+    torch.testing.assert_close(output[:, 0], module.token[0].expand(3, -1))
+    assert torch.count_nonzero(module.token) > 0
+
+
+def test_class_token_widens_mask_so_it_is_never_masked():
+    module = ClassToken(embed_dim=4)
+    mask = torch.tensor([[False, True], [True, True]])
+
+    _, widened = module(torch.randn(2, 2, 4), mask)
+
+    torch.testing.assert_close(
+        widened,
+        torch.tensor([[False, False, True], [False, True, True]]),
+    )
+
+
+def test_class_token_validates_arguments():
+    with pytest.raises(ValueError, match="embed_dim"):
+        ClassToken(embed_dim=0)
+    with pytest.raises(ValueError, match="init_std"):
+        ClassToken(embed_dim=4, init_std=-0.1)
 
 
 # -- encoder / pooling / queries ----------------------------------------

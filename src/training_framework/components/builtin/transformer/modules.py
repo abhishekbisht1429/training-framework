@@ -234,6 +234,40 @@ class SinusoidalPositionalEmbedding2D(nn.Module):
         )
 
 
+class ClassToken(nn.Module):
+    """Prepend one learned token to a `(B, N, embed_dim)` sequence.
+
+    Returns `(B, 1 + N, embed_dim)` tokens and, when a `(B, N)` key padding
+    mask is given, the mask widened so the class token is never masked.
+    """
+
+    def __init__(self, embed_dim: int, init_std: float = 0.02) -> None:
+        super().__init__()
+        self._embed_dim = _positive_int(embed_dim, "embed_dim")
+        self.token = nn.Parameter(torch.zeros(1, 1, self._embed_dim))
+        nn.init.trunc_normal_(self.token, std=_non_negative_float(init_std, "init_std"))
+
+    @property
+    def embed_dim(self) -> int:
+        return self._embed_dim
+
+    def forward(
+            self,
+            tokens: torch.Tensor,
+            key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        batch_size = tokens.shape[0]
+        tokens = torch.cat([self.token.expand(batch_size, -1, -1), tokens], dim=1)
+        if key_padding_mask is not None:
+            unmasked = torch.zeros(
+                batch_size, 1,
+                dtype=key_padding_mask.dtype,
+                device=key_padding_mask.device,
+            )
+            key_padding_mask = torch.cat([unmasked, key_padding_mask], dim=1)
+        return tokens, key_padding_mask
+
+
 class TransformerEncoder(nn.Module):
     """A stack of `nn.TransformerEncoderLayer`s over `(B, N, embed_dim)` tokens.
 
@@ -493,6 +527,7 @@ class ConditionedQuery(nn.Module):
 
 __all__ = [
     "AttentionPooling",
+    "ClassToken",
     "ConditionedQuery",
     "LearnedPositionalEmbedding2D",
     "LearnedQuery",

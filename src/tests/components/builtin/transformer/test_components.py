@@ -18,6 +18,7 @@ from training_framework.components.builtin import TrainedModel
 from training_framework.components.builtin.transformer import (
     AttentionPooling,
     AttentionPoolingFactory,
+    ClassToken,
     ConditionedPoolingQueryFactory,
     ConditionedQuery,
     ConvPatchEmbeddingFactory,
@@ -236,11 +237,76 @@ def test_custom_module_factory_subclass():
 # -- composite model ----------------------------------------------------
 
 
-def test_patch_transformer_takes_no_config():
-    PatchTransformer({})
-    PatchTransformer(None)
-    with pytest.raises(ValueError, match="takes no configuration"):
+def test_patch_transformer_config_only_accepts_class_token():
+    assert not PatchTransformer({}).has_class_token
+    assert not PatchTransformer(None).has_class_token
+    assert not PatchTransformer({"class_token": False}).has_class_token
+    assert PatchTransformer({"class_token": True}).has_class_token
+    assert PatchTransformer({"class_token": {"init_std": 0.1}}).has_class_token
+    with pytest.raises(ValueError, match="only accepts 'class_token'"):
         PatchTransformer({"embed_dim": 8})
+    with pytest.raises(TypeError, match="class_token must be a boolean or a mapping"):
+        PatchTransformer({"class_token": "yes"})
+    with pytest.raises(TypeError, match="Invalid patch_transformer.class_token config"):
+        PatchTransformer({"class_token": {"std": 0.1}})
+    with pytest.raises(ValueError, match="init_std"):
+        PatchTransformer({"class_token": {"init_std": -1}})
+
+
+def test_class_token_is_prepended_after_positional_embedding():
+    model = PatchTransformer({"class_token": True})
+    model.setup(_fake_session_for(PatchTransformer))
+
+    assert isinstance(model.class_token, ClassToken)
+    assert model.class_token.embed_dim == EMBED_DIM
+    assert model(torch.randn(2, 3, 8, 8)).shape == (2, 5, EMBED_DIM)
+    # The class token has no position, so resizing the positional table
+    # for a larger grid still works.
+    assert model(torch.randn(2, 3, 12, 16)).shape == (2, 13, EMBED_DIM)
+    assert "class_token.token" in dict(model.named_parameters())
+
+
+def test_class_token_widens_the_padding_mask_for_encoder_and_pooling():
+    model = PooledPatchTransformer({"class_token": True})
+    model.setup(_fake_session_for(PooledPatchTransformer))
+    seen_masks = []
+    model.sequence_encoder.register_forward_hook(
+        lambda module, args, kwargs, output: seen_masks.append(kwargs["key_padding_mask"]),
+        with_kwargs=True,
+    )
+    model.pooling.register_forward_hook(
+        lambda module, args, kwargs, output: seen_masks.append(kwargs["key_padding_mask"]),
+        with_kwargs=True,
+    )
+    mask = torch.tensor([[False, False, False, True], [False, True, True, True]])
+
+    output = model.eval()(torch.randn(2, 3, 8, 8), key_padding_mask=mask)
+
+    assert output.shape == (2, 2, EMBED_DIM)
+    expected = torch.cat([torch.zeros(2, 1, dtype=torch.bool), mask], dim=1)
+    assert len(seen_masks) == 2
+    for seen in seen_masks:
+        torch.testing.assert_close(seen, expected)
+
+
+def test_class_token_is_part_of_saved_state():
+    model = PatchTransformer({"class_token": True})
+    model.setup(_fake_session_for(PatchTransformer))
+    state = pickle.loads(pickle.dumps(model.get_state()))
+    assert "class_token" in state["modules"]
+
+    restored = PatchTransformer({"class_token": True})
+    restored.set_state(state)
+    torch.testing.assert_close(restored.class_token.token, model.class_token.token)
+    images = torch.randn(1, 3, 8, 8)
+    torch.testing.assert_close(restored.eval()(images), model.eval()(images))
+
+    with pytest.raises(ValueError, match="state has a class token but class_token is disabled"):
+        PatchTransformer({}).set_state(state)
+    without = PatchTransformer({})
+    without.setup(_fake_session_for(PatchTransformer))
+    with pytest.raises(ValueError, match="state lacks a class token but class_token is enabled"):
+        PatchTransformer({"class_token": True}).set_state(without.get_state())
 
 
 def test_patch_transformer_is_unusable_before_setup():
@@ -416,8 +482,11 @@ def test_patch_transformer_without_pooling_in_a_session(tmp_path):
         assert model(torch.randn(1, 3, 8, 8)).shape == (1, 4, EMBED_DIM)
 
 
-def test_trained_model_loads_transformer_checkpoint_for_analysis(tmp_path):
-    session = TrainingSession(_pooled_config(tmp_path))
+@pytest.mark.parametrize("class_token", [False, True])
+def test_trained_model_loads_transformer_checkpoint_for_analysis(tmp_path, class_token):
+    config = _pooled_config(tmp_path)
+    config["pooled_patch_transformer"] = {"class_token": class_token}
+    session = TrainingSession(config)
     with session:
         trained = session.get_resource("model")
     checkpoint_path = tmp_path / "training.pt"
@@ -430,6 +499,7 @@ def test_trained_model_loads_transformer_checkpoint_for_analysis(tmp_path):
     with analysis:
         model = analysis.get_resource("trained_model").model
         assert isinstance(analysis.get_resource("trained_model"), TrainedModel)
+        assert model.has_class_token is class_token
         images = torch.randn(2, 3, 8, 8)
         conditioning = _conditioning()
         torch.testing.assert_close(

@@ -28,6 +28,7 @@ from training_framework.components import (
 )
 from training_framework.components.builtin.transformer.modules import (
     AttentionPooling,
+    ClassToken,
     ConditionedQuery,
     LearnedPositionalEmbedding2D,
     LearnedQuery,
@@ -174,6 +175,11 @@ class PatchTransformer(nn.Module, StatefulResource):
     the built modules themselves, so a restored model works without calling
     `setup()` (as `trained_model` requires); `setup()` then keeps them rather
     than building new ones.
+
+    Config: `class_token` (default false) is `true` or a mapping of
+    `ClassToken` options (e.g. `{init_std: 0.02}`). When enabled, a learned
+    token is prepended after positional embedding, so outputs gain one
+    leading token.
     """
 
     block_roles: ClassVar[tuple[str, ...]] = (
@@ -186,12 +192,36 @@ class PatchTransformer(nn.Module, StatefulResource):
         nn.Module.__init__(self)
         if config is not None and not isinstance(config, Mapping):
             raise TypeError(f"{self._component_name()} config must be a mapping")
-        if config:
+        config = dict(config or {})
+        unknown = set(config) - {"class_token"}
+        if unknown:
             raise ValueError(
-                f"{self._component_name()} takes no configuration; configure "
-                f"its blocks instead. Got keys: {sorted(config)}"
+                f"{self._component_name()} only accepts 'class_token'; "
+                f"configure its blocks instead. Got keys: {sorted(unknown)}"
             )
+        self._class_token_options = self._parse_class_token(config.get("class_token", False))
         self._built = False
+
+    @classmethod
+    def _parse_class_token(cls, value) -> dict[str, Any] | None:
+        if value is False or value is None:
+            return None
+        if value is True:
+            return {}
+        if not isinstance(value, Mapping):
+            raise TypeError(
+                f"{cls._component_name()}.class_token must be a boolean or a "
+                f"mapping of ClassToken options; got {value!r}"
+            )
+        options = deepcopy(dict(value))
+        try:
+            with torch.device("meta"):
+                ClassToken(embed_dim=1, **options)
+        except (TypeError, ValueError) as error:
+            raise type(error)(
+                f"Invalid {cls._component_name()}.class_token config: {error}"
+            ) from error
+        return options
 
     @classmethod
     def _component_name(cls) -> str:
@@ -200,6 +230,10 @@ class PatchTransformer(nn.Module, StatefulResource):
     @property
     def is_built(self) -> bool:
         return self._built
+
+    @property
+    def has_class_token(self) -> bool:
+        return self._class_token_options is not None
 
     @property
     def embed_dim(self) -> int:
@@ -226,19 +260,32 @@ class PatchTransformer(nn.Module, StatefulResource):
     def get_state(self) -> dict[str, Any] | None:
         if not self._built:
             return None
-        return {
-            "modules": {
-                block_role: getattr(self, block_role)
-                for block_role in self.block_roles
-            },
+        modules = {
+            block_role: getattr(self, block_role)
+            for block_role in self.block_roles
         }
+        if self.has_class_token:
+            modules["class_token"] = self.class_token
+        return {"modules": modules}
 
     def set_state(self, state: Mapping[str, Any] | None) -> None:
         if state is None:
             return
-        self._attach_blocks(dict(state["modules"]))
+        modules = dict(state["modules"])
+        class_token = modules.pop("class_token", None)
+        if (class_token is not None) != self.has_class_token:
+            raise ValueError(
+                f"{self._component_name()} state "
+                f"{'has' if class_token is not None else 'lacks'} a class token "
+                f"but class_token is {'enabled' if self.has_class_token else 'disabled'}"
+            )
+        self._attach_blocks(modules, class_token=class_token)
 
-    def _attach_blocks(self, blocks: dict[str, nn.Module]) -> None:
+    def _attach_blocks(
+            self,
+            blocks: dict[str, nn.Module],
+            class_token: ClassToken | None = None,
+    ) -> None:
         if set(blocks) != set(self.block_roles):
             raise ValueError(
                 f"{self._component_name()} expects blocks "
@@ -262,8 +309,19 @@ class PatchTransformer(nn.Module, StatefulResource):
                 f"{self._component_name()} blocks disagree on embed_dim: "
                 f"{embed_dims}"
             )
+        if self.has_class_token:
+            [embed_dim] = set(embed_dims.values())
+            if class_token is None:
+                class_token = ClassToken(embed_dim, **deepcopy(self._class_token_options))
+            if class_token.embed_dim != embed_dim:
+                raise ValueError(
+                    f"{self._component_name()} class token embed_dim "
+                    f"{class_token.embed_dim} does not match blocks ({embed_dim})"
+                )
         for block_role in self.block_roles:
             setattr(self, block_role, blocks[block_role])
+        if class_token is not None:
+            self.class_token = class_token
         self._built = True
 
     def _require_built(self) -> None:
@@ -281,14 +339,29 @@ class PatchTransformer(nn.Module, StatefulResource):
             images: torch.Tensor,
             key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return `(B, N, embed_dim)` encoded patch tokens."""
+        """Return encoded tokens: `(B, N, embed_dim)`, or `(B, 1 + N, embed_dim)`
+        with the class token at index 0 when `class_token` is enabled.
+
+        `key_padding_mask` covers the `N` patch tokens only.
+        """
+        tokens, _ = self._encode(images, key_padding_mask)
+        return tokens
+
+    def _encode(
+            self,
+            images: torch.Tensor,
+            key_padding_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         self._require_built()
         if images.ndim != 4:
             raise ValueError(f"Expected [B, C, H, W], got {tuple(images.shape)}")
         tokens = self.patch_embedding(images)
         grid_size = self.patch_embedding.grid_size(images.shape[-2], images.shape[-1])
         tokens = self.positional_embedding(tokens, grid_size)
-        return self.sequence_encoder(tokens, key_padding_mask=key_padding_mask)
+        if self.has_class_token:
+            tokens, key_padding_mask = self.class_token(tokens, key_padding_mask)
+        tokens = self.sequence_encoder(tokens, key_padding_mask=key_padding_mask)
+        return tokens, key_padding_mask
 
     def forward(
             self,
@@ -307,7 +380,8 @@ class PooledPatchTransformer(PatchTransformer):
 
     `forward(images, **conditioning)` passes `conditioning` to the
     `pooling_query` block, so the query can be learned or built per sample.
-    Returns `(B, Q, embed_dim)`.
+    Returns `(B, Q, embed_dim)`. With `class_token` enabled, pooling attends
+    over the class token as well as the patch tokens.
     """
 
     block_roles: ClassVar[tuple[str, ...]] = (
@@ -322,7 +396,7 @@ class PooledPatchTransformer(PatchTransformer):
             key_padding_mask: torch.Tensor | None = None,
             **conditioning: torch.Tensor,
     ) -> torch.Tensor:
-        tokens = self.encode(images, key_padding_mask=key_padding_mask)
+        tokens, key_padding_mask = self._encode(images, key_padding_mask)
         query = self.pooling_query(tokens.shape[0], **conditioning)
         return self.pooling(tokens, query, key_padding_mask=key_padding_mask)
 
