@@ -112,7 +112,14 @@ def topological_sort_components(
         registry: Mapping[str, type[Component]],
         components: Iterable[Component | type[Component]] | None,
         roles: "Mapping[str, RoleDeclaration] | None" = None,
+        session_type: str | None = None,
 ) -> dict[str, int]:
+    # Imported lazily: diagnostics imports the registry, which imports graph.
+    from training_framework.components.diagnostics import (
+        explain_missing_component,
+        with_explanation,
+    )
+
     roles = roles or {}
     session_scoped = components is not None
     selected_components = (
@@ -128,6 +135,7 @@ def topological_sort_components(
     prerequisites_graph: dict[str, list[str]] = {
         component.id: [] for component in selected_components
     }
+    active_names = {component.name for component in selected_components}
 
     for component in selected_components:
         requirements = (
@@ -161,21 +169,36 @@ def topological_sort_components(
                                 consumer=component,
                             )
                         )
-                    raise RuntimeError(
+                    raise RuntimeError(with_explanation(
                         f"unmet prerequisite! {required_type.__name__} "
                         f"'{required_name}' resolves to '{resolved_name}', which "
-                        f"is not registered as a {required_type.__name__}."
-                    )
+                        f"is not registered as a {required_type.__name__}.",
+                        explain_missing_component(
+                            required_name,
+                            resolved_name,
+                            expected_type=required_type,
+                            session_type=session_type,
+                            consumer=component,
+                        ),
+                    ))
 
                 assert registered_class is not None
                 prerequisite_id = registered_class.id
                 prerequisites_graph[component.id].append(prerequisite_id)
                 if session_scoped and prerequisite_id not in prerequisites_graph:
-                    raise RuntimeError(
+                    raise RuntimeError(with_explanation(
                         f"unmet prerequisite! {required_type.__name__} "
                         f"'{required_name}' resolves to '{resolved_name}', which "
-                        "is not configured in this session."
-                    )
+                        "is not configured in this session.",
+                        explain_missing_component(
+                            required_name,
+                            resolved_name,
+                            expected_type=required_type,
+                            session_type=session_type,
+                            consumer=component,
+                            active_names=active_names,
+                        ),
+                    ))
 
     for wrapper in selected_components:
         if not _is_component_type(wrapper, Hook):
@@ -199,10 +222,17 @@ def topological_sort_components(
                             consumer=wrapper,
                         )
                     )
-                raise RuntimeError(
+                raise RuntimeError(with_explanation(
                     f"invalid wraps target! Hook '{wrapped_name}' resolves to "
-                    f"'{resolved_name}', which is not registered as a Hook."
-                )
+                    f"'{resolved_name}', which is not registered as a Hook.",
+                    explain_missing_component(
+                        wrapped_name,
+                        resolved_name,
+                        expected_type=Hook,
+                        session_type=session_type,
+                        consumer=wrapper,
+                    ),
+                ))
 
             wrapped_id = registered_class.id
             if wrapped_id == wrapper.id:
@@ -217,10 +247,18 @@ def topological_sort_components(
             resolved_targets.add(wrapped_id)
 
             if session_scoped and wrapped_id not in prerequisites_graph:
-                raise RuntimeError(
+                raise RuntimeError(with_explanation(
                     f"invalid wraps target! Hook '{wrapped_name}' resolves to "
-                    f"'{resolved_name}', which is not configured in this session."
-                )
+                    f"'{resolved_name}', which is not configured in this session.",
+                    explain_missing_component(
+                        wrapped_name,
+                        resolved_name,
+                        expected_type=Hook,
+                        session_type=session_type,
+                        consumer=wrapper,
+                        active_names=active_names,
+                    ),
+                ))
 
             wrapped = components_by_id.get(wrapped_id, registered_class)
             _validate_wrapping_lifecycle(

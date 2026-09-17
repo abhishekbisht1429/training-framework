@@ -323,6 +323,40 @@ component constructor. Activation follows dependency edges outward: activating
 a wrapped hook alone does not activate hooks that wrap it. For DDP, secondary
 ranks retain the same closure for each root named in `ddp.parallel_components`.
 
+### Missing-dependency errors
+
+When a dependency, wrapping target, configured root, binding target, or
+`session.get_resource(name)` lookup cannot be satisfied, the error keeps its
+short headline and adds an indented explanation: which component required it,
+any `component_bindings` redirection, a `Reason:` and a `Fix:`. The reason
+distinguishes:
+
+- **Not registered anywhere** — not in the shared registry, the session type's
+  registry, or any other session type's registry. The fix suggests the
+  decorator, reminds you to import the defining module (for example through
+  `session_config.components_package`), and lists close name matches.
+- **Registered only for another session type** — e.g. the training-only `ddp`
+  requested from an analysis session. The fix offers using that session type,
+  registering a scoped implementation, or registering it as shared.
+- **Registered with a different category** — e.g. a Hook named where a
+  Resource is required, including a session-scoped component that shadows a
+  shared one of the expected category.
+- **Registered but not active in this session** — the component exists but is
+  not configured; add a top-level mapping for it.
+- **Declared role without an implementation** — the role message is kept and
+  the reason names the scope the role was declared in, or notes that it is
+  declared only for another session type.
+
+```text
+unmet prerequisite! Resource 'ddp' resolves to 'ddp', which is not registered as a Resource.
+  Required by: Step 'embed_batches' (EmbedBatches)
+  Reason: 'ddp' is not in the shared registry or the 'analysis' registry; it is registered only for session type(s) 'training' (as Resource), so it is unavailable to 'analysis' sessions.
+  Fix: Use it from a 'training' session, register a Resource for this session type with @resource('ddp', session_type='analysis'), or register it as shared with @resource('ddp').
+```
+
+`session.get_resource()` raises `ComponentNotFoundError`, a `KeyError`
+subclass, so existing `except KeyError` handlers keep working.
+
 ## Session-extension configuration
 
 Component configuration is immutable when extending a checkpoint unless the

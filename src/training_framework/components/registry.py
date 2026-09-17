@@ -327,10 +327,21 @@ class ComponentBindings:
                 )
 
             if implementation_name not in self._registry:
-                raise ValueError(
-                    f"Component binding target '{implementation_name}' is not "
-                    "a registered component"
+                # Imported lazily: diagnostics imports this module.
+                from training_framework.components.diagnostics import (
+                    explain_missing_component,
+                    with_explanation,
                 )
+
+                raise ValueError(with_explanation(
+                    f"Component binding target '{implementation_name}' is not "
+                    "a registered component",
+                    explain_missing_component(
+                        implementation_name,
+                        implementation_name,
+                        session_type=self._session_type,
+                    ),
+                ))
             implementation_type = _component_type(
                 self._registry[implementation_name]
             )
@@ -541,6 +552,7 @@ def topological_sort_of_components(
         registry=registry,
         components=components,
         roles=roles,
+        session_type=normalized,
     )
 
 

@@ -16,6 +16,10 @@ from training_framework.components.config import (
     reject_legacy_components_entry,
     reserved_config_names,
 )
+from training_framework.components.diagnostics import (
+    explain_missing_component,
+    with_explanation,
+)
 from training_framework.components.registry import (
     ComponentBindings,
     _coalesce_component_bindings,
@@ -26,6 +30,13 @@ from training_framework.components.registry import (
     topological_sort_of_components,
 )
 from training_framework.session.config import TRAINING_SESSION_TYPE, normalize_session_type
+
+
+class ComponentNotFoundError(KeyError):
+    """A KeyError whose message keeps its line breaks when printed."""
+
+    def __str__(self) -> str:
+        return str(self.args[0]) if self.args else ""
 
 
 class SessionComponents:
@@ -223,37 +234,53 @@ class SessionComponents:
     ) -> tuple[str, type[Component]]:
         resolved_name = self.resolve_name(name)
         component_class = self.registry.get(resolved_name)
+        explanation = lambda: explain_missing_component(  # noqa: E731
+            name,
+            resolved_name,
+            expected_type=expected_type,
+            session_type=self.session_type,
+            consumer=consumer,
+        )
         if component_class is None:
             if expected_type is None:
-                raise ValueError(
+                raise ValueError(with_explanation(
                     f"No step, hook or resource registered with name "
-                    f"'{resolved_name}'!"
-                )
+                    f"'{resolved_name}'!",
+                    explanation(),
+                ))
             declared_role = self.roles.get(resolved_name)
             if declared_role is not None and declared_role.category is expected_type:
-                raise RuntimeError(
+                # The role message already carries its own fix; add the reason.
+                reason = "\n".join(
+                    line for line in explanation().splitlines()
+                    if not line.lstrip().startswith(("Fix:", "Required by:"))
+                )
+                raise RuntimeError(with_explanation(
                     _missing_role_message(
                         category=expected_type,
                         name=name,
                         resolved_name=resolved_name,
                         declared_role=declared_role,
                         consumer=consumer,
-                    )
-                )
-            raise RuntimeError(
+                    ),
+                    reason,
+                ))
+            raise RuntimeError(with_explanation(
                 f"unmet prerequisite! {expected_type.__name__} '{name}' "
                 f"resolves to '{resolved_name}', which is not registered as a "
-                f"{expected_type.__name__}."
-            )
+                f"{expected_type.__name__}.",
+                explanation(),
+            ))
         if expected_type is not None and not issubclass(
                 component_class,
                 expected_type,
         ):
-            raise RuntimeError(
+            raise RuntimeError(with_explanation(
                 f"unmet prerequisite! {expected_type.__name__} '{name}' "
                 f"resolves to '{resolved_name}', which is not registered as a "
-                f"{expected_type.__name__}."
-            )
+                f"{expected_type.__name__}.",
+                explanation(),
+            ))
         return resolved_name, component_class
 
     def _register_component_instance(self, component: Component) -> None:
@@ -345,10 +372,16 @@ class SessionComponents:
             resolved_name, component_class = self._registered_component_class(name)
             component = self.components.get(resolved_name)
             if component is None:
-                raise RuntimeError(
+                raise RuntimeError(with_explanation(
                     f"Component '{name}' resolves to '{resolved_name}', which "
-                    "is not configured in this session."
-                )
+                    "is not configured in this session.",
+                    explain_missing_component(
+                        name,
+                        resolved_name,
+                        session_type=self.session_type,
+                        active_names=self.components,
+                    ),
+                ))
             if resolved_name in closure:
                 return
 
@@ -471,7 +504,21 @@ class SessionComponents:
         registered_name = self.resolve_name(name)
         component = self.components.get(registered_name)
         if not isinstance(component, Resource):
-            raise KeyError(f"{name} not found in resources!")
+            active_names = {
+                active_name
+                for active_name, active in self.components.items()
+                if isinstance(active, Resource)
+            }
+            raise ComponentNotFoundError(with_explanation(
+                f"{name} not found in resources!",
+                explain_missing_component(
+                    name,
+                    registered_name,
+                    expected_type=Resource,
+                    session_type=self.session_type,
+                    active_names=active_names,
+                ),
+            ))
         return component
 
     def has_resource(self, name: str) -> bool:
