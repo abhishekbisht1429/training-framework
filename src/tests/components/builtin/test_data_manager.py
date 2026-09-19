@@ -247,8 +247,10 @@ def test_data_manager_restores_the_same_position_for_each_current_rank(
 @pytest.mark.parametrize(
     ("override", "message"),
     [
+        # A different world_size used to be rejected here too. It is now
+        # rebased onto the launch's topology instead; see
+        # test_sampler_resharding.py.
         ({"dataset_size": 10}, "different dataset size"),
-        ({"world_size": 2}, "different DDP world_size"),
     ],
 )
 def test_data_manager_rejects_incompatible_sampler_state(

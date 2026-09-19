@@ -64,7 +64,7 @@ class DataManager(StatefulResource):
         self._data_iter: _ManagedDataIterator | None = None
         self._sampler_state: dict[str, Any] | None = None
         self._local_batch_size: int | None = None
-        self._samples_per_rank: int | None = None
+        self._epoch_size: int | None = None
 
         if (
                 isinstance(self._batch_size, bool)
@@ -109,8 +109,6 @@ class DataManager(StatefulResource):
             self,
             sampler: DistributedInfiniteSampler,
             dataset_size: int,
-            rank: int,
-            world_size: int,
     ) -> None:
         if self._sampler_state is None:
             return
@@ -121,33 +119,29 @@ class DataManager(StatefulResource):
                 "Cannot restore DataManager state with a different dataset "
                 "size"
             )
-        if restored_state.get("world_size") != world_size:
-            raise ValueError(
-                "Cannot restore DataManager state with a different DDP "
-                "world_size"
-            )
 
-        restored_state["rank"] = rank
+        # The world size is deliberately not checked. The sampler rebases the
+        # saved position onto whatever topology this launch resolved, so a
+        # run trained on eight ranks resumes on four.
         sampler.set_state(restored_state)
 
     def _record_batch_delivery(self) -> None:
         if (
                 self._sampler_state is None
                 or self._local_batch_size is None
-                or self._samples_per_rank is None
+                or self._epoch_size is None
         ):
             raise RuntimeError("DataManager is not set up")
 
+        # Every rank delivers its slice of the same global batch, so the
+        # epoch advances by the global batch size on every rank alike. The
+        # position is tracked globally, which is the form it is saved in.
         position = (
-            self._sampler_state["index_within_epoch"]
-            + self._local_batch_size
+            self._sampler_state["consumed_in_epoch"] + self.batch_size
         )
-        completed_epochs, index_within_epoch = divmod(
-            position,
-            self._samples_per_rank,
-        )
+        completed_epochs, consumed = divmod(position, self._epoch_size)
         self._sampler_state["epoch"] += completed_epochs
-        self._sampler_state["index_within_epoch"] = index_within_epoch
+        self._sampler_state["consumed_in_epoch"] = consumed
 
     @override
     def setup(self, session: Session):
@@ -168,15 +162,10 @@ class DataManager(StatefulResource):
             rank=ddp.rank,
             world_size=world_size,
         )
-        self._restore_sampler(
-            sampler,
-            dataset_size,
-            ddp.rank,
-            world_size,
-        )
+        self._restore_sampler(sampler, dataset_size)
 
         self._local_batch_size = self.batch_size // world_size
-        self._samples_per_rank = sampler.num_samples_per_rank
+        self._epoch_size = sampler.total_size
         self._sampler_state = sampler.get_state()
 
         dataloader = DataLoader(
@@ -197,7 +186,7 @@ class DataManager(StatefulResource):
         finally:
             self._data_iter = None
             self._local_batch_size = None
-            self._samples_per_rank = None
+            self._epoch_size = None
 
     @override
     def get_state(self) -> dict[str, Any]:
