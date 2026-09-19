@@ -10,6 +10,12 @@ from training_framework.components.config import (
     reject_legacy_components_entry,
     reserved_config_names,
 )
+from training_framework.engine.topology import TOPOLOGY_KEYS
+
+
+#: Overrides that describe the launch rather than the session, and so may be
+#: given when resuming a checkpoint that changes nothing else.
+_TOPOLOGY_OVERRIDES = frozenset(f"ddp.{name}" for name in TOPOLOGY_KEYS)
 
 
 class Configurator:
@@ -86,6 +92,7 @@ class Configurator:
         self._checkpoint_path = None
         self._new_max_iters = None
         self._extension_overrides = None
+        self._topology_overrides = {}
         self._mode = None
 
         if self._args.config:
@@ -104,6 +111,9 @@ class Configurator:
                 )
             self._checkpoint_path = values[0]
             overrides = list(self._args.override or [])
+            self._topology_overrides, overrides = (
+                self._split_topology_overrides(overrides)
+            )
             if len(values) == 2:
                 warnings.warn(
                     "The positional NEW_MAX_ITERATIONS argument is deprecated; "
@@ -130,7 +140,7 @@ class Configurator:
                 overrides.append(
                     f"session_config.max_iterations={self._new_max_iters}"
                 )
-            if not overrides:
+            if not overrides and not self._topology_overrides:
                 self._parser.error(
                     "--extend-session requires at least one --override"
                 )
@@ -138,6 +148,37 @@ class Configurator:
         elif self._args.resume_session:
             self._mode = "resume"
             self._checkpoint_path = self._args.resume_session
+            self._topology_overrides, unsupported = (
+                self._split_topology_overrides(self._args.override or [])
+            )
+            if unsupported:
+                names = ", ".join(sorted(unsupported))
+                self._parser.error(
+                    "--resume-session only accepts launch-topology "
+                    f"overrides ({', '.join(sorted(_TOPOLOGY_OVERRIDES))}), "
+                    f"but got: {names}. Use --extend-session to change the "
+                    "session configuration."
+                )
+
+    @staticmethod
+    def _split_topology_overrides(
+            overrides,
+    ) -> tuple[dict[str, str], list[str]]:
+        """Separate launch-topology overrides from session-config ones.
+
+        Topology overrides never reach the session extension machinery: they
+        describe the machine this launch runs on, not the run itself.
+        """
+        topology: dict[str, str] = {}
+        remaining: list[str] = []
+        for item in overrides:
+            key, separator, value = item.partition("=")
+            key = key.strip()
+            if separator and key in _TOPOLOGY_OVERRIDES:
+                topology[key.split(".", 1)[1]] = value
+            else:
+                remaining.append(item)
+        return topology, remaining
 
     def get_session_definition(self, index):
         if not self._session_configs:
@@ -192,6 +233,10 @@ class Configurator:
         if not self._checkpoint_path:
             raise KeyError("Cannot use this property in the current operation!")
         return self._checkpoint_path
+
+    @property
+    def topology_overrides(self):
+        return dict(self._topology_overrides)
 
     @property
     def new_max_iters(self):

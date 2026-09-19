@@ -26,11 +26,15 @@ role(
 @resource("ddp", session_type="training")
 class DDPResource(Resource):
 
-    def __init__(self, config: dict, rank: int = -1):
+    def __init__(self, config: dict, rank: int = -1, local_rank: int | None = None):
         self._config = config
         self._world_size = config["world_size"]
         self._backend = config["backend"]
         self._rank = rank
+        # The CUDA ordinal this rank runs on. It is the rank itself on a
+        # single-node launch, and the engine settles it from the launch
+        # topology; a hand-constructed resource keeps the old behaviour.
+        self._local_rank = rank if local_rank is None else local_rank
         self._parallel_components = config.get("parallel_components", [])
         self._master_addr = config["master_addr"]
         self._master_port = config["master_port"]
@@ -47,6 +51,10 @@ class DDPResource(Resource):
     @property
     def rank(self):
         return self._rank
+
+    @property
+    def local_rank(self):
+        return self._local_rank
 
     @property
     def parallel_components(self):
@@ -68,8 +76,18 @@ class DDPResource(Resource):
 
         uses_cuda = self._backend == "nccl" and torch.cuda.is_available()
         if uses_cuda:
-            torch.cuda.set_device(self._rank)
-            session.set_device(torch.device("cuda", self._rank))
+            device_count = torch.cuda.device_count()
+            if self._local_rank >= device_count:
+                raise ValueError(
+                    f"Rank {self._rank} needs CUDA device "
+                    f"{self._local_rank}, but only {device_count} device(s) "
+                    "are visible. Reduce ddp.world_size or make more "
+                    "devices visible through CUDA_VISIBLE_DEVICES."
+                )
+            # Usually already pinned before the session was built; repeating
+            # it keeps a hand-driven session working.
+            torch.cuda.set_device(self._local_rank)
+            session.set_device(torch.device("cuda", self._local_rank))
 
         torch.distributed.init_process_group(
             backend=self._backend,
@@ -81,7 +99,7 @@ class DDPResource(Resource):
             model = session.get_resource("model")
             if uses_cuda:
                 model.to(session.device)
-            device_ids = [self.rank] if uses_cuda else None
+            device_ids = [self._local_rank] if uses_cuda else None
             self._ddp_wrapped_model = DDP(model, device_ids=device_ids)
         except Exception:
             torch.distributed.destroy_process_group()

@@ -8,6 +8,10 @@ import torch
 from torch import distributed, multiprocessing
 
 from training_framework.components.config import component_bindings_from_config
+from training_framework.engine.topology import (
+    LaunchTopology,
+    pin_process_device,
+)
 from training_framework.session import Session, TrainingSession
 from training_framework.session.components import SessionComponents
 from training_framework.session.config import normalize_session_type
@@ -20,7 +24,11 @@ _STOP_SYNC_GRACE_PERIOD = 0.01
 _STOP_SYNC_POLL_INTERVAL = 0.005
 
 
-def prepare_worker_state(session_state, rank: int):
+def prepare_worker_state(
+        session_state,
+        rank: int,
+        topology: LaunchTopology | None = None,
+):
     """Return `session_state` adjusted for `rank`, before anything is built.
 
     Components are wired to each other as they are constructed, so a rank's
@@ -28,6 +36,10 @@ def prepare_worker_state(session_state, rank: int):
     first. Both are decided by data the state already carries: the dependency
     graph is class-level, so the closure a rank needs can be resolved without
     constructing a single component.
+
+    `topology` is this launch's process topology. It overrides whatever the
+    state carries, because a checkpoint's own topology describes the machine
+    that wrote it and says nothing about this one.
     """
     components_state = session_state.get("components_state") or {}
     if not components_state:
@@ -52,13 +64,20 @@ def prepare_worker_state(session_state, rank: int):
     session_state["components_state"] = components_state
 
     ddp_info = components_state[ddp_name]
-    init_args = ddp_info["init_args"]
-    ddp_kwargs = dict(init_args["kwargs"])
-    ddp_kwargs["rank"] = rank
-    ddp_info["init_args"] = {
-        "args": init_args["args"],
-        "kwargs": ddp_kwargs,
-    }
+    ddp_info["init_args"] = _topology_init_args(
+        ddp_info["init_args"],
+        rank,
+        topology,
+    )
+
+    if topology is not None:
+        # The session config is diffed against by a later --extend-session,
+        # so it has to agree with the arguments the component was built from.
+        session_state["config"] = _topology_config(
+            session_state["config"],
+            ddp_name,
+            topology,
+        )
 
     if rank > 0:
         ddp_config = _ddp_config(ddp_info["init_args"])
@@ -73,6 +92,35 @@ def prepare_worker_state(session_state, rank: int):
     return session_state
 
 
+def _topology_init_args(init_args, rank: int, topology) -> dict:
+    """Settle the rank-specific and launch-specific `ddp` constructor args."""
+    args = list(init_args["args"])
+    kwargs = dict(init_args["kwargs"])
+    kwargs["rank"] = rank
+
+    if topology is not None:
+        kwargs["local_rank"] = topology.local_rank(rank)
+        overlay = topology.config_overlay()
+        if args and isinstance(args[0], Mapping):
+            args[0] = {**dict(args[0]), **overlay}
+        elif isinstance(kwargs.get("config"), Mapping):
+            kwargs["config"] = {**dict(kwargs["config"]), **overlay}
+
+    return {"args": tuple(args), "kwargs": kwargs}
+
+
+def _topology_config(config, ddp_name: str, topology) -> Mapping:
+    if not isinstance(config, Mapping) or ddp_name not in config:
+        return config
+    ddp_config = config[ddp_name]
+    if not isinstance(ddp_config, Mapping):
+        return config
+
+    patched = dict(config)
+    patched[ddp_name] = {**dict(ddp_config), **topology.config_overlay()}
+    return patched
+
+
 def _ddp_config(init_args) -> dict:
     args = init_args["args"]
     if args and isinstance(args[0], Mapping):
@@ -85,8 +133,15 @@ def load_session_for_worker(
         session_state,
         rank,
         session_update_params: dict | None = None,
+        launch_topology: LaunchTopology | None = None,
 ):
-    session = Session.from_state(prepare_worker_state(session_state, rank))
+    # Before anything is constructed: no component can then be built or
+    # restored against the wrong device.
+    pin_process_device(launch_topology, rank)
+
+    session = Session.from_state(
+        prepare_worker_state(session_state, rank, launch_topology)
+    )
 
     if (
             session_update_params is not None
@@ -151,6 +206,7 @@ def session_process_worker(
             session_state,
             rank,
             session_update_params=kwargs.get("session_update_params"),
+            launch_topology=kwargs.get("launch_topology"),
         )
         session.set_dist_manager_err_conn(error_conn)
         session.set_progress_beacon(progress_beacon)

@@ -9,6 +9,7 @@ from training_framework.engine.supervision import (
     monitor_processes,
     process_ready_waitables,
 )
+from training_framework.engine.topology import resolve_launch_topology
 from training_framework.engine.worker import SessionProcessWrapper
 from training_framework.engine.worker import (
     _STOP_SYNC_GRACE_PERIOD,
@@ -40,6 +41,21 @@ class TrainingEngine:
         )
         self._session_process_wrappers: list[SessionProcessWrapper] = []
 
+    @property
+    def _topology_overrides(self):
+        return getattr(self._configurator, "topology_overrides", None)
+
+    def _wrapper_kwargs(self, topology) -> dict:
+        kwargs = {
+            "heartbeat_timeout": self._configurator.heartbeat_timeout,
+            "stop_sync_grace_period": self._stop_sync_grace_period,
+            "stop_sync_poll_interval": self._stop_sync_poll_interval,
+        }
+        # A single-process session has no topology to convey.
+        if topology is not None:
+            kwargs["launch_topology"] = topology
+        return kwargs
+
     def load_session(
             self,
             checkpoint_path: str,
@@ -66,18 +82,23 @@ class TrainingEngine:
                     "Unsupported session extension update parameters"
                 )
 
-        if session.has_resource("ddp"):
-            world_size = session.get_resource("ddp").world_size
-        else:
-            world_size = 1
+        # The checkpoint's own topology describes the machine that wrote it,
+        # so this launch decides how many processes to run and where they
+        # meet, not the stored configuration.
+        topology = resolve_launch_topology(
+            session.get_resource("ddp").config
+            if session.has_resource("ddp")
+            else None,
+            overrides=self._topology_overrides,
+            from_checkpoint=True,
+        )
+        world_size = 1 if topology is None else topology.world_size
 
         self._session_process_wrappers = [
             SessionProcessWrapper(
                 session=session,
                 rank=rank,
-                heartbeat_timeout=self._configurator.heartbeat_timeout,
-                stop_sync_grace_period=self._stop_sync_grace_period,
-                stop_sync_poll_interval=self._stop_sync_poll_interval,
+                **self._wrapper_kwargs(topology),
             )
             for rank in range(world_size)
         ]
@@ -101,22 +122,23 @@ class TrainingEngine:
         normalized_type = normalize_session_type(session_type)
         session_class = session_class_for_type(normalized_type)
 
-        if "ddp" in config:
-            try:
-                world_size = config["ddp"]["world_size"]
-            except (KeyError, TypeError) as exc:
-                raise ValueError(
-                    "DDP configuration must contain ddp.world_size"
-                ) from exc
-        else:
-            world_size = 1
+        if "ddp" in config and not isinstance(config["ddp"], Mapping):
+            raise ValueError("DDP configuration must contain ddp.world_size")
 
-        if (
-            not isinstance(world_size, int)
-            or isinstance(world_size, bool)
-            or world_size < 1
-        ):
-            raise ValueError("ddp.world_size must be a positive integer")
+        topology = resolve_launch_topology(
+            config.get("ddp"),
+            overrides=self._topology_overrides,
+            from_checkpoint=False,
+        )
+        world_size = 1 if topology is None else topology.world_size
+        if topology is not None:
+            # Keep the parent's session agreeing with the workers when the
+            # launch resolved a different topology than the file states.
+            config = dict(config)
+            config["ddp"] = {
+                **dict(config["ddp"]),
+                **topology.config_overlay(),
+            }
 
         wrappers = [
             SessionProcessWrapper(
@@ -125,9 +147,7 @@ class TrainingEngine:
                     **deepcopy(dict(session_kwargs)),
                 ),
                 rank=rank,
-                heartbeat_timeout=self._configurator.heartbeat_timeout,
-                stop_sync_grace_period=self._stop_sync_grace_period,
-                stop_sync_poll_interval=self._stop_sync_poll_interval,
+                **self._wrapper_kwargs(topology),
             )
             for rank in range(world_size)
         ]
@@ -208,10 +228,18 @@ class TrainingEngine:
                     session_kwargs=session_kwargs,
                 )
         elif self._configurator.mode == "extend":
-            if hasattr(self._configurator, "extension_overrides"):
-                update_params = {
-                    "overrides": self._configurator.extension_overrides,
-                }
+            overrides = getattr(
+                self._configurator,
+                "extension_overrides",
+                None,
+            )
+            if overrides:
+                update_params = {"overrides": overrides}
+            elif hasattr(self._configurator, "extension_overrides"):
+                # Only launch-topology overrides were given, and those are
+                # applied when the workers are built, not by extending the
+                # session configuration.
+                update_params = None
             else:
                 update_params = {
                     "max_iterations": self._configurator.new_max_iters,
