@@ -60,6 +60,9 @@ class TrainedModel(Resource):
         source_session = Checkpointer.load_checkpoint(
             self._model_checkpoint_path,
             map_location="cpu",
+            # The weights are wanted, not the run they came from: restoring
+            # the source session's RNG would reseed this one mid-setup.
+            restore_rng=False,
         )
         if not isinstance(source_session, FrameworkSession):
             raise TypeError(

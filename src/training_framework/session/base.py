@@ -28,9 +28,11 @@ from training_framework.session.config import (
 from training_framework.session.io import write_session_config
 from training_framework.session.registry import session_class_for_type
 from training_framework.session.state import (
+    CHECKPOINT_VERSION,
     capture_rng_state,
     configuration_from_state,
     restore_rng_state,
+    rng_restore_enabled,
 )
 from training_framework.session.runtime import (
     clear_iteration_state,
@@ -159,9 +161,15 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._worker_exception_reported = False
         self._progress_beacon = None
 
+        # A CUDA stream this process could not apply because it pinned no
+        # device. The parent is such a process: it holds the stream so the
+        # workers it spawns still get it.
+        self._pending_cuda_rng_state = None
+
     @override
     def get_state(self):
         state = {
+            "checkpoint_version": CHECKPOINT_VERSION,
             "session_type": self._session_type,
             "config": deepcopy(self._config),
             "session_config": self._session_config,
@@ -174,7 +182,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             ),
         }
         state.update(self._get_session_type_state())
-        state.update(capture_rng_state())
+        state.update(capture_rng_state(self._pending_cuda_rng_state))
         return state
 
     @staticmethod
@@ -209,7 +217,11 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._components = restored_components
 
         self._session_context = state["session_context"]
-        restore_rng_state(state)
+        if rng_restore_enabled():
+            self._pending_cuda_rng_state = restore_rng_state(
+                state,
+                rng_seed=self._session_settings["rng_seed"],
+            )
 
     def _prepare_for_state_restore(self, state) -> None:
         self._init_args = state["init_args"]

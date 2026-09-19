@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from contextlib import nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
 
@@ -13,6 +14,7 @@ from training_framework.components import (
     Stateful,
 )
 from training_framework.components import hook
+from training_framework.session.state import rng_restore_suppressed
 from training_framework.util import timestamp_str
 
 if TYPE_CHECKING:
@@ -90,9 +92,17 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
             cls,
             path,
             map_location="cpu",
+            restore_rng: bool = True,
     ) -> Session:
-        return torch.load(
-            path,
-            map_location=map_location,
-            weights_only=False,
-        )
+        """Load a checkpointed session.
+
+        `restore_rng=False` loads it without adopting its RNG, for a caller
+        that wants what the session holds rather than the run it came from.
+        """
+        rng = nullcontext() if restore_rng else rng_restore_suppressed()
+        with rng:
+            return torch.load(
+                path,
+                map_location=map_location,
+                weights_only=False,
+            )

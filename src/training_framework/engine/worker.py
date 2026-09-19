@@ -136,8 +136,9 @@ def load_session_for_worker(
         launch_topology: LaunchTopology | None = None,
 ):
     # Before anything is constructed: no component can then be built or
-    # restored against the wrong device.
-    pin_process_device(launch_topology, rank)
+    # restored against the wrong device, and the session's CUDA RNG stream
+    # has a definite device to land on.
+    pin_process_device(launch_topology, rank, session_state)
 
     session = Session.from_state(
         prepare_worker_state(session_state, rank, launch_topology)

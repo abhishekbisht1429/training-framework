@@ -231,25 +231,56 @@ def resolve_launch_topology(
     )
 
 
+def _configured_cuda_device(session_state: Any) -> torch.device | None:
+    """The CUDA device the session configuration asks for, if any.
+
+    A session can use a GPU without nccl -- a single-process run, or a gloo
+    group over CUDA tensors -- and its RNG stream has to land on that device
+    just the same.
+    """
+    if not isinstance(session_state, Mapping):
+        return None
+    config = session_state.get("config")
+    if not isinstance(config, Mapping):
+        return None
+    session_config = config.get("session_config")
+    if not isinstance(session_config, Mapping):
+        return None
+
+    device = session_config.get("device")
+    if not isinstance(device, str) or not device.startswith("cuda"):
+        return None
+    return torch.device(device)
+
+
 def pin_process_device(
         topology: LaunchTopology | None,
         rank: int,
+        session_state: Any = None,
 ) -> torch.device | None:
     """Pin this worker to its CUDA device before anything is constructed.
 
     Doing it here rather than in `DDPResource.setup` means no component can
     be built or restored against the wrong device, and the RNG restore has
-    somewhere definite to land. A non-CUDA backend pins nothing, so a `gloo`
-    run never claims a GPU.
+    somewhere definite to land. A run that wants no GPU pins none, so a
+    `gloo` group over CPU tensors never claims one.
     """
-    if topology is None or not topology.uses_cuda:
+    if not torch.cuda.is_available():
         return None
 
-    local_rank = topology.local_rank(rank)
-    if local_rank >= topology.devices_per_node:
-        raise ValueError(
-            f"Rank {rank} resolves to CUDA device {local_rank}, but only "
-            f"{topology.devices_per_node} device(s) are visible"
-        )
-    torch.cuda.set_device(local_rank)
-    return torch.device("cuda", local_rank)
+    if topology is not None and topology.uses_cuda:
+        local_rank = topology.local_rank(rank)
+        if local_rank >= topology.devices_per_node:
+            raise ValueError(
+                f"Rank {rank} resolves to CUDA device {local_rank}, but only "
+                f"{topology.devices_per_node} device(s) are visible"
+            )
+        torch.cuda.set_device(local_rank)
+        return torch.device("cuda", local_rank)
+
+    device = _configured_cuda_device(session_state)
+    if device is None:
+        return None
+
+    torch.cuda.set_device(device)
+    return device
