@@ -32,7 +32,14 @@ rollback method only when failed initialization can leave partial effects to
 release.
 
 `training_framework.dataloader` remains the public home of the infinite
-samplers.
+samplers. `DistributedInfiniteSampler.get_state()` records how far an epoch
+got across all ranks, and `set_state()` rebases a saved position onto the rank
+and world size the sampler was built with, so a saved position can be restored
+under a different topology.
+
+`training_framework.engine` exports `LaunchTopology` and
+`resolve_launch_topology`, which settle a run's process topology from the
+command line, the environment and the configuration.
 
 ### `Configurator`
 
@@ -43,6 +50,7 @@ samplers.
 | `session_configs` | Deep copy of parsed YAML session definitions in the new operation |
 | `checkpoint_path` | Checkpoint path in resume or extend operations |
 | `extension_overrides` | Session-relative dotlist overrides in the extend operation |
+| `topology_overrides` | `ddp.world_size` / `master_addr` / `master_port` overrides, separated out because they describe the launch rather than the session |
 | `new_max_iters` | Deprecated positional iteration limit, when supplied |
 | `heartbeat_timeout` | Seconds a worker may go without marking progress |
 | `stop_sync_grace_period` | Busy-poll duration before a pending DDP stop collective sleeps |

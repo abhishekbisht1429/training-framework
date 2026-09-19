@@ -74,6 +74,20 @@ python -m my_project.train \
   --resume-session ./runs/session_.../checkpoints/<checkpoint-name>
 ```
 
+The only overrides `--resume-session` accepts are the launch topology —
+`ddp.world_size`, `ddp.master_addr` and `ddp.master_port` — because those
+describe the machine rather than the session:
+
+```bash
+python -m my_project.train \
+  --resume-session ./runs/session_.../checkpoints/<checkpoint-name> \
+  --override ddp.world_size=4
+```
+
+Any other override is rejected with a pointer to `--extend-session`, rather
+than being silently ignored. See
+[Resuming on a different number of GPUs](checkpointing.md#resuming-on-a-different-number-of-gpus).
+
 ### Extend a checkpoint
 
 To restore one training checkpoint and change extension-safe hyperparameters,
@@ -96,6 +110,12 @@ parameter-group values are replaced. The optimizer class cannot change, and
 existing optimizer kwargs cannot be removed. Model, DDP, data-manager,
 component-binding, and other session changes are rejected unless a custom
 component explicitly opts into extension.
+
+The launch-topology keys `ddp.world_size`, `ddp.master_addr` and
+`ddp.master_port` may be given alongside these. They are not session
+configuration, so they bypass the extension rules and are applied when the
+workers are built — an extend can resize the run and change hyperparameters
+in one command.
 
 `optimizer.lr_scheduler` may be replaced entirely; the new schedule restarts
 from the extension point. To drop scheduling and continue at a fixed learning

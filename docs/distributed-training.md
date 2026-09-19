@@ -36,14 +36,41 @@ sessions:
 
 `master_port` should be a string because it is assigned to the `MASTER_PORT` environment variable.
 
+### The launch decides the topology
+
+`world_size`, `master_addr` and `master_port` describe the machine a run is
+launched on, not the run itself, so they are resolved once per launch and
+injected into the `ddp` component as the workers are built. A checkpoint never
+imposes its own.
+
+Each is taken from the first of these that provides it:
+
+1. `--override ddp.<key>=<value>`;
+2. the environment (`WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`), which
+   outranks a stored value only when that value came from a checkpoint — a
+   config file is the launch's own statement and keeps precedence over an
+   ambient variable;
+3. the configuration, whether from the file or the checkpoint;
+4. a default: the visible CUDA device count when resuming, and a free local
+   port.
+
+A new session must still state its `world_size`. Asking for more ranks than
+there are visible CUDA devices is an error when the run is new, and a warning
+with a fallback to the device count when it is resumed — so a checkpoint
+written on eight GPUs resumes on four without being told to.
+
+`--resume-session` accepts these three overrides and rejects any other, which
+belongs to `--extend-session`.
+
 ### Rank-specific session construction
 
 The parent session holds a placeholder DDP resource with rank `-1`. Each child
-process settles its own configuration *before* it builds anything: it records
-its rank against the `ddp` entry in the session state it received, and a
-secondary rank drops the components it does not need from that state. Only then
-is the session reconstructed. Components are wired to each other as they are
-constructed, so a worker never builds a session and then rewires it.
+process settles its own configuration *before* it builds anything: it pins its
+CUDA device, records its rank and the launch's topology against the `ddp`
+entry in the session state it received, and, on a secondary rank, drops the
+components it does not need from that state. Only then is the session
+reconstructed. Components are wired to each other as they are constructed, so
+a worker never builds a session and then rewires it.
 
 - Rank 0 keeps every configured component.
 - Ranks greater than 0 keep `ddp`, roots listed in `parallel_components`, and
@@ -91,6 +118,23 @@ setup runs before DDP setup. Do not also declare that model as requiring `ddp`,
 because the two requirements would form a cycle. During teardown, the wrapped
 reference is cleared and the process group is destroyed.
 
+### Devices and ranks
+
+A rank runs on CUDA ordinal `rank % <visible devices>`. Ordinals are relative
+to `CUDA_VISIBLE_DEVICES`, so which physical GPUs a run uses is controlled
+there: `CUDA_VISIBLE_DEVICES=4,5,6,7` puts rank 0 on physical GPU 4.
+
+The worker pins that device before it constructs anything, so no component is
+ever built or restored against the wrong one, and the session's CUDA RNG
+stream has a definite device to land on. A session that asks for a CUDA
+device without using `nccl` — a single-process run, or a `gloo` group over
+CUDA tensors — pins one too. A `gloo` run over CPU tensors pins nothing and
+never claims a GPU.
+
 ### Current DDP scope
 
-The current CUDA mapping uses the process rank directly as the local CUDA device index. Treat the implementation as a single-node, one-process-per-GPU design. Multi-node execution requires separate global-rank and local-rank handling that is not currently exposed by the framework.
+Treat the implementation as a single-node design: the engine spawns every
+rank itself, so all of them share one `CUDA_VISIBLE_DEVICES` and take the
+first `world_size` entries of it. Multi-node execution, where a rank's global
+index and its local device index genuinely diverge, is not exposed by the
+framework.

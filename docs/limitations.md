@@ -6,7 +6,7 @@
 
 1. **Configured sessions start as one concurrent batch.** Every `sessions[]` entry contributes worker wrappers to the run; the engine does not provide sequencing or dependency ordering between sessions.
 
-2. **DDP is currently single-node oriented.** The process rank is used directly as the CUDA device index. There is no separate local-rank abstraction for multi-node execution.
+2. **DDP is currently single-node oriented.** A rank runs on CUDA ordinal `rank % <visible devices>`, and the engine spawns every rank itself, so all of them share one `CUDA_VISIBLE_DEVICES`. Multi-node execution, where a rank's global index and its local device index genuinely diverge, is not exposed by the framework.
 
 3. **The built-in DDP resource requires a compatible model resource.** The `model` role must resolve to a module accepted by PyTorch DDP. Distributed forward passes should use `session.get_resource("ddp").wrapped_model` while the session is active.
 
@@ -39,8 +39,12 @@
 
 14. **Exact data-pipeline replay is application-dependent.** DataLoader prefetching can move a sampler's issued position ahead of consumed batches. Persist and restore committed batch progress when exact continuation is required.
 
-15. **An unavailable CUDA device currently falls back to CPU.** Validate the final `session.device` in application code when silent fallback is undesirable.
+15. **Resuming on a different world size is deterministic, not bit-exact.** Every rank must resume at the same offset into its own slice, so the sampler position rounds up to a multiple of the new world size: nothing is delivered twice, but up to `world_size - 1` samples from the tail of that epoch are skipped. One CUDA RNG stream is restored onto every rank rather than a per-rank stream, and `batch_size` must stay divisible by the new world size. The same checkpoint, world size and seed still reproduce the same run.
 
-16. **TensorBoard is an external process.** Starting it requires an available executable and port, and including it in DDP parallel components would start one server per retained rank.
+16. **The data order does not follow `rng_seed`.** `DataManager` builds its sampler without a seed, so the shuffle always uses the sampler default of `0`. Two runs that differ only in `rng_seed` see the same data order.
 
-17. **Legacy analysis checkpoint-path ownership is unsupported.** Analysis configurations must place the source checkpoint at `trained_model.model_checkpoint_path`. The removed top-level `model_checkpoint_path` entry and `AnalysisSession.model_checkpoint_path` property are not compatibility aliases. Analysis-session checkpoints that rely only on the removed session-level state must be recreated or explicitly migrated before loading.
+17. **An unavailable CUDA device currently falls back to CPU.** Validate the final `session.device` in application code when silent fallback is undesirable.
+
+18. **TensorBoard is an external process.** Starting it requires an available executable and port, and including it in DDP parallel components would start one server per retained rank.
+
+19. **Legacy analysis checkpoint-path ownership is unsupported.** Analysis configurations must place the source checkpoint at `trained_model.model_checkpoint_path`. The removed top-level `model_checkpoint_path` entry and `AnalysisSession.model_checkpoint_path` property are not compatibility aliases. Analysis-session checkpoints that rely only on the removed session-level state must be recreated or explicitly migrated before loading.

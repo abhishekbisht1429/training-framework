@@ -81,6 +81,14 @@ tensorboard:
   logdir: ./runs/tensorboard  # optional TensorBoard server log directory
 ```
 
+`ddp.world_size`, `ddp.master_addr` and `ddp.master_port` describe the launch
+rather than the session. They are resolved on every run and may be overridden
+from the command line even when resuming, which is what lets a run continue on
+a different number of GPUs — see
+[The launch decides the topology](distributed-training.md#the-launch-decides-the-topology).
+Because `batch_size` is global, a resize changes the per-rank batch while the
+global batch, and so the optimizer's step semantics, stay put.
+
 Optimizer names are resolved from `torch.optim`; scheduler names are resolved
 from `torch.optim.lr_scheduler`. Constructor options belong in each entry's
 `kwargs`. Omit `lr_scheduler` to train without a learning-rate scheduler. A
