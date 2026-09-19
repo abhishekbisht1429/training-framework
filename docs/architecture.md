@@ -19,15 +19,15 @@ TrainingEngine
     +-- capture session state
     |
     +-- spawn worker process rank 0
+    |       +-- adjust the state for this rank, before anything is built
     |       +-- reconstruct the concrete Session subtype from state
-    |       +-- configure rank-specific DDP resource, when enabled
     |       +-- run resources, hooks, and steps
     |       +-- mark stage progress in shared memory
     |       +-- send errors to the parent
     |
     +-- spawn worker processes rank 1..N-1 for DDP
-    |       +-- reconstruct the same session state
-    |       +-- keep only configured parallel components
+    |       +-- drop components this rank does not need, before building
+    |       +-- reconstruct the reduced session state
     |       +-- run the rank-specific session
     |
     +-- monitor worker pipes and process sentinels
@@ -38,6 +38,14 @@ TrainingEngine
 ```
 
 Even a non-DDP run is executed in one spawned worker process. Child processes ignore `SIGINT`; the parent process handles interruption and coordinates shutdown.
+
+Components are constructed prerequisite-first, so each one can take hold of
+whatever it declared while it is being built. That happens on every path --
+fresh configuration, checkpoint restore and worker start-up -- which is what
+lets one component keep a live reference to another across a checkpoint or a
+spawn. A worker therefore settles its rank-specific configuration and its
+component set *before* reconstructing the session, rather than building a
+session and then modifying it.
 
 A concrete `Session` contains:
 
@@ -55,7 +63,8 @@ For each worker, the parent:
 
 1. calls `get_state()` on the concrete session;
 2. passes the state to a new interpreter;
-3. reconstructs the correct subtype with `Session.from_state()`;
+3. adjusts that state for the worker's rank, then reconstructs the correct
+   subtype with `Session.from_state()`;
 4. starts the training or analysis lifecycle in that child process; and
 5. watches the worker's progress beacon, error pipe, and process sentinel.
 

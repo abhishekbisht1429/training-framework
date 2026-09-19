@@ -124,7 +124,11 @@ def set_state(self, state) -> None:
     ...
 ```
 
-The framework captures each component's constructor arguments and uses them to reconstruct the component before calling `set_state()`.
+The framework captures each component's constructor arguments and uses them to
+reconstruct the component before calling `set_state()`. Reconstruction happens
+prerequisite-first, so a component that took hold of another one while it was
+being built holds it again, and state is restored only after every component
+exists.
 
 ## Component registration and discovery
 
@@ -182,12 +186,17 @@ metrics: {}
 ```
 
 The framework recursively activates resources, hooks, steps, and wrapped hooks
-required by those roots. A missing dependency is constructed automatically and
-without arguments only when its effective constructor is the inherited
-`Component.__init__`. If its class or a component base class defines another
-constructor, add a top-level mapping for it. Unrelated registered components
-stay inactive. The former top-level `components` list is no longer supported;
-configs that contain it receive a migration error.
+required by those roots, constructing each one after everything it declared. A
+missing dependency is constructed automatically and without arguments only when
+its effective constructor is the inherited `Component.__init__`. If its class
+or a component base class defines another constructor, add a top-level mapping
+for it. Unrelated registered components stay inactive. A dependency cycle has
+no valid construction order and is rejected, naming the chain that closed it.
+The former top-level `components` list is no longer supported; configs that
+contain it receive a migration error.
+
+`session.activate_component(name, config)` does the same thing programmatically
+for a component added after the session was built.
 
 `TrainingSession` activates `logger` and `checkpointer` by default.
 `AnalysisSession` instead activates `trained_model` and its analysis-specific

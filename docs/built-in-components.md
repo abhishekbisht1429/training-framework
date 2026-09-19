@@ -346,6 +346,28 @@ instead of through `attach_linked_module` raises `ComponentDependencyError`
 when the session captures state, naming both components and the shared tensor,
 because it would otherwise be stored twice.
 
+**What is recorded.** `linked_components` is a copy of the attribute ->
+component name map built by `attach_linked_module`: the key is the attribute
+the child hangs on (normally the role name), the value is the registered name
+of the implementation that filled it.
+
+```python
+{"patch_embedding": "conv_patch_embedding",
+ "positional_embedding": "learned_positional_embedding_2d",
+ "sequence_encoder": "torch_transformer_encoder"}
+```
+
+The map does three jobs: it says which tensors belong to someone else, it tells
+the ownership walk which subtrees to skip, and it is saved in the checkpoint
+under `linked`. `set_state` compares the saved map against the current one and
+refuses state captured from a differently wired instance -- a component class
+whose `linked_modules` or `attach_dependencies` changed since the checkpoint
+was written, or state moved between instances by hand. It is not a
+configuration guard: a restore rebuilds components from the checkpoint's own
+bindings, so rebinding a role in a later config never reaches this check, and a
+renamed component is caught earlier, when the checkpoint entry no longer
+matches a registered name.
+
 **Owning a component privately.** A component class may also be used as an
 ordinary submodule -- constructed and owned by another component, never
 registered, its weights checkpointed inside its owner. That is allowed as long

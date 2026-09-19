@@ -40,9 +40,15 @@ hook, it saves on:
 - CUDA RNG state.
 
 Each component's state holds only what that component owns. A `ModuleResource`
-excludes every tensor reachable from a resource it attached, and the session rejects a capture in which two components would save the same tensor, so weights shared
+excludes every tensor reachable from a resource it attached, so weights shared
 between components are stored once, by the component that created them, and
-restored as one shared instance.
+restored as one shared instance. A component held *privately* by another --
+constructed by it, never registered -- is not shared, so its weights are
+checkpointed inside its owner.
+
+Capturing session state checks this rather than assuming it: if two components
+would save the same tensor, the capture is rejected and the error names both
+components and the tensor.
 
 Transient infrastructure, such as the selected device, iteration context, error pipe, and progress beacon, is recreated in each worker.
 

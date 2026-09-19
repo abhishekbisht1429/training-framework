@@ -7,7 +7,13 @@
 The supported public imports are grouped by responsibility:
 
 ```python
-from training_framework.components import Resource, Step, resource, step
+from training_framework.components import (
+    ModuleResource,
+    Resource,
+    Step,
+    resource,
+    step,
+)
 from training_framework.components.builtin import Checkpointer, TrainedModel
 from training_framework.engine import Configurator, TrainingEngine
 from training_framework.session import (
@@ -90,9 +96,10 @@ The engine monitors workers while leaving the context.
 | `get_all_resources()` | Return configured resources |
 | `get_all_hooks()` | Return configured hooks |
 | `get_all_steps()` | Return configured steps |
-| `register_resource(resource)` | Add a registered resource instance |
-| `register_hook(hook)` | Add a registered hook instance |
-| `add_step(step)` | Add a registered step instance |
+| `activate_component(name, config)` | Activate a registered component and its prerequisites; only before setup, and the way to add one that declares dependencies |
+| `register_resource(resource)` | Add a registered resource instance that declares no dependencies |
+| `register_hook(hook)` | Add a registered hook instance that declares no dependencies |
+| `add_step(step)` | Add a registered step instance that declares no dependencies |
 | `unregister_resource(name)` | Remove a resource from the session |
 | `unregister_hook(name)` | Remove a hook from the session |
 | `remove_step(name)` | Remove a step from the session |
@@ -100,6 +107,34 @@ The engine monitors workers while leaving the context.
 | `set_state(state)` | Restore state into a session |
 | `Session.from_state(state)` | Reconstruct and dispatch to the concrete session class recorded in state |
 | `TrainingSession.update_max_iters(value)` | Replace a training session's maximum iteration count |
+
+### Writing a component
+
+| Member | Purpose |
+|---|---|
+| `Component.get_dependency(name)` | Return a declared prerequisite; valid only while the component is being constructed |
+| `Component.has_dependency(name)` | Whether a declared prerequisite is active during construction |
+| `Component.config_schema` | Optional dataclass; the configuration mapping is parsed into `self._cfg` |
+| `parse_component_config(cls, config)` | Parse a mapping against a `config_schema` directly |
+| `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
+| `Stateful.get_state()` / `set_state(state)` | Capture and restore a component's own state |
+
+Components are constructed prerequisite-first on every path, so
+`get_dependency` is how a component takes hold of another one for good; see
+[components](components.md#holding-another-component).
+
+### `ModuleResource`
+
+| Member | Purpose |
+|---|---|
+| `ModuleResource` | An `nn.Module` resource composed of other resources; see [built-in components](built-in-components.md#moduleresource) |
+| `linked_modules` | Resource names attached as submodules under the same attribute |
+| `attach_dependencies()` | Override to attach prerequisites conditionally or under another name |
+| `attach_linked_module(attribute, component)` | Attach one component as a submodule owned by another component |
+| `linked_components` | Copy of the attribute -> component name map; recorded in the checkpoint and checked on restore |
+| `captured_tensors()` | The live tensors this component checkpoints, by state key |
+| `usable_as_plain_module(cls)` | Whether a component class may be owned privately as an ordinary submodule |
+| `plain_module_api` | Members a privately owned component may not override |
 
 ### Registration decorators
 
@@ -112,12 +147,6 @@ The engine monitors workers while leaving the context.
 | `@requires_hook(name)` | Declare a Hook prerequisite for a Step |
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
 | `@wraps(name)` | Declare that a Hook wraps another Hook |
-| `ModuleResource` | An `nn.Module` resource composed of other resources; see [built-in components](built-in-components.md#moduleresource) |
-| `ModuleResource.usable_as_plain_module(cls)` | Whether a component class may be owned privately as an ordinary submodule |
-| `Component.get_dependency(name)` | Return a declared prerequisite; valid only while the component is being constructed |
-| `Component.has_dependency(name)` | Whether a declared prerequisite is active |
-| `Component.config_schema` | Optional dataclass parsed into `self._cfg` |
-| `Session.activate_component(name, config)` | Activate a registered component and its prerequisites; only before setup |
 | `component_registry(session_type)` | Return shared components overlaid by the matching scoped registry |
 | `topological_sort_of_components(..., session_type=...)` | Validate and order the selected session type's component graph |
 | `@register_session_type(name)` | Register a concrete Session subclass for engine and checkpoint dispatch |

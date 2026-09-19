@@ -38,11 +38,21 @@ sessions:
 
 ### Rank-specific session construction
 
-The parent session contains a placeholder DDP resource with rank `-1`. In each child process, the framework replaces it with a resource configured for that worker's rank.
+The parent session holds a placeholder DDP resource with rank `-1`. Each child
+process settles its own configuration *before* it builds anything: it records
+its rank against the `ddp` entry in the session state it received, and a
+secondary rank drops the components it does not need from that state. Only then
+is the session reconstructed. Components are wired to each other as they are
+constructed, so a worker never builds a session and then rewires it.
 
 - Rank 0 keeps every configured component.
-- Ranks greater than 0 keep `ddp`, roots listed in `parallel_components`, and their recursive dependency and wrapping-target closure.
-- Non-parallel logging, checkpointing, and other rank-zero-only work can therefore remain off secondary ranks by omitting those roots.
+- Ranks greater than 0 keep `ddp`, roots listed in `parallel_components`, and
+  their recursive dependency and wrapping-target closure. Because the
+  dependency graph is declared on the component classes, that closure is
+  resolved from the state alone -- nothing a secondary rank will discard is
+  ever constructed.
+- Non-parallel logging, checkpointing, and other rank-zero-only work can
+  therefore remain off secondary ranks by omitting those roots.
 
 ### What the DDP resource does
 

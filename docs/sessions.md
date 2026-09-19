@@ -10,7 +10,8 @@ Both `TrainingSession` and `AnalysisSession` are context managers and iterators.
 Construct session
     |
     +-- import component package
-    +-- instantiate configured components
+    +-- construct configured components, prerequisite-first,
+    |   each one taking hold of what it declared
     |
 Enter session
     +-- resource.setup() in dependency order
