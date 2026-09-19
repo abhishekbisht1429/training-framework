@@ -14,6 +14,7 @@ from tests.test_utils import make_config
 from training_framework.components import (
     ComponentDependencyError,
     ComponentView,
+    component_registry,
     ModuleResource,
     Resource,
     constructing_component,
@@ -228,7 +229,7 @@ def test_attaching_a_different_child_to_a_taken_attribute_is_rejected():
         model.attach_linked_module("mr_encoder", PicklableEncoder({}))
 
 
-def test_a_component_attached_without_attach_linked_module_is_rejected():
+def test_capturing_another_components_weights_is_rejected():
     _declare_encoder_and_model()
 
     @requires_resource("mr_encoder")
@@ -240,34 +241,113 @@ def test_a_component_attached_without_attach_linked_module_is_rejected():
             self.encoder = self.get_dependency("mr_encoder")
 
     components = _activate({"mr_sloppy": {}, "mr_encoder": {}})
-    sloppy = components.get_resource("mr_sloppy")
 
     with pytest.raises(
         ComponentDependencyError,
-        match="attached as a plain submodule",
+        match="are the same tensor, so it would be checkpointed twice",
     ):
-        sloppy.get_state()
+        components.get_state()
 
 
-def test_a_component_nested_below_a_direct_child_is_rejected():
+def test_another_components_weights_are_found_below_a_direct_child():
     _declare_encoder_and_model()
 
     @requires_resource("mr_encoder")
     @resource("mr_nested")
     class Nested(ModuleResource):
         def attach_dependencies(self):
-            # Hidden inside a container, so a direct-children check would
-            # miss it and both components would checkpoint these weights.
+            # Hidden inside a container, where a tree walk from the parent
+            # alone could miss it.
             self.wrapper = nn.Sequential(self.get_dependency("mr_encoder"))
 
     components = _activate({"mr_nested": {}, "mr_encoder": {}})
-    nested = components.get_resource("mr_nested")
 
     with pytest.raises(
         ComponentDependencyError,
-        match="'wrapper.0' attached as a plain",
+        match=r"mr_nested\.wrapper\.0\.linear\.weight",
     ):
-        nested.get_state()
+        components.get_state()
+
+
+def test_a_component_may_be_owned_privately_as_an_ordinary_module():
+    _declare_encoder_and_model()
+    encoder_class = component_registry()["mr_encoder"]
+
+    @resource("mr_private_owner")
+    class PrivateOwner(ModuleResource):
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.private = encoder_class({})
+            self.stack = nn.Sequential(encoder_class({}))
+
+    components = _activate({"mr_private_owner": {}})
+    owner = components.get_resource("mr_private_owner")
+
+    # Nobody else holds these, so the owner checkpoints them itself.
+    assert set(owner.get_state()["state_dict"]) == {
+        "private.linear.weight", "private.linear.bias",
+        "stack.0.linear.weight", "stack.0.linear.bias",
+    }
+    assert owner.get_state()["linked"] == {}
+    components.get_state()
+
+
+def test_a_privately_owned_component_survives_a_state_round_trip(tmp_path):
+    _declare_encoder_and_model()
+    encoder_class = component_registry()["mr_encoder"]
+
+    @resource("mr_private_round_trip")
+    class PrivateOwner(ModuleResource):
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.private = encoder_class({})
+
+    config = make_config(tmp_path / "private")
+    config["mr_private_round_trip"] = {}
+    session = TrainingSession(config)
+    with torch.no_grad():
+        session.get_resource("mr_private_round_trip").private.linear.weight.fill_(0.5)
+
+    restored = TrainingSession.from_state(session.get_state())
+
+    weight = restored.get_resource("mr_private_round_trip").private.linear.weight
+    assert torch.equal(weight, torch.full((4, 4), 0.5))
+
+
+def test_a_privately_owned_component_the_session_drives_is_rejected():
+    @resource("mr_lifecycle")
+    class WithLifecycle(ModuleResource):
+        def setup(self, session):
+            super().setup(session)
+
+    @resource("mr_lifecycle_owner")
+    class Owner(ModuleResource):
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.private = WithLifecycle({})
+
+    components = _activate({"mr_lifecycle_owner": {}})
+    owner = components.get_resource("mr_lifecycle_owner")
+
+    with pytest.raises(ComponentDependencyError, match="driven by the session"):
+        owner.get_state()
+
+
+def test_a_privately_owned_component_with_prerequisites_is_rejected():
+    _, model_class = _declare_encoder_and_model()
+
+    # mr_model declares linked_modules, so only the session can wire it.
+    with constructing_component(_StubView({"mr_encoder": PicklableEncoder({})})):
+        dependent = model_class({})
+
+    @resource("mr_dependent_owner")
+    class Owner(ModuleResource):
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.private = dependent
+
+    with pytest.raises(ComponentDependencyError, match="driven by the session"):
+        Owner({}).get_state()
 
 
 def test_a_child_may_hold_components_of_its_own():

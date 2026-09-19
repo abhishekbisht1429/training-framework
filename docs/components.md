@@ -368,7 +368,8 @@ supported for components that declare no dependencies. Constructing one that
 does raises `ComponentDependencyError` pointing at `activate_component`.
 
 `ModuleResource` (see [built-in components](built-in-components.md#moduleresource))
-implements all of this for `nn.Module` resources.
+implements all of this for `nn.Module` resources, including the rules for
+owning another component's weights versus holding one privately.
 
 ### Declaring a configuration schema
 

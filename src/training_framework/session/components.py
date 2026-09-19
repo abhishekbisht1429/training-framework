@@ -129,7 +129,36 @@ class SessionComponents:
         state.pop("_links_dirty", None)
         self.__dict__.update(state)
 
+    def _check_tensor_ownership(self) -> None:
+        """Check no tensor is about to be checkpointed by two components.
+
+        This is the ground truth the per-component check cannot see: a
+        component only knows its own tree, so it cannot tell a module it owns
+        privately from one another component also captures. Checking the
+        captured tensors themselves catches double ownership whatever shape
+        the module trees take, and needs no bookkeeping to stay correct.
+        """
+        owners: dict[int, tuple[str, str]] = {}
+        for name, component in self.components.items():
+            captured_tensors = getattr(component, "captured_tensors", None)
+            if captured_tensors is None:
+                continue
+            for key, tensor in captured_tensors().items():
+                previous = owners.get(id(tensor))
+                if previous is not None:
+                    other_name, other_key = previous
+                    raise ComponentDependencyError(
+                        f"'{name}.{key}' and '{other_name}.{other_key}' are "
+                        "the same tensor, so it would be checkpointed twice. "
+                        "A component that holds another component's weights "
+                        "must attach it with attach_linked_module(), so the "
+                        "component that created them is the one that saves "
+                        "them."
+                    )
+                owners[id(tensor)] = (name, key)
+
     def get_state(self) -> dict[str, dict[str, Any]]:
+        self._check_tensor_ownership()
         return {
             name: {
                 "component_type": _component_type(component).__name__,

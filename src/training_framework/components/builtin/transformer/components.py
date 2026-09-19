@@ -623,10 +623,10 @@ class ConditionedPoolingQuery(ModuleResource):
     """Build one query per sample from named conditioning inputs.
 
     Each entry of `inputs` describes one conditioning input: `module` is a
-    dotted path to a plain `nn.Module` subclass -- not a component, which
-    would own weights of its own -- the optional `reduce` wraps it in
-    `TokenReduction`, and every other key is passed to its constructor. Each
-    encoder must produce `embed_dim` features.
+    dotted path to any `nn.Module` subclass, including a block component that
+    the session does not need to drive, the optional `reduce` wraps it in
+    `TokenReduction`, and every other key configures it. Each encoder must
+    produce `embed_dim` features.
 
     The encodings are concatenated in `inputs` order and passed through an MLP
     with `hidden_dims` hidden layers. `activation` may be `None` (or "none")
@@ -680,18 +680,21 @@ class ConditionedPoolingQuery(ModuleResource):
             kwargs.pop("module", None),
             f"{context}.module",
         )
-        if issubclass(module_class, ModuleResource):
-            # A component owns and checkpoints its own weights, so it cannot
-            # also be a private submodule here -- the ownership check would
-            # reject it. Bind it to a role instead, or use a plain nn.Module.
+        is_component = issubclass(module_class, ModuleResource)
+        if is_component and not ModuleResource.usable_as_plain_module(module_class):
+            # This encoder is owned privately by the query, so the session
+            # never wires or sets it up. A component that needs either has to
+            # be bound to a role instead.
             raise TypeError(
-                f"{context}.module must be a plain nn.Module, not the "
-                f"component {module_class.__name__}. Components own their "
-                "weights and are wired through roles; write a plain module "
-                "for a conditioning encoder."
+                f"{context}.module cannot be {module_class.__name__}: it "
+                "declares prerequisites or a lifecycle the session drives, "
+                "which would never run for an encoder owned here. Bind it to "
+                "a role, or use a plain nn.Module."
             )
         try:
-            encoder = module_class(**kwargs)
+            # A component takes its configuration as one mapping; a plain
+            # module takes keyword arguments.
+            encoder = module_class(kwargs) if is_component else module_class(**kwargs)
         except (TypeError, ValueError) as error:
             raise type(error)(f"Invalid {context} config: {error}") from error
         return encoder if reduce is None else TokenReduction(encoder, reduce=reduce)

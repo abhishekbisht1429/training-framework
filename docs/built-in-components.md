@@ -331,6 +331,7 @@ class CaptionedImageModel(ModuleResource):
 | `attach_linked_module(attribute, component)` | Attach one component; rejects non-modules and re-attaching a different child |
 | `linked_components` | The attribute -> component name map |
 | `config_schema` | Optional dataclass; parsed into `self._cfg` (see [components](components.md)) |
+| `usable_as_plain_module(cls)` | Whether a component class may be owned privately as an ordinary submodule |
 
 **Ownership.** An attached child is a real submodule, so `model.parameters()`
 covers it and `ddp`, the optimizer and `layer_inspector` see one module tree,
@@ -340,10 +341,20 @@ checkpoints only the weights it created. `set_state` loads in place, which is
 what keeps a parent's references valid.
 
 A child may be shared by several models and is restored as one shared
-instance. Attaching a component as a plain submodule instead of through
-`attach_linked_module` raises `ComponentDependencyError`, because its weights
-would otherwise be stored twice. For the same reason a component cannot be a
-private submodule of another component: bind it to a role instead.
+instance. Attaching *another component's* weights as a plain submodule
+instead of through `attach_linked_module` raises `ComponentDependencyError`
+when the session captures state, naming both components and the shared tensor,
+because it would otherwise be stored twice.
+
+**Owning a component privately.** A component class may also be used as an
+ordinary submodule -- constructed and owned by another component, never
+registered, its weights checkpointed inside its owner. That is allowed as long
+as the session drives nothing about it: it must declare no `linked_modules`
+and override none of `plain_module_api` (`attach_dependencies`, `get_state`,
+`set_state`, `rollback_setup`, `setup`, `teardown`). One that does is rejected
+with an explanation, because the session never calls those for a module it
+does not know about. `ModuleResource.usable_as_plain_module(cls)` answers the
+same question in code.
 
 ### Transformer blocks
 
@@ -389,7 +400,7 @@ conditioned_pooling_query:
   embed_dim: 256
   inputs:
     obj_patch:                 # the keyword this input is passed as
-      module: my_project.encoders.PatchTokens
+      module: training_framework.components.builtin.transformer.ConvPatchEmbedding
       in_channels: 3           # any other key goes to the module constructor
       patch_size: 16
       embed_dim: 256
@@ -401,10 +412,12 @@ conditioned_pooling_query:
   hidden_dims: [256]
 ```
 
-`module` is a dotted path to a **plain** `nn.Module` subclass, including your
-own. It may not be a component: a component owns and checkpoints its own
-weights, so it belongs in a role rather than inside another component, and
-naming one here is rejected. `reduce` wraps the module in `TokenReduction`,
+`module` is a dotted path to any `nn.Module` subclass, including your own and
+including a block component the session does not need to drive -- a component
+encoder takes its keys as its configuration, and its weights are checkpointed
+inside the query that owns it. A component that declares prerequisites or a
+lifecycle is rejected, since neither would run here; bind that one to a role
+instead. `reduce` wraps the module in `TokenReduction`,
 which turns `(B, N, D)` tokens into one `(B, D)` vector -- that is how a patch
 encoder, or any other token-producing module, meets the contract. An encoder
 that declares `embed_dim` or `out_features` is checked when the query is
@@ -469,7 +482,7 @@ conditioned_pooling_query:
   embed_dim: 256
   inputs:
     obj_patch:
-      module: my_project.encoders.PatchTokens
+      module: training_framework.components.builtin.transformer.ConvPatchEmbedding
       in_channels: 3
       patch_size: 16
       embed_dim: 256

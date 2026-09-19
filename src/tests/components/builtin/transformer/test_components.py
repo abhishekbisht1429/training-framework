@@ -460,6 +460,32 @@ def test_conditioned_query_builds_encoders_from_dotted_paths():
                  obj_patch_location=torch.randn(2, 2)).shape == (2, 1, EMBED_DIM)
 
 
+def test_conditioned_query_accepts_a_block_component_as_an_encoder():
+    query = ConditionedPoolingQuery({
+        "embed_dim": EMBED_DIM,
+        "inputs": {
+            "obj_patch": {
+                "module": (
+                    "training_framework.components.builtin.transformer."
+                    "ConvPatchEmbedding"
+                ),
+                "in_channels": 3,
+                "patch_size": 4,
+                "embed_dim": EMBED_DIM,
+                "reduce": "mean",
+            },
+        },
+    })
+
+    # The block needs nothing from the session, so the query simply owns it.
+    assert isinstance(query.encoders["obj_patch"].module, ConvPatchEmbedding)
+    assert query(2, obj_patch=torch.randn(2, 3, 8, 8)).shape == (2, 1, EMBED_DIM)
+    assert any(
+        key.startswith("encoders.obj_patch.module.")
+        for key in query.get_state()["state_dict"]
+    )
+
+
 def test_conditioned_query_accepts_any_nn_module_encoder():
     query = ConditionedPoolingQuery({
         "embed_dim": EMBED_DIM,
@@ -529,10 +555,10 @@ def test_conditioned_query_rejects_encoders_with_the_wrong_output_size():
         (
             {"x": {"module": (
                 "training_framework.components.builtin.transformer."
-                "ConvPatchEmbedding"
+                "PooledPatchTransformer"
             )}},
             TypeError,
-            "must be a plain nn.Module, not the component",
+            "declares prerequisites or a lifecycle the session drives",
         ),
         ({"x": {"module": "torch.nn.Linear"}}, TypeError, "Invalid .*inputs.x config"),
         ({"bad name": {"module": "torch.nn.Identity"}}, ValueError, "identifiers"),

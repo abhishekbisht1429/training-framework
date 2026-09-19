@@ -113,6 +113,7 @@ The engine monitors workers while leaving the context.
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
 | `@wraps(name)` | Declare that a Hook wraps another Hook |
 | `ModuleResource` | An `nn.Module` resource composed of other resources; see [built-in components](built-in-components.md#moduleresource) |
+| `ModuleResource.usable_as_plain_module(cls)` | Whether a component class may be owned privately as an ordinary submodule |
 | `Component.get_dependency(name)` | Return a declared prerequisite; valid only while the component is being constructed |
 | `Component.has_dependency(name)` | Whether a declared prerequisite is active |
 | `Component.config_schema` | Optional dataclass parsed into `self._cfg` |

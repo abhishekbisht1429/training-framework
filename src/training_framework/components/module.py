@@ -109,10 +109,47 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
                 owned.add(id(tensor))
         return owned
 
+    plain_module_api: ClassVar[tuple[str, ...]] = (
+        "attach_dependencies",
+        "get_state",
+        "set_state",
+        "rollback_setup",
+        "setup",
+        "teardown",
+    )
+    """Members a privately owned component may not override.
+
+    A component held as a private submodule is used purely as an
+    `nn.Module`: the session never sets it up and never asks it for state, so
+    overriding any of these would silently do nothing. Extend this list when
+    `ModuleResource` grows another member the session drives.
+    """
+
+    @classmethod
+    def usable_as_plain_module(cls, component_class: type) -> bool:
+        """Whether this component class may be owned as an ordinary submodule.
+
+        True when the session drives nothing about it: it asks for no
+        prerequisites and overrides none of `plain_module_api`, so holding one
+        privately loses nothing.
+        """
+        if not isinstance(component_class, type) or not issubclass(
+                component_class, ModuleResource,
+        ):
+            return False
+        if component_class.linked_modules:
+            # It expects the session to hand it prerequisites, which only
+            # happens for a component the session itself constructed.
+            return False
+        return all(
+            getattr(component_class, member) is getattr(ModuleResource, member)
+            for member in cls.plain_module_api
+        )
+
     def _check_child_ownership(self) -> None:
         # Walks the whole tree, not just direct children: a component nested
         # inside an nn.Sequential or ModuleList would otherwise escape the
-        # check, and its weights would be captured here *and* by itself.
+        # check.
         attached = {
             id(getattr(self, attribute))
             for attribute in self._linked_components
@@ -126,26 +163,45 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
                     # responsibility.
                     continue
                 if isinstance(child, Component):
-                    raise ComponentDependencyError(
-                        f"{self._component_name()} has component '{path}' "
-                        "attached as a plain submodule; use "
-                        "attach_linked_module() so its weights are "
-                        "checkpointed once, by the component that owns them"
-                    )
+                    if not self.usable_as_plain_module(type(child)):
+                        raise ComponentDependencyError(
+                            f"{self._component_name()} holds component "
+                            f"'{path}' as a private submodule, but "
+                            f"{type(child).__name__} is driven by the "
+                            "session: it declares prerequisites or overrides "
+                            f"one of {list(self.plain_module_api)}, which "
+                            "would never run here. Bind it to a role and "
+                            "attach it with attach_linked_module() instead."
+                        )
+                    # Otherwise it is an ordinary module that happens to be a
+                    # component class. Its weights are captured here, and
+                    # SessionComponents.get_state() confirms nothing else
+                    # captures them.
                 visit(child, f"{path}.")
 
         visit(self, "")
 
+    def captured_tensors(self) -> dict[str, Any]:
+        """Return the live tensors this component checkpoints, by state key.
+
+        The session cross-checks these across components so that every tensor
+        is captured exactly once, whatever shape the module tree takes.
+        """
+        owned_elsewhere = self._tensors_owned_by_children()
+        return {
+            key: value
+            for key, value in self.state_dict(keep_vars=True).items()
+            if id(value) not in owned_elsewhere
+        }
+
     def get_state(self) -> dict[str, Any]:
         self._check_child_ownership()
-        owned_elsewhere = self._tensors_owned_by_children()
         return {
             "version": self._STATE_VERSION,
             "linked": dict(self._linked_components),
             "state_dict": {
                 key: value.detach().clone()
-                for key, value in self.state_dict(keep_vars=True).items()
-                if id(value) not in owned_elsewhere
+                for key, value in self.captured_tensors().items()
             },
         }
 
@@ -162,12 +218,7 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
                 f"{self._linked_components}"
             )
 
-        owned_elsewhere = self._tensors_owned_by_children()
-        expected = {
-            key
-            for key, value in self.state_dict(keep_vars=True).items()
-            if id(value) not in owned_elsewhere
-        }
+        expected = set(self.captured_tensors())
         provided = set(state["state_dict"])
         unexpected = sorted(provided - expected)
         if unexpected:
