@@ -16,3 +16,6 @@
 
 ## Running commands
 - Unless required, run all commands in silent mode without any verbose, wherever possible.
+
+## Learning
+- When you learn something generic from your sessions, add it to .context/LEARNING.md.
