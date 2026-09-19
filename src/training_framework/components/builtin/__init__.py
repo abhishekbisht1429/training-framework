@@ -19,7 +19,6 @@ from training_framework.components.builtin.observability import (
 )
 from training_framework.components.builtin.optimization import OptimizerHook
 from training_framework.components.builtin.transformer import (
-    ModuleFactory,
     PatchTransformer,
     PooledPatchTransformer,
 )
@@ -33,7 +32,6 @@ __all__ = [
     "LayerCapture",
     "LayerInspector",
     "Logger",
-    "ModuleFactory",
     "OptimizerHook",
     "PatchTransformer",
     "PooledPatchTransformer",
