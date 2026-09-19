@@ -323,17 +323,17 @@ component constructor. Activation follows dependency edges outward: activating
 a wrapped hook alone does not activate hooks that wrap it. For DDP, secondary
 ranks retain the same closure for each root named in `ddp.parallel_components`.
 
-### Linking components to each other
+### Holding another component
 
 `setup(session)` is the first point where a component can reach another one,
 and it does not run when a session is restored from a checkpoint. A component
-that needs to *hold* another component therefore wires itself up in the link
-phase instead.
+that needs to *hold* another component therefore takes it during construction.
 
-`Component.link(components)` runs in prerequisite-first order on every
-construction path -- fresh configuration, checkpoint restore and worker
-fix-up -- so a reference captured at save time exists again at load time. The
-default is a no-op, so components that do not need it are unaffected.
+Components are constructed prerequisite-first on every path -- fresh
+configuration, checkpoint restore and worker start-up -- so by the time a
+constructor runs, everything it declared with `@requires_resource` already
+exists. `self.get_dependency(name)` returns it, and a reference captured at
+save time exists again at load time.
 
 ```python
 @requires_resource("text_encoder")
@@ -341,26 +341,74 @@ default is a no-op, so components that do not need it are unaffected.
 class CaptionedImageModel(ModuleResource):
     linked_modules = ("text_encoder",)
 
-    def build(self):
-        dim = self.text_encoder.embed_dim   # already attached
+    def __init__(self, config=None):
+        super().__init__(config)          # attaches text_encoder
+        dim = self.text_encoder.embed_dim
         self.head = nn.Linear(2 * dim, self._config["num_classes"])
 ```
 
-The link phase is deliberately weaker than `setup`:
+Construction is deliberately weaker than `setup`:
 
 - There is no session, so no device, no iteration context, no
   `@requires_context` access and no initialised process group. Work that needs
   those stays in `setup`.
 - Lookup is restricted to declared prerequisites. Asking for a resource the
-  class did not declare with `@requires_resource` raises `ComponentLinkError`,
-  which is what makes the prerequisite-first order a guarantee.
-- It may run more than once -- registering or replacing a component marks
-  links stale, and the session re-links when it is entered -- so
-  implementations must be idempotent. Links are frozen once setup has run;
-  `session.relink_components()` raises after that.
+  class did not declare with `@requires_resource` raises
+  `ComponentDependencyError`, which is what makes the prerequisite-first order
+  a guarantee.
+- A dependency graph with a cycle has no valid construction order and is
+  rejected, naming the chain that closed it.
+
+Because wiring happens at construction, a component that declares dependencies
+must be built *by the session*. Configuration is the usual way;
+`session.activate_component(name, config)` is the programmatic one, and it
+resolves bindings and activates the dependency closure the same way. Handing
+`session.register_resource()` an instance you constructed yourself stays
+supported for components that declare no dependencies. Constructing one that
+does raises `ComponentDependencyError` pointing at `activate_component`.
 
 `ModuleResource` (see [built-in components](built-in-components.md#moduleresource))
 implements all of this for `nn.Module` resources.
+
+### Declaring a configuration schema
+
+A component may set `config_schema` to a dataclass. The framework then parses
+the configuration mapping into `self._cfg` during construction, so the
+component stops hand-checking keys:
+
+```python
+@dataclass(frozen=True)
+class EncoderConfig:
+    embed_dim: int
+    num_heads: int = 8
+
+    def __post_init__(self):
+        if self.embed_dim % self.num_heads:
+            raise ValueError("embed_dim must be divisible by num_heads")
+
+
+@resource("text_encoder")
+class TextEncoder(ModuleResource):
+    config_schema = EncoderConfig
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.attention = nn.MultiheadAttention(
+            self._cfg.embed_dim, self._cfg.num_heads,
+        )
+```
+
+Fields validate the *shape* of the configuration -- which keys are required,
+which are accepted, and what they are coerced to -- and `__post_init__`
+validates *meaning*. Unknown and missing keys are reported with the component
+name and the keys it accepts, OmegaConf containers are normalised, and a field
+annotated as a `tuple` accepts a YAML list. Every failure is raised as
+`Invalid <component> config: ...`.
+
+`self._config` remains the raw mapping, because that is what a checkpoint
+replays to rebuild the component; `self._cfg` is a derived view. Nested specs
+whose entries are arbitrary user-supplied values stay hand-parsed by the
+component that understands them.
 
 ### Missing-dependency errors
 

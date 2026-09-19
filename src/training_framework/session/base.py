@@ -122,7 +122,6 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             self._config,
             default_configs=self._default_component_configs(),
         )
-        self._components.link_components()
 
     def _get_session_type_state(self) -> dict[str, Any]:
         return {}
@@ -356,14 +355,16 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _component_dependency_closure(self, names) -> set[str]:
         return self._components.dependency_closure(names)
 
-    def relink_components(self) -> None:
-        """Re-run the link phase after components were added or replaced.
+    def activate_component(self, name: str, config=None) -> str:
+        """Activate a registered component and its prerequisites.
 
-        Only valid before the session is set up: links are frozen once
-        resources have run their setup.
+        Only valid before the session is set up. This is the supported way to
+        add a component that declares dependencies: it resolves bindings and
+        constructs each component with its prerequisites visible, which
+        registering a hand-built instance cannot do.
         """
         self._raise_if_not_new()
-        self._components.link_components()
+        return self._components.activate_component(name, config)
 
     def get_all_hooks(self):
         return list(self._components.hooks.values())
@@ -453,8 +454,6 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     @context_entry
     def __enter__(self):
         self._raise_if_finished()
-        # Honour components registered programmatically since construction.
-        self._components.ensure_linked()
 
         ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
         if self._session_settings.get("show_execution_graph", True):

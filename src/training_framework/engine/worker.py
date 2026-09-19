@@ -2,16 +2,83 @@ import os
 import signal
 import time
 import traceback
+from collections.abc import Mapping
 
 import torch
 from torch import distributed, multiprocessing
 
+from training_framework.components.config import component_bindings_from_config
 from training_framework.session import Session, TrainingSession
+from training_framework.session.components import SessionComponents
+from training_framework.session.config import normalize_session_type
 from training_framework.session.progress import ProgressBeacon
+from training_framework.session.state import configuration_from_state
+from training_framework.util import import_all_modules
 
 
 _STOP_SYNC_GRACE_PERIOD = 0.01
 _STOP_SYNC_POLL_INTERVAL = 0.005
+
+
+def prepare_worker_state(session_state, rank: int):
+    """Return `session_state` adjusted for `rank`, before anything is built.
+
+    Components are wired to each other as they are constructed, so a rank's
+    component set and the rank-specific `ddp` configuration have to be settled
+    first. Both are decided by data the state already carries: the dependency
+    graph is class-level, so the closure a rank needs can be resolved without
+    constructing a single component.
+    """
+    components_state = session_state.get("components_state") or {}
+    if not components_state:
+        return session_state
+
+    _, session_settings, _ = configuration_from_state(session_state)
+    import_all_modules(session_settings["components_package"])
+    components = SessionComponents(
+        component_bindings=component_bindings_from_config(
+            session_state["config"],
+        ),
+        session_type=normalize_session_type(session_state["session_type"]),
+    )
+    ddp_name = components.resolve_name("ddp")
+    if ddp_name not in components_state:
+        return session_state
+
+    session_state = dict(session_state)
+    components_state = {
+        name: dict(info) for name, info in components_state.items()
+    }
+    session_state["components_state"] = components_state
+
+    ddp_info = components_state[ddp_name]
+    init_args = ddp_info["init_args"]
+    ddp_kwargs = dict(init_args["kwargs"])
+    ddp_kwargs["rank"] = rank
+    ddp_info["init_args"] = {
+        "args": init_args["args"],
+        "kwargs": ddp_kwargs,
+    }
+
+    if rank > 0:
+        ddp_config = _ddp_config(ddp_info["init_args"])
+        keep = components.dependency_closure(
+            list(ddp_config.get("parallel_components", [])) + ["ddp"],
+            active_names=components_state,
+        )
+        for name in list(components_state):
+            if name not in keep:
+                del components_state[name]
+
+    return session_state
+
+
+def _ddp_config(init_args) -> dict:
+    args = init_args["args"]
+    if args and isinstance(args[0], Mapping):
+        return dict(args[0])
+    config = init_args["kwargs"].get("config")
+    return dict(config) if isinstance(config, Mapping) else {}
 
 
 def load_session_for_worker(
@@ -19,7 +86,7 @@ def load_session_for_worker(
         rank,
         session_update_params: dict | None = None,
 ):
-    session = Session.from_state(session_state)
+    session = Session.from_state(prepare_worker_state(session_state, rank))
 
     if (
             session_update_params is not None
@@ -28,36 +95,6 @@ def load_session_for_worker(
         if not isinstance(session, TrainingSession):
             raise TypeError("max_iterations updates require a TrainingSession")
         session.update_max_iters(session_update_params["max_iterations"])
-
-    if session.has_resource("ddp"):
-        placeholder_ddp_resource = session.get_resource("ddp")
-        ddp_resource = type(placeholder_ddp_resource)(
-            config=placeholder_ddp_resource.config,
-            rank=rank,
-        )
-        session.unregister_resource(placeholder_ddp_resource.name)
-        session.register_resource(ddp_resource)
-
-        if rank > 0:
-            parallel_components = session._component_dependency_closure(
-                ddp_resource.parallel_components + ["ddp"]
-            )
-            hooks = session.get_all_hooks()
-            resources = session.get_all_resources()
-            steps = session.get_all_steps()
-            for hook in hooks:
-                if hook.name not in parallel_components:
-                    session.unregister_hook(hook.name)
-            for resource in resources:
-                if resource.name not in parallel_components:
-                    session.unregister_resource(resource.name)
-            for step in steps:
-                if step.name not in parallel_components:
-                    session.remove_step(step.name)
-
-        # The rank-specific ddp resource and the rank>0 pruning both replace
-        # components, so re-wire before anything uses them.
-        session.relink_components()
 
     return session
 

@@ -113,8 +113,10 @@ The engine monitors workers while leaving the context.
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
 | `@wraps(name)` | Declare that a Hook wraps another Hook |
 | `ModuleResource` | An `nn.Module` resource composed of other resources; see [built-in components](built-in-components.md#moduleresource) |
-| `Component.link(components)` | Attach prerequisite components before state is restored; no-op by default |
-| `Session.relink_components()` | Re-run the link phase after components changed; only before setup |
+| `Component.get_dependency(name)` | Return a declared prerequisite; valid only while the component is being constructed |
+| `Component.has_dependency(name)` | Whether a declared prerequisite is active |
+| `Component.config_schema` | Optional dataclass parsed into `self._cfg` |
+| `Session.activate_component(name, config)` | Activate a registered component and its prerequisites; only before setup |
 | `component_registry(session_type)` | Return shared components overlaid by the matching scoped registry |
 | `topological_sort_of_components(..., session_type=...)` | Validate and order the selected session type's component graph |
 | `@register_session_type(name)` | Register a concrete Session subclass for engine and checkpoint dispatch |

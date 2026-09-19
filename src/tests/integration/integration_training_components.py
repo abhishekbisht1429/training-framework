@@ -327,7 +327,8 @@ class RankResultHook(LifecycleHook):
 class ScaleFactor(ModuleResource):
     """A linked child component that owns the only trainable parameter."""
 
-    def build(self) -> None:
+    def __init__(self, config=None) -> None:
+        super().__init__(config)
         self.weight = nn.Parameter(
             torch.tensor([[float(self._config.get("initial_weight", 0.0))]])
         )

@@ -2,13 +2,13 @@
 
 `ModuleResource` is both an `nn.Module` and a `StatefulResource`, so a model
 can attach other registered resources as real submodules and keep those
-references across a checkpoint or a process spawn. The wiring happens in the
-link phase (`Component.link`), which runs on every construction path -- fresh
-configuration, checkpoint restore, and worker fix-up -- before any state is
-restored and without a session.
+references across a checkpoint or a process spawn. The wiring happens during
+construction: components are built prerequisite-first on every path -- fresh
+configuration, checkpoint restore, and worker start-up -- so by the time a
+constructor runs, everything it declared already exists.
 
 Each component owns its own parameters: a parent excludes everything reachable
-from a linked child when it captures state, so every tensor is checkpointed
+from an attached child when it captures state, so every tensor is checkpointed
 exactly once, by the component that created it.
 """
 
@@ -22,8 +22,7 @@ from torch import nn
 
 from training_framework.components.base import (
     Component,
-    ComponentLinkError,
-    ComponentLinker,
+    ComponentDependencyError,
     StatefulResource,
 )
 
@@ -34,10 +33,13 @@ if TYPE_CHECKING:
 class ModuleResource(nn.Module, StatefulResource, ABC):
     """An `nn.Module` resource that may be composed of other resources.
 
-    Subclasses create their own parameters in `build()` and list the
-    resources they attach in `linked_modules`. Both run during the link
-    phase, so a restored model is usable without `setup()` -- which is what
-    the `trained_model` analysis path relies on.
+    Subclasses create their own parameters in `__init__`, like any other
+    PyTorch module, and list the resources they attach in `linked_modules`.
+    Those children are attached by `super().__init__()`, before the subclass
+    body runs, so a constructor may size its own weights from them.
+
+    A constructed component is complete: it needs no `setup()` to be usable,
+    which is what the `trained_model` analysis path relies on.
     """
 
     _STATE_VERSION = 1
@@ -51,52 +53,29 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
             raise TypeError(f"{self._component_name()} config must be a mapping")
         self._config = deepcopy(dict(config or {}))
         self._linked_components: dict[str, str] = {}
-        self._built = False
-        self._pending_state: Any = None
-
-    @classmethod
-    def _component_name(cls) -> str:
-        return getattr(cls, "name", cls.__name__)
+        self._parse_config_schema(self._config)
+        self.attach_dependencies()
 
     @property
     def config(self) -> dict[str, Any]:
         return deepcopy(self._config)
 
     @property
-    def is_linked(self) -> bool:
-        """Return whether the module's own parameters have been built."""
-        return self._built
-
-    @property
     def linked_components(self) -> dict[str, str]:
         """Return a copy of the attribute -> component name mapping."""
         return dict(self._linked_components)
 
-    # -- link phase -------------------------------------------------------
+    # -- dependencies -----------------------------------------------------
 
-    def link(self, components: ComponentLinker) -> None:
-        """Attach prerequisite resources, then build this module's weights.
-
-        Idempotent: attaching a component that is already attached is a
-        no-op, and `build()` runs only once.
-        """
-        self.attach_dependencies(components)
-        if not self._built:
-            self.build()
-            self._built = True
-            if self._pending_state is not None:
-                pending, self._pending_state = self._pending_state, None
-                self.set_state(pending)
-
-    def attach_dependencies(self, components: ComponentLinker) -> None:
+    def attach_dependencies(self) -> None:
         """Attach every entry of `linked_modules`.
 
-        Override to attach resources conditionally or under a different
-        attribute name. Attach before calling `super().link()` if `build()`
-        needs the child.
+        Runs from `ModuleResource.__init__`, so subclasses can use the
+        attached children while creating their own weights. Override to
+        attach a resource conditionally or under a different attribute name.
         """
         for name in type(self).linked_modules:
-            self.attach_linked_module(name, components.get_resource(name))
+            self.attach_linked_module(name, self.get_dependency(name))
 
     def attach_linked_module(self, attribute: str, component: nn.Module) -> None:
         """Attach `component` as a submodule owned by another component."""
@@ -108,11 +87,10 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
         current = getattr(self, attribute, None)
         if current is component:
             return
-        if self._built and current is not None:
-            raise ComponentLinkError(
-                f"{self._component_name()} cannot relink '{attribute}' to a "
-                f"different {type(component).__name__} after its parameters "
-                "were built"
+        if current is not None:
+            raise ComponentDependencyError(
+                f"{self._component_name()} cannot attach '{attribute}' to a "
+                f"different {type(component).__name__}; it is already attached"
             )
         setattr(self, attribute, component)
         self._linked_components[attribute] = getattr(
@@ -120,24 +98,6 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
             "name",
             type(component).__name__,
         )
-
-    def build(self) -> None:
-        """Create this component's own parameters.
-
-        Called once during the link phase, after `attach_dependencies`, with
-        no session and no device available. The default is a no-op.
-        """
-        pass
-
-    def _require_linked(self) -> None:
-        # Not `requires_context`: that checks for an active session, but the
-        # model must also work after teardown and when restored from a
-        # checkpoint without setup() (the `trained_model` path).
-        if not self._built:
-            raise RuntimeError(
-                f"{self._component_name()} is not linked yet; its parameters "
-                "are built during the link phase"
-            )
 
     # -- state ------------------------------------------------------------
 
@@ -166,7 +126,7 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
                     # responsibility.
                     continue
                 if isinstance(child, Component):
-                    raise ComponentLinkError(
+                    raise ComponentDependencyError(
                         f"{self._component_name()} has component '{path}' "
                         "attached as a plain submodule; use "
                         "attach_linked_module() so its weights are "
@@ -176,9 +136,7 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
 
         visit(self, "")
 
-    def get_state(self) -> dict[str, Any] | None:
-        if not self._built:
-            return None
+    def get_state(self) -> dict[str, Any]:
         self._check_child_ownership()
         owned_elsewhere = self._tensors_owned_by_children()
         return {
@@ -193,11 +151,6 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
 
     def set_state(self, state: Mapping[str, Any] | None) -> None:
         if state is None:
-            return
-        if not self._built:
-            # A bare-pickled component is restored by __init__ + set_state,
-            # before any linker exists. link() applies the stashed state.
-            self._pending_state = state
             return
 
         self._check_child_ownership()
@@ -230,7 +183,7 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
 
         try:
             # In place, never `assign=True`: parameter identity must survive
-            # so parents that already linked to this component stay valid.
+            # so parents that already attached this component stay valid.
             self.load_state_dict(state["state_dict"], strict=False)
         except RuntimeError as error:
             raise ValueError(
@@ -248,10 +201,9 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
     # -- lifecycle --------------------------------------------------------
 
     def setup(self, session: "Session") -> None:
-        self._require_linked()
         self.to(session.device)
 
     def teardown(self, session: "Session") -> None:
-        # Links are deliberately not torn down: a restored or torn-down model
-        # must stay usable.
+        # Attachments are deliberately not torn down: a restored or torn-down
+        # model must stay usable.
         pass

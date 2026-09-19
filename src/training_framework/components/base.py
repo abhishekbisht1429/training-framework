@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from training_framework.util import CaptureInitMeta, context_entry, context_exit
 
@@ -28,16 +30,16 @@ class ComponentMeta(CaptureInitMeta):
         return cls
 
 
-class ComponentLinkError(RuntimeError):
+class ComponentDependencyError(RuntimeError):
     """A component could not be wired to its prerequisite components."""
 
 
-class ComponentLinker(ABC):
-    """Narrow, session-free view of the active components.
+class ComponentView(ABC):
+    """Narrow, session-free view of the components constructed so far.
 
-    Passed to :meth:`Component.link`. It deliberately exposes only component
-    lookup: there is no session, no device, and no iteration context during
-    the link phase.
+    Bound while a component is being constructed. It deliberately exposes
+    only component lookup: there is no session, no device, and no iteration
+    context during construction.
     """
 
     @property
@@ -62,6 +64,33 @@ class ComponentLinker(ABC):
         raise NotImplementedError
 
 
+_COMPONENT_VIEW: ContextVar["ComponentView | None"] = ContextVar(
+    "training_framework_component_view",
+    default=None,
+)
+
+
+@contextmanager
+def constructing_component(view: "ComponentView | None"):
+    """Bind the dependency view visible to a component being constructed.
+
+    Components are constructed prerequisite-first, so by the time a
+    constructor runs every component it declared already exists. The view is
+    bound rather than passed so that ``_init_args`` stays plain configuration
+    and the config-free activation policy keeps working.
+    """
+    token = _COMPONENT_VIEW.set(view)
+    try:
+        yield
+    finally:
+        _COMPONENT_VIEW.reset(token)
+
+
+def active_component_view() -> "ComponentView | None":
+    """Return the view bound for the component currently being constructed."""
+    return _COMPONENT_VIEW.get()
+
+
 class Component(ABC, metaclass=ComponentMeta):
     """Common base for every executable training-framework component."""
 
@@ -69,26 +98,53 @@ class Component(ABC, metaclass=ComponentMeta):
     id: str
     _context_managed_lifecycle = False
 
+    config_schema: ClassVar[type | None] = None
+    """Optional dataclass describing this component's configuration."""
+
     def __init__(self, config: Mapping | None = None) -> None:
         """Initialize a component that does not require configuration."""
-        pass
+        self._parse_config_schema(config)
 
-    def link(self, components: ComponentLinker) -> None:
-        """Attach prerequisite components before any state is restored.
+    @classmethod
+    def _component_name(cls) -> str:
+        return getattr(cls, "name", cls.__name__)
 
-        Called in prerequisite-first topological order on every construction
-        path -- fresh configuration, checkpoint restore, and worker fix-up --
-        so a component that holds a reference to another component keeps it
-        across a checkpoint or a process spawn.
+    def _parse_config_schema(self, config: Mapping | None) -> None:
+        """Populate ``self._cfg`` when the class declares a ``config_schema``."""
+        if type(self).config_schema is None:
+            return
+        # Imported lazily: config_schema imports base for the error type.
+        from training_framework.components.config_schema import (
+            parse_component_config,
+        )
+        self._cfg = parse_component_config(type(self), config)
 
-        No session exists yet: there is no device, no iteration context, and
-        no ``@requires_context`` access. Work that needs those belongs in
-        :meth:`Resource.setup`. Implementations may be called more than once
-        and must be idempotent.
+    def get_dependency(self, name: str) -> "Resource":
+        """Return a prerequisite resource. Valid only during construction.
 
-        The default is a no-op.
+        Components are constructed prerequisite-first, so a component may ask
+        for anything it declared via ``@requires_resource``. There is no
+        session yet: no device, no iteration context, and no
+        ``@requires_context`` access. Work needing those belongs in
+        :meth:`Resource.setup`.
         """
-        pass
+        view = active_component_view()
+        if view is None:
+            raise ComponentDependencyError(
+                f"{self._component_name()} requested resource '{name}' while "
+                "no component view is bound. A component that declares "
+                "dependencies must be activated by the session -- through "
+                "configuration or Session.activate_component() -- rather than "
+                "constructed directly."
+            )
+        return view.get_resource(name)
+
+    def has_dependency(self, name: str) -> bool:
+        """Return whether a declared prerequisite is active."""
+        view = active_component_view()
+        if view is None:
+            return False
+        return view.has_resource(name)
 
     @classmethod
     @abstractmethod

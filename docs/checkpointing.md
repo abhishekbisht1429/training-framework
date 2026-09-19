@@ -40,7 +40,7 @@ hook, it saves on:
 - CUDA RNG state.
 
 Each component's state holds only what that component owns. A `ModuleResource`
-excludes every tensor reachable from a resource it linked, so weights shared
+excludes every tensor reachable from a resource it attached, so weights shared
 between components are stored once, by the component that created them, and
 restored as one shared instance.
 

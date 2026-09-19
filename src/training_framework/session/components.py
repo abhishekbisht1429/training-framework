@@ -4,8 +4,9 @@ from typing import Any
 
 from training_framework.components import (
     Component,
-    ComponentLinkError,
-    ComponentLinker,
+    ComponentDependencyError,
+    ComponentView,
+    constructing_component,
     ExtendableComponent,
     Hook,
     IterationHook,
@@ -41,15 +42,19 @@ class ComponentNotFoundError(KeyError):
         return str(self.args[0]) if self.args else ""
 
 
-class SessionComponentLinker(ComponentLinker):
-    """Expose one consumer's declared prerequisites during the link phase.
+class SessionComponentView(ComponentView):
+    """Expose one consumer's declared prerequisites while it is constructed.
 
     Restricting lookup to declared dependencies is what makes the
-    topological link order a guarantee: a component can only ask for
-    something that was linked before it.
+    prerequisite-first construction order a guarantee: a component can only
+    ask for something that was constructed before it.
     """
 
-    def __init__(self, components: "SessionComponents", consumer: Component):
+    def __init__(
+            self,
+            components: "SessionComponents",
+            consumer: type[Component],
+    ):
         self._components = components
         self._consumer = consumer
 
@@ -69,7 +74,7 @@ class SessionComponentLinker(ComponentLinker):
         return self._components.get_resource(name)
 
     def _require_declared(self, name: str) -> None:
-        declared = getattr(type(self._consumer), "required_resources", ())
+        declared = getattr(self._consumer, "required_resources", ())
         if name in declared:
             return
         resolved = self._components.resolve_name(name)
@@ -79,14 +84,14 @@ class SessionComponentLinker(ComponentLinker):
         ):
             return
         consumer_name = getattr(
-            type(self._consumer),
+            self._consumer,
             "name",
-            type(self._consumer).__name__,
+            self._consumer.__name__,
         )
-        raise ComponentLinkError(
-            f"{consumer_name} requested resource '{name}' while linking but "
-            f"does not declare it. Add @requires_resource('{name}') so it is "
-            "linked first."
+        raise ComponentDependencyError(
+            f"{consumer_name} requested resource '{name}' while being "
+            f"constructed but does not declare it. Add "
+            f"@requires_resource('{name}') so it is constructed first."
         )
 
 
@@ -105,7 +110,6 @@ class SessionComponents:
         self.registry = component_registry(self.session_type)
         self.roles = role_registry(self.session_type)
         self.components: dict[str, Component] = {}
-        self._links_dirty = True
         self._merge_components(resources, Resource)
         self._merge_components(hooks, Hook)
         self._merge_components(steps, Step)
@@ -122,7 +126,7 @@ class SessionComponents:
         legacy_bindings = state.pop("aliases", None)
         if "component_bindings" not in state and legacy_bindings is not None:
             state["component_bindings"] = legacy_bindings
-        state.setdefault("_links_dirty", True)
+        state.pop("_links_dirty", None)
         self.__dict__.update(state)
 
     def get_state(self) -> dict[str, dict[str, Any]]:
@@ -141,8 +145,25 @@ class SessionComponents:
 
     def set_state(self, component_states: dict[str, dict[str, Any]]) -> None:
         restored_components: dict[str, Component] = {}
+        # Components are rebuilt into a fresh mapping, but a component being
+        # constructed must see the ones already rebuilt, so the view reads
+        # through to it. The previous mapping is put back if the restore fails.
+        previous_components = self.components
+        self.components = restored_components
+        try:
+            self._restore_components(component_states, restored_components)
+        except BaseException:
+            self.components = previous_components
+            raise
 
+    def _restore_components(
+            self,
+            component_states: dict[str, dict[str, Any]],
+            restored_components: dict[str, Component],
+    ) -> None:
         # Pass 1: rebuild every component from its constructor arguments.
+        # The stored order is the activation order, which is already
+        # prerequisite-first, so each constructor sees what it declared.
         for name, component_info in component_states.items():
             component_class = self.registry.get(name)
             if component_class is None:
@@ -160,34 +181,39 @@ class SessionComponents:
                 )
 
             init_args = component_info["init_args"]
-            component: Component = component_class(
+            component: Component = self._construct(
+                component_class,
                 *init_args["args"],
                 **init_args["kwargs"],
             )
             restored_components[name] = component
 
-        self.components = restored_components
-        self._links_dirty = True
-
-        # Pass 2: wire components to each other before any state is applied,
-        # so references captured at save time exist again.
-        self.link_components()
-
-        # Pass 3: restore state in prerequisite-first order, so a component
+        # Pass 2: restore state in prerequisite-first order, so a component
         # that inspects a dependency sees it already restored.
         for name in self._state_restore_order(component_states):
             component = self.components[name]
             if isinstance(component, Stateful):
                 component.set_state(component_states[name]["state"])
 
+    def _construct(
+            self,
+            component_class: type[Component],
+            *args,
+            **kwargs,
+    ) -> Component:
+        """Construct a component with its declared prerequisites visible."""
+        with constructing_component(SessionComponentView(self, component_class)):
+            return component_class(*args, **kwargs)
+
     def _state_restore_order(
             self,
             component_states: Mapping[str, dict[str, Any]],
     ) -> list[str]:
-        if not self._any_component_links():
-            # Without any linking component the stored order is the activation
-            # order, which is already dependency-first. Keep it so restoring a
-            # checkpoint whose graph no longer sorts fails where it used to.
+        if not self._any_component_attaches_components():
+            # Without any component holding another, the stored order is the
+            # activation order, which is already dependency-first. Keep it so
+            # restoring a checkpoint whose graph no longer sorts fails where
+            # it used to.
             return list(component_states)
 
         order = self._component_order()
@@ -252,7 +278,6 @@ class SessionComponents:
             "args": tuple(args),
             "kwargs": kwargs,
         }
-        self._links_dirty = True
 
     def _merge_components(self, components, expected_type) -> None:
         for name, component in (components or {}).items():
@@ -408,14 +433,48 @@ class SessionComponents:
                 )
 
         roots.extend(configured_roots)
-        visiting: set[str] = set()
+        self._activate_all(roots, component_configs)
+
+    def activate_component(
+            self,
+            name: str,
+            config: Mapping | None = None,
+    ) -> str:
+        """Activate a registered component and its prerequisites.
+
+        The supported way to add a component that declares dependencies after
+        the session was built: it resolves bindings, activates the dependency
+        closure, and constructs each component with its prerequisites visible,
+        none of which constructing an instance by hand can do.
+        """
+        resolved_name = self.resolve_name(name)
+        component_configs = (
+            {resolved_name: dict(config)} if config is not None else {}
+        )
+        self._activate_all([name], component_configs)
+        return resolved_name
+
+    def _activate_all(
+            self,
+            roots: Iterable[str],
+            component_configs: Mapping[str, Mapping],
+    ) -> None:
+        visiting: list[str] = []
 
         def activate(name: str) -> None:
             resolved_name, component_class = self._registered_component_class(name)
-            if resolved_name in self.components or resolved_name in visiting:
+            if resolved_name in self.components:
                 return
+            if resolved_name in visiting:
+                # Components are wired as they are constructed, so a cycle has
+                # no valid construction order. Report it here, where the chain
+                # that closed it is still known.
+                chain = " -> ".join([*visiting, resolved_name])
+                raise RuntimeError(
+                    f"Cyclic dependency detected in the component graph! {chain}"
+                )
 
-            visiting.add(resolved_name)
+            visiting.append(resolved_name)
             try:
                 for dependency_name, dependency_type in self._dependency_specs(
                         component_class,
@@ -428,11 +487,12 @@ class SessionComponents:
                     activate(dependency_name)
 
                 if resolved_name in component_configs:
-                    component = component_class(
+                    component = self._construct(
+                        component_class,
                         component_configs[resolved_name],
                     )
                 elif component_class.__init__ is Component.__init__:
-                    component = component_class()
+                    component = self._construct(component_class)
                 else:
                     raise RuntimeError(
                         f"Component '{resolved_name}' is required but defines "
@@ -441,18 +501,33 @@ class SessionComponents:
                     )
                 self._register_component_instance(component)
             finally:
-                visiting.discard(resolved_name)
+                visiting.pop()
 
         for root in roots:
             activate(root)
 
-    def dependency_closure(self, names: Iterable[str]) -> set[str]:
+    def dependency_closure(
+            self,
+            names: Iterable[str],
+            *,
+            active_names: Iterable[str] | None = None,
+    ) -> set[str]:
+        """Return `names` plus everything they depend on, transitively.
+
+        `active_names` lets a caller resolve the closure before any component
+        is constructed -- the dependency graph is class-level, so the worker
+        can decide what a rank needs without building the session first.
+        """
+        active = (
+            set(self.components)
+            if active_names is None
+            else set(active_names)
+        )
         closure: set[str] = set()
 
         def visit(name: str) -> None:
             resolved_name, component_class = self._registered_component_class(name)
-            component = self.components.get(resolved_name)
-            if component is None:
+            if resolved_name not in active:
                 raise RuntimeError(with_explanation(
                     f"Component '{name}' resolves to '{resolved_name}', which "
                     "is not configured in this session.",
@@ -460,7 +535,7 @@ class SessionComponents:
                         name,
                         resolved_name,
                         session_type=self.session_type,
-                        active_names=self.components,
+                        active_names=active,
                     ),
                 ))
             if resolved_name in closure:
@@ -488,7 +563,6 @@ class SessionComponents:
             overwrite=overwrite
         )
         self.components[component.name] = component
-        self._links_dirty = True
         return component.name
 
     def register_hook(self, component: Hook, overwrite=False) -> str:
@@ -498,7 +572,6 @@ class SessionComponents:
             overwrite=overwrite,
         )
         self.components[component.name] = component
-        self._links_dirty = True
         return component.name
 
     def add_step(self, component: Step, overwrite=False) -> str:
@@ -508,7 +581,6 @@ class SessionComponents:
             overwrite=overwrite,
         )
         self.components[component.name] = component
-        self._links_dirty = True
         return component.name
 
     def _validate_component(
@@ -583,7 +655,6 @@ class SessionComponents:
                 f"{kind} '{name}' not registered with current session!"
             )
         del self.components[registered_name]
-        self._links_dirty = True
 
     def get_resource(self, name: str) -> Resource:
         registered_name = self.resolve_name(name)
@@ -642,32 +713,11 @@ class SessionComponents:
             session_type=self.session_type,
         )
 
-    def _any_component_links(self) -> bool:
+    def _any_component_attaches_components(self) -> bool:
         return any(
-            type(component).link is not Component.link
+            getattr(type(component), "linked_modules", ())
             for component in self.components.values()
         )
-
-    def link_components(self) -> None:
-        """Run the link phase for every component, prerequisite-first.
-
-        Components attach the prerequisites they declared and build whatever
-        they own, before any state is restored and without a session. Safe to
-        call repeatedly: implementations are required to be idempotent.
-        """
-        if self._any_component_links():
-            # Otherwise nothing to wire: skip the topological sort so sessions
-            # made only of non-linking components keep their existing path.
-            for component in self.ordered_components:
-                component.link(SessionComponentLinker(self, component))
-        # Only once every component linked. A failed link leaves the graph
-        # dirty so `ensure_linked` retries instead of assuming it is wired.
-        self._links_dirty = False
-
-    def ensure_linked(self) -> None:
-        """Link components if the set of components changed since last time."""
-        if getattr(self, "_links_dirty", True):
-            self.link_components()
 
     @property
     def ordered_components(self) -> list[Component]:

@@ -12,10 +12,11 @@ from torch import nn
 
 from tests.test_utils import make_config
 from training_framework.components import (
-    ComponentLinkError,
-    ComponentLinker,
+    ComponentDependencyError,
+    ComponentView,
     ModuleResource,
     Resource,
+    constructing_component,
     requires_resource,
     resource,
 )
@@ -25,8 +26,8 @@ from training_framework.session import AnalysisSession, TrainingSession
 from training_framework.session.components import SessionComponents
 
 
-class _StubLinker(ComponentLinker):
-    """A linker over a fixed set of resources, for components under test."""
+class _StubView(ComponentView):
+    """A view over a fixed set of resources, for components under test."""
 
     session_type = "training"
 
@@ -46,7 +47,8 @@ class _StubLinker(ComponentLinker):
 class PicklableEncoder(ModuleResource):
     """Declared at module scope so `pickle` can find it again."""
 
-    def build(self):
+    def __init__(self, config=None):
+        super().__init__(config)
         self.linear = nn.Linear(4, 4)
 
     def forward(self, inputs):
@@ -56,7 +58,8 @@ class PicklableEncoder(ModuleResource):
 def _declare_encoder_and_model():
     @resource("mr_encoder")
     class Encoder(ModuleResource):
-        def build(self):
+        def __init__(self, config=None):
+            super().__init__(config)
             self.linear = nn.Linear(4, 4)
 
         def forward(self, inputs):
@@ -67,7 +70,8 @@ def _declare_encoder_and_model():
     class Model(ModuleResource):
         linked_modules = ("mr_encoder",)
 
-        def build(self):
+        def __init__(self, config=None):
+            super().__init__(config)
             self.head = nn.Linear(4, 2)
 
         def forward(self, inputs):
@@ -79,11 +83,10 @@ def _declare_encoder_and_model():
 def _activate(config=None):
     components = SessionComponents()
     components.register_from_config(config or {"mr_model": {}, "mr_encoder": {}})
-    components.link_components()
     return components
 
 
-def test_a_linked_child_is_the_same_object_as_the_registered_resource():
+def test_a_child_is_the_same_object_as_the_registered_resource():
     _declare_encoder_and_model()
     components = _activate()
 
@@ -91,10 +94,10 @@ def test_a_linked_child_is_the_same_object_as_the_registered_resource():
     encoder = components.get_resource("mr_encoder")
 
     assert model.mr_encoder is encoder
-    assert model.is_linked and encoder.is_linked
+    assert model.linked_components == {"mr_encoder": "mr_encoder"}
 
 
-def test_a_linked_child_contributes_its_parameters_exactly_once():
+def test_a_child_contributes_its_parameters_exactly_once():
     _declare_encoder_and_model()
     components = _activate()
     model = components.get_resource("mr_model")
@@ -108,13 +111,13 @@ def test_a_linked_child_contributes_its_parameters_exactly_once():
 
 
 def test_a_child_attached_twice_still_contributes_its_parameters_once():
-    Encoder, _ = _declare_encoder_and_model()
+    _declare_encoder_and_model()
 
     @requires_resource("mr_encoder")
     @resource("mr_twice")
     class Twice(ModuleResource):
-        def attach_dependencies(self, components):
-            encoder = components.get_resource("mr_encoder")
+        def attach_dependencies(self):
+            encoder = self.get_dependency("mr_encoder")
             self.attach_linked_module("first", encoder)
             self.attach_linked_module("second", encoder)
 
@@ -158,23 +161,44 @@ def test_set_state_loads_in_place_and_keeps_parameter_identity():
     assert torch.equal(weight, torch.full_like(weight, 0.5))
 
 
-def test_state_captured_before_linking_is_applied_when_the_component_links():
-    linker = _StubLinker()
-
+def test_a_dependency_free_module_resource_pickles_round_trip():
     original = PicklableEncoder({})
-    original.link(linker)
     with torch.no_grad():
         original.linear.weight.fill_(0.25)
 
     restored = pickle.loads(pickle.dumps(original))
-    assert not restored.is_linked
-
-    restored.link(linker)
 
     assert torch.equal(restored.linear.weight, original.linear.weight)
 
 
-def test_linking_a_non_module_dependency_is_rejected():
+def test_constructing_a_dependent_component_by_hand_is_rejected():
+    _declare_encoder_and_model()
+
+    @requires_resource("mr_encoder")
+    @resource("mr_handmade")
+    class Handmade(ModuleResource):
+        linked_modules = ("mr_encoder",)
+
+    with pytest.raises(ComponentDependencyError, match="activate_component"):
+        Handmade({})
+
+
+def test_a_stub_view_is_enough_to_construct_a_component_under_test():
+    _declare_encoder_and_model()
+
+    @requires_resource("mr_encoder")
+    @resource("mr_stubbed")
+    class Stubbed(ModuleResource):
+        linked_modules = ("mr_encoder",)
+
+    encoder = PicklableEncoder({})
+    with constructing_component(_StubView({"mr_encoder": encoder})):
+        stubbed = Stubbed({})
+
+    assert stubbed.mr_encoder is encoder
+
+
+def test_attaching_a_non_module_dependency_is_rejected():
     @resource("mr_plain")
     class Plain(Resource):
         def setup(self, session):
@@ -192,13 +216,16 @@ def test_linking_a_non_module_dependency_is_rejected():
         _activate({"mr_needs_module": {}, "mr_plain": {}})
 
 
-def test_relinking_a_different_child_after_building_is_rejected():
-    Encoder, Model = _declare_encoder_and_model()
+def test_attaching_a_different_child_to_a_taken_attribute_is_rejected():
+    _declare_encoder_and_model()
     components = _activate()
     model = components.get_resource("mr_model")
 
-    with pytest.raises(ComponentLinkError, match="cannot relink 'mr_encoder'"):
-        model.attach_linked_module("mr_encoder", Encoder({}))
+    with pytest.raises(
+        ComponentDependencyError,
+        match="cannot attach 'mr_encoder'",
+    ):
+        model.attach_linked_module("mr_encoder", PicklableEncoder({}))
 
 
 def test_a_component_attached_without_attach_linked_module_is_rejected():
@@ -207,15 +234,18 @@ def test_a_component_attached_without_attach_linked_module_is_rejected():
     @requires_resource("mr_encoder")
     @resource("mr_sloppy")
     class Sloppy(ModuleResource):
-        def attach_dependencies(self, components):
+        def attach_dependencies(self):
             # Bypasses attach_linked_module, so the child's weights would be
             # captured twice.
-            self.encoder = components.get_resource("mr_encoder")
+            self.encoder = self.get_dependency("mr_encoder")
 
     components = _activate({"mr_sloppy": {}, "mr_encoder": {}})
     sloppy = components.get_resource("mr_sloppy")
 
-    with pytest.raises(ComponentLinkError, match="attached as a plain submodule"):
+    with pytest.raises(
+        ComponentDependencyError,
+        match="attached as a plain submodule",
+    ):
         sloppy.get_state()
 
 
@@ -225,19 +255,22 @@ def test_a_component_nested_below_a_direct_child_is_rejected():
     @requires_resource("mr_encoder")
     @resource("mr_nested")
     class Nested(ModuleResource):
-        def attach_dependencies(self, components):
+        def attach_dependencies(self):
             # Hidden inside a container, so a direct-children check would
             # miss it and both components would checkpoint these weights.
-            self.wrapper = nn.Sequential(components.get_resource("mr_encoder"))
+            self.wrapper = nn.Sequential(self.get_dependency("mr_encoder"))
 
     components = _activate({"mr_nested": {}, "mr_encoder": {}})
     nested = components.get_resource("mr_nested")
 
-    with pytest.raises(ComponentLinkError, match="'wrapper.0' attached as a plain"):
+    with pytest.raises(
+        ComponentDependencyError,
+        match="'wrapper.0' attached as a plain",
+    ):
         nested.get_state()
 
 
-def test_a_linked_child_may_hold_components_of_its_own():
+def test_a_child_may_hold_components_of_its_own():
     _declare_encoder_and_model()
 
     @requires_resource("mr_model")
@@ -245,7 +278,8 @@ def test_a_linked_child_may_hold_components_of_its_own():
     class Outer(ModuleResource):
         linked_modules = ("mr_model",)
 
-        def build(self):
+        def __init__(self, config=None):
+            super().__init__(config)
             self.gate = nn.Linear(2, 2)
 
     components = _activate(
@@ -262,7 +296,7 @@ def test_a_linked_child_may_hold_components_of_its_own():
     }
 
 
-def test_state_from_a_different_linking_is_rejected():
+def test_state_from_a_different_wiring_is_rejected():
     _declare_encoder_and_model()
     components = _activate()
     model = components.get_resource("mr_model")
@@ -359,7 +393,8 @@ def test_a_child_shared_by_two_models_is_restored_as_one_instance(tmp_path):
     class SecondModel(ModuleResource):
         linked_modules = ("mr_encoder",)
 
-        def build(self):
+        def __init__(self, config=None):
+            super().__init__(config)
             self.tail = nn.Linear(4, 1)
 
     config = _training_config(tmp_path, "shared-child")
@@ -377,7 +412,6 @@ def test_pickling_uses_the_stateful_reconstruction_envelope():
     # nn.Module defines __getstate__/__setstate__ and would otherwise shadow
     # Stateful's envelope through the MRO.
     encoder = PicklableEncoder({})
-    encoder.link(_StubLinker())
 
     state = encoder.__getstate__()
 
@@ -386,7 +420,7 @@ def test_pickling_uses_the_stateful_reconstruction_envelope():
     assert set(state["state"]["state_dict"]) == {"linear.weight", "linear.bias"}
 
 
-def test_a_saved_checkpoint_restores_the_linked_model(tmp_path):
+def test_a_saved_checkpoint_restores_the_composed_model(tmp_path):
     _declare_encoder_and_model()
     session = TrainingSession(_training_config(tmp_path, "checkpoint"))
     with session:
@@ -421,7 +455,8 @@ def _ddp_config(tmp_path, name, *, world_size=1):
 def _declare_named_model():
     @resource("mr_encoder")
     class Encoder(ModuleResource):
-        def build(self):
+        def __init__(self, config=None):
+            super().__init__(config)
             self.linear = nn.Linear(4, 4)
 
         def forward(self, inputs):
@@ -433,7 +468,8 @@ def _declare_named_model():
     class Model(ModuleResource):
         linked_modules = ("mr_encoder",)
 
-        def build(self):
+        def __init__(self, config=None):
+            super().__init__(config)
             self.head = nn.Linear(4, 2)
 
         def forward(self, inputs):
@@ -443,7 +479,7 @@ def _declare_named_model():
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_a_worker_relinks_after_the_ddp_resource_is_replaced(tmp_path, rank):
+def test_a_worker_builds_the_rank_specific_ddp_resource(tmp_path, rank):
     _declare_named_model()
     session = TrainingSession(_ddp_config(tmp_path, f"worker-{rank}", world_size=2))
 
@@ -458,7 +494,7 @@ def test_a_worker_relinks_after_the_ddp_resource_is_replaced(tmp_path, rank):
     assert len(list(model.parameters())) == 4
 
 
-def test_a_linked_model_is_loaded_for_analysis_by_trained_model(tmp_path):
+def test_a_composed_model_is_loaded_for_analysis_by_trained_model(tmp_path):
     _declare_named_model()
     config = make_config(tmp_path / "analysis-source")
     config["mr_encoder"] = {}
@@ -489,7 +525,7 @@ def test_a_linked_model_is_loaded_for_analysis_by_trained_model(tmp_path):
         torch.testing.assert_close(model(torch.ones(2, 4)), expected)
 
 
-def test_setup_moves_the_whole_linked_tree_to_the_session_device(tmp_path):
+def test_setup_moves_the_whole_attached_tree_to_the_session_device(tmp_path):
     _declare_encoder_and_model()
     session = TrainingSession(_training_config(tmp_path, "device"))
     model = session.get_resource("mr_model")

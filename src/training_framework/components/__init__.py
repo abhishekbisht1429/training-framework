@@ -2,8 +2,10 @@
 
 from training_framework.components.base import (
     Component,
-    ComponentLinkError,
-    ComponentLinker,
+    ComponentDependencyError,
+    ComponentView,
+    active_component_view,
+    constructing_component,
     ExtendableComponent,
     Hook,
     IterationHook,
@@ -19,6 +21,7 @@ from training_framework.components.base import (
     StatefulStep,
     Step,
 )
+from training_framework.components.config_schema import parse_component_config
 from training_framework.components.module import ModuleResource
 from training_framework.components.registry import (
     ANALYSIS_SESSION_TYPE,
@@ -46,13 +49,16 @@ __all__ = [
     "Component",
     "ComponentAliases",
     "ComponentBindings",
-    "ComponentLinkError",
-    "ComponentLinker",
+    "ComponentDependencyError",
+    "ComponentView",
+    "active_component_view",
+    "constructing_component",
     "ExtendableComponent",
     "Hook",
     "IterationHook",
     "LifecycleHook",
     "ModuleResource",
+    "parse_component_config",
     "Resource",
     "RoleDeclaration",
     "SessionHook",
