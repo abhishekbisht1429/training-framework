@@ -145,6 +145,55 @@ def test_a_shrink_at_the_epoch_boundary_carries_into_the_next_epoch():
     assert len(_take(sampler, 2)) == 2
 
 
+def test_a_position_saved_on_an_epochs_last_item_resumes_at_the_next(
+):
+    """A generator is suspended at its last yield, not past it.
+
+    The epoch counter has therefore not advanced yet, and the saved count is
+    a whole epoch's worth. Read against the epoch it was taken in that is a
+    completed epoch; read against a shorter one it would look like an
+    overflow and push every rank past the start of the next.
+    """
+    source = _sampler(10, rank=0, world_size=8)
+    _take(source, source.num_samples_per_rank)
+    saved = source.get_state()
+    assert (saved["epoch"], saved["consumed_in_epoch"]) == (0, 16)
+
+    resumed = _sampler(10, rank=0, world_size=4)
+    resumed.set_state(saved)
+
+    assert (resumed.epoch, resumed.index_within_epoch) == (1, 0)
+
+
+def test_a_completed_epoch_resumes_exactly_where_a_clean_start_would():
+    source = _sampler(10, rank=0, world_size=8)
+    _take(source, source.num_samples_per_rank)
+
+    resumed = _sampler(10, rank=0, world_size=4)
+    resumed.set_state(source.get_state())
+
+    clean = _sampler(10, rank=0, world_size=4)
+    clean.set_state({
+        "epoch": 1,
+        "consumed_in_epoch": 0,
+        "num_samples": 10,
+        "world_size": 4,
+        "drop_last": False,
+    })
+
+    assert _take(resumed, 3) == _take(clean, 3)
+
+
+def test_a_position_inside_an_epoch_is_left_where_it_is():
+    source = _sampler(10, rank=0, world_size=8)
+    _take(source, 1)
+
+    resumed = _sampler(10, rank=0, world_size=4)
+    resumed.set_state(source.get_state())
+
+    assert (resumed.epoch, resumed.index_within_epoch) == (0, 2)
+
+
 def test_a_rebased_position_never_precedes_what_was_consumed():
     for world_size in range(1, 9):
         state = {

@@ -11,6 +11,26 @@ import torch.distributed as dist
 SAMPLER_STATE_VERSION = 2
 
 
+def samples_per_rank(
+        num_samples: int,
+        world_size: int,
+        drop_last: bool = False,
+) -> int:
+    """How many indices each rank receives in one epoch."""
+    if drop_last:
+        return num_samples // world_size
+    return (num_samples + world_size - 1) // world_size
+
+
+def epoch_size(
+        num_samples: int,
+        world_size: int,
+        drop_last: bool = False,
+) -> int:
+    """How many indices one epoch delivers across every rank together."""
+    return samples_per_rank(num_samples, world_size, drop_last) * world_size
+
+
 def consumed_in_epoch(state: Dict[str, Any]) -> int:
     """How many samples of the epoch were consumed, across all ranks."""
     if "consumed_in_epoch" in state:
@@ -19,6 +39,33 @@ def consumed_in_epoch(state: Dict[str, Any]) -> int:
     # on. Ranks advance in lockstep, so every rank had consumed the same
     # number and the total is simply their product.
     return state.get("index_within_epoch", 0) * (state.get("world_size") or 1)
+
+
+def _normalized_position(state: Dict[str, Any]) -> tuple[int, int]:
+    """Fold whole epochs out of a saved count, in the geometry it was taken in.
+
+    The count is of positions in a *padded* epoch, and how much padding an
+    epoch carries depends on the world size that did the counting. A sampler
+    saved just after yielding an epoch's last item has not incremented its
+    epoch yet -- a generator is suspended at the yield, not past it -- so the
+    count can be a whole epoch's worth. Folded out here against the epoch it
+    belongs to, that reads as a completed epoch; left in, it would look like
+    an overflow of the resuming epoch and push every rank past its start.
+    """
+    consumed = consumed_in_epoch(state)
+    epoch = state.get("epoch", 0)
+
+    world_size = state.get("world_size")
+    num_samples = state.get("num_samples")
+    if not world_size or not num_samples:
+        return epoch, consumed
+
+    size = epoch_size(num_samples, world_size, state.get("drop_last", False))
+    if size <= 0:
+        return epoch, consumed
+
+    completed_epochs, consumed = divmod(consumed, size)
+    return epoch + completed_epochs, consumed
 
 
 
@@ -79,14 +126,12 @@ class DistributedInfiniteSampler(Sampler):
 
     def _compute_sample_counts(self) -> None:
         """Calculates total indices and per-rank slice sizes."""
-        if self.drop_last and self.num_samples % self.world_size != 0:
-            self.num_samples_per_rank = self.num_samples // self.world_size
-            self.total_size = self.num_samples_per_rank * self.world_size
-        else:
-            self.num_samples_per_rank = (
-                self.num_samples + self.world_size - 1
-            ) // self.world_size
-            self.total_size = self.num_samples_per_rank * self.world_size
+        self.num_samples_per_rank = samples_per_rank(
+            self.num_samples,
+            self.world_size,
+            self.drop_last,
+        )
+        self.total_size = self.num_samples_per_rank * self.world_size
 
     def _generate_epoch_indices(self, epoch: int) -> list[int]:
         """Generates rank-specific indices for a given epoch pass."""
@@ -150,8 +195,10 @@ class DistributedInfiniteSampler(Sampler):
             "num_samples": self.num_samples,
             "shuffle": self.shuffle,
             "drop_last": self.drop_last,
-            # Recorded for diagnostics only. A resumed run takes its topology
-            # from the launch, never from the checkpoint.
+            # A resumed run takes its topology from the launch, never from
+            # here. `world_size` is still needed to read `consumed_in_epoch`,
+            # which counts positions in an epoch whose padding that world
+            # size decided; `rank` is recorded for diagnostics.
             "rank": self.rank,
             "world_size": self.world_size,
         }
@@ -189,10 +236,10 @@ class DistributedInfiniteSampler(Sampler):
                 f"across {self.world_size} ranks"
             )
 
-        consumed = consumed_in_epoch(state)
+        epoch, consumed = _normalized_position(state)
         index = -(-consumed // self.world_size)
         # A smaller world size can push the rebased index past the end of
         # its shorter epoch; carrying keeps the sampler from slicing an
         # epoch to nothing.
         carried_epochs, index = divmod(index, self.num_samples_per_rank)
-        return state.get("epoch", 0) + carried_epochs, index
+        return epoch + carried_epochs, index
