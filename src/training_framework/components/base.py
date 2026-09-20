@@ -101,6 +101,14 @@ class Component(ABC, metaclass=ComponentMeta):
     config_schema: ClassVar[type | None] = None
     """Optional dataclass describing this component's configuration."""
 
+    rank_zero_only: ClassVar[bool] = False
+    """Whether a distributed session builds this component on rank 0 only.
+
+    Set by :func:`rank_zero_only`. Components run on every rank by default:
+    leaving one out of a rank is what deadlocks a collective, while running
+    a rank-zero-only component everywhere merely duplicates its work.
+    """
+
     def __init__(self, config: Mapping | None = None) -> None:
         """Initialize a component that does not require configuration."""
         self._parse_config_schema(config)

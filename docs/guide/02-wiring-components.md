@@ -65,7 +65,7 @@ which also includes a `COMPONENT BINDINGS` section.
 Bindings are session-scoped and one-to-one. Binding chains, cycles, unknown or
 ambiguous targets, category changes, and top-level role configuration are
 rejected. Built-in defaults such as `logger` and `checkpointer` can be replaced
-through the same mechanism. `ddp.parallel_components` may contain either role
+through the same mechanism. `ddp.rank_zero_components` may contain either role
 or implementation names; a bound DDP resource must support the same `config`
 and `rank` construction interface as the built-in resource.
 
@@ -165,8 +165,9 @@ Teardown and post-iteration hook callbacks use reverse order.
 Activating a component automatically activates its recursive dependency and
 wrapping-target closure when each omitted dependency uses the inherited
 component constructor. Activation follows dependency edges outward: activating
-a wrapped hook alone does not activate hooks that wrap it. For DDP, secondary
-ranks retain the same closure for each root named in `ddp.parallel_components`.
+a wrapped hook alone does not activate hooks that wrap it. Under DDP, every
+rank activates the same components except those declared rank-zero-only — see
+[What each rank builds](05-distributed-training.md#what-each-rank-builds).
 
 ---
 

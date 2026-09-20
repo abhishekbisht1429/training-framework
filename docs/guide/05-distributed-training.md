@@ -26,9 +26,6 @@ sessions:
       backend: nccl
       master_addr: "127.0.0.1"
       master_port: "12355"
-      parallel_components:
-        - model
-        - train
 
     model: {}
     train: {}
@@ -68,7 +65,60 @@ written on eight GPUs resumes on four without being told to.
 `--resume-session` accepts these three overrides and rejects any other, which
 belongs to `--extend-session`.
 
-## Rank-specific session construction
+## What each rank builds
+
+Rank 0 builds every configured component. Every other rank builds all of them
+too, except the ones declared **rank-zero-only** — work that should happen once
+per run rather than once per rank.
+
+Nothing has to be listed for a component to run on every rank. That is the
+safe default in both directions: a component left off a rank stops taking part
+in the collectives and the run hangs, while one built on a rank that had no
+need for it costs a constructor call.
+
+There are two ways to declare a component rank-zero-only. Mark the class, and
+every session that uses it inherits the decision:
+
+```python
+@rank_zero_only
+@hook("my_reporter")
+class MyReporter(LifecycleHook):
+    ...
+```
+
+Or name it in the session, for a component whose class you do not own or whose
+role differs per run:
+
+```yaml
+ddp:
+  world_size: 4
+  backend: nccl
+  rank_zero_components:
+    - my_reporter
+```
+
+The built-in `logger`, `checkpointer`, `tensorboard` and `timer` are marked
+already, so a default configuration keeps logging and checkpointing on rank 0
+without being told to.
+
+The two declarations are not treated alike. A class-level mark is its author's
+settled decision and is taken at face value — `timer` reaches `ddp` through
+`optimizer` and is rank-zero-only on purpose. A name in `rank_zero_components`
+is a per-run override, so naming a component whose prerequisites include `ddp`
+warns: that is the shape of a component that takes part in the collectives,
+and excluding one leaves the other ranks waiting. Every name is resolved
+through the bindings and checked against the session before any worker is
+spawned, so a typo fails the launch rather than one rank — including on a
+single-rank launch, which has no ranks to prune for but would otherwise carry
+the mistake until the day the same configuration is scaled up.
+
+A rank-zero-only component that a component this rank *does* build declares as
+a prerequisite is built anyway, with a warning: a prerequisite has to exist
+wherever its consumer does. Nothing else is inferred — a component is left off
+a rank because it was declared rank-zero-only, never because the framework
+decided it was needed only there.
+
+### How a rank settles its component set
 
 The parent session holds a placeholder DDP resource with rank `-1`. Each child
 process settles its own configuration *before* it builds anything: it pins its
@@ -78,14 +128,19 @@ components it does not need from that state. Only then is the session
 reconstructed. Components are wired to each other as they are constructed, so
 a worker never builds a session and then rewires it.
 
-- Rank 0 keeps every configured component.
-- Ranks greater than 0 keep `ddp`, roots listed in `parallel_components`, and
-  their recursive dependency and wrapping-target closure. Because the
-  dependency graph is declared on the component classes, that closure is
-  resolved from the state alone -- nothing a secondary rank will discard is
-  ever constructed.
-- Non-parallel logging, checkpointing, and other rank-zero-only work can
-  therefore remain off secondary ranks by omitting those roots.
+Because the dependency graph is declared on the component classes, the set a
+rank needs is resolved from the state alone — nothing a secondary rank will
+discard is ever constructed.
+
+### The deprecated `parallel_components` list
+
+`ddp.parallel_components` was the opposite declaration: an opt-in list of the
+roots to keep *on* the other ranks, with everything else dropped. A session
+that still sets it keeps exactly that behaviour and warns, so existing
+configurations are unaffected; it also warns when the list prunes a component
+that requires `ddp`, which is the mistake the list invited. Delete the key to
+get the behaviour above, and declare whatever was deliberately absent from the
+list as rank-zero-only instead.
 
 ## What the DDP resource does
 

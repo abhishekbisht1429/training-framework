@@ -513,6 +513,32 @@ def wraps(hook_name: str):
     return wrapper
 
 
+def rank_zero_only(cls):
+    """Mark a component that a distributed session builds on rank 0 only.
+
+    Applied directly to the class, without arguments::
+
+        @rank_zero_only
+        @hook("my_reporter")
+        class MyReporter(LifecycleHook):
+            ...
+
+    Secondary ranks build every configured component except those marked
+    this way, so this is the declaration for work that must happen once per
+    run -- logging, checkpointing, reporting -- rather than once per rank.
+    The mark is inherited, and a session can add to it with
+    ``ddp.rank_zero_components``.
+    """
+    if not isinstance(cls, type) or not issubclass(cls, (Step, Hook, Resource)):
+        name = getattr(cls, "__name__", repr(cls))
+        raise TypeError(
+            "@rank_zero_only can only be applied to Step, Hook, or Resource "
+            f"subclasses. '{name}' is neither."
+        )
+    cls.rank_zero_only = True
+    return cls
+
+
 def requires_resource(resource_name: str):
     def wrapper(cls):
         if not issubclass(cls, (Step, Hook, Resource)):

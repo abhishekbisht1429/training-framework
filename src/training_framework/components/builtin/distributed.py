@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import warnings
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
 
@@ -22,6 +24,33 @@ role(
 )
 
 
+def _component_name_list(config: Mapping, key: str) -> list[str] | None:
+    """Return `config[key]` as a list of component names, or None if absent.
+
+    A bare string is the mistake worth naming: `rank_zero_components: logger`
+    is a valid YAML scalar that would otherwise be iterated one character at
+    a time, quietly asking for components called 'l', 'o', 'g'.
+    """
+    value = config.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str) or isinstance(value, Mapping) or not isinstance(
+            value, Iterable,
+    ):
+        raise ValueError(
+            f"ddp.{key} must be a list of component names, got "
+            f"{type(value).__name__}. Write it as a YAML list, one name per "
+            "line."
+        )
+    names = list(value)
+    invalid = [name for name in names if not isinstance(name, str)]
+    if invalid:
+        raise ValueError(
+            f"ddp.{key} must contain component names, got {invalid}"
+        )
+    return names
+
+
 @requires_resource("model")
 @resource("ddp", session_type="training")
 class DDPResource(Resource):
@@ -35,7 +64,22 @@ class DDPResource(Resource):
         # single-node launch, and the engine settles it from the launch
         # topology; a hand-constructed resource keeps the old behaviour.
         self._local_rank = rank if local_rank is None else local_rank
-        self._parallel_components = config.get("parallel_components", [])
+        self._parallel_components = _component_name_list(
+            config,
+            "parallel_components",
+        )
+        self._rank_zero_components = (
+            _component_name_list(config, "rank_zero_components") or []
+        )
+        if self._parallel_components is not None:
+            warnings.warn(
+                "ddp.parallel_components is deprecated. Secondary ranks now "
+                "build every configured component except those marked with "
+                "@rank_zero_only or named in ddp.rank_zero_components; remove "
+                "parallel_components to get that behaviour.",
+                FutureWarning,
+                stacklevel=2,
+            )
         self._master_addr = config["master_addr"]
         self._master_port = config["master_port"]
         self._ddp_wrapped_model = None
@@ -58,7 +102,22 @@ class DDPResource(Resource):
 
     @property
     def parallel_components(self):
-        return deepcopy(self._parallel_components)
+        """The deprecated opt-in rank list; empty when the session omits it."""
+        return deepcopy(self._parallel_components or [])
+
+    @property
+    def declares_parallel_components(self) -> bool:
+        """Whether the session set the deprecated list at all.
+
+        An explicit empty list still decides the rank set, so it has to be
+        told apart from the key being absent.
+        """
+        return self._parallel_components is not None
+
+    @property
+    def rank_zero_components(self):
+        """Components this session keeps off ranks other than zero."""
+        return deepcopy(self._rank_zero_components)
 
     @property
     def config(self):

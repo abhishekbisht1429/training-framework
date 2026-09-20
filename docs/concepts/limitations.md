@@ -46,9 +46,9 @@ The `model` role must resolve to a module accepted by PyTorch DDP. Distributed f
 
 `ddp` wraps the single `model` resource, so parameters owned by an attached `ModuleResource` are synchronised only while that component is reachable from the `model` root. A `ModuleResource` that is active but not reachable from `model` is also invisible to `OptimizerHook`, which collects parameters from the wrapped model, so its weights are never updated and never all-reduced while `Checkpointer` still saves them. Nothing raises: the same shape is legitimate weight sharing between two models.
 
-### Secondary-rank component roots are opt-in
+### Rank-zero-only work is opt-out
 
-Ranks greater than zero retain roots in `ddp.parallel_components`, their recursive dependencies and wrapping targets, plus the DDP resource.
+Ranks greater than zero build every configured component except those marked `@rank_zero_only` or named in `ddp.rank_zero_components`, so a component that should run once per run rather than once per rank has to say so. Nothing is inferred from the dependency graph: a component that takes part in the collectives without declaring `ddp` as a prerequisite is still built everywhere, and one that writes a file per run is duplicated across ranks until it is declared.
 
 ## Components and registration
 

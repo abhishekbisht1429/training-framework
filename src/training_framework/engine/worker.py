@@ -81,9 +81,10 @@ def prepare_worker_state(
 
     if rank > 0:
         ddp_config = _ddp_config(ddp_info["init_args"])
-        keep = components.dependency_closure(
-            list(ddp_config.get("parallel_components", [])) + ["ddp"],
+        keep = components.rank_parallel_names(
             active_names=components_state,
+            parallel_components=ddp_config.get("parallel_components"),
+            rank_zero_components=ddp_config.get("rank_zero_components"),
         )
         for name in list(components_state):
             if name not in keep:

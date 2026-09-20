@@ -359,6 +359,62 @@ def test_full_spawned_ddp_training_flow(tmp_path, monkeypatch):
     assert results[0]["final_weight"] > 0.0
 
 
+def test_full_spawned_ddp_training_flow_without_parallel_components(
+    tmp_path,
+    monkeypatch,
+):
+    """The same run with no opt-in list: rank 1 is derived, not configured.
+
+    Every component here is kept on rank 1 except the rank-zero-only
+    built-ins, so both ranks train exactly as they do with the list spelled
+    out -- and a collective missing a participant would hang instead.
+    """
+    _register_integration_components()
+    output_dir = tmp_path / "rank-results"
+    session_config = _ddp_session_config(tmp_path, output_dir)
+    del session_config["ddp"]["parallel_components"]
+    config_path = tmp_path / "training.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"sessions": [session_config]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "training-framework",
+            "--config",
+            str(config_path),
+            "--heartbeat-timeout",
+            "30",
+            "--process_timeout_on_join",
+            "10",
+        ],
+    )
+
+    with TrainingEngine(Configurator()) as engine:
+        engine.start_session()
+
+    results = [
+        json.loads(
+            (output_dir / f"rank_{rank}.json").read_text(encoding="utf-8")
+        )
+        for rank in range(2)
+    ]
+
+    assert [result["rank"] for result in results] == [0, 1]
+    for result in results:
+        assert [
+            observation["iteration"] for observation in result["observations"]
+        ] == [1, 2, 3]
+    assert results[0]["final_weight"] == pytest.approx(
+        results[1]["final_weight"],
+        rel=1e-6,
+        abs=1e-6,
+    )
+    assert results[0]["final_weight"] > 0.0
+
+
 def test_staggered_stop_request_keeps_ddp_ranks_iteration_aligned(
     tmp_path,
     monkeypatch,

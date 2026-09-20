@@ -584,6 +584,188 @@ class SessionComponents:
             visit(name)
         return closure
 
+    def _names_depending_on(
+            self,
+            target_name: str,
+            active: set[str],
+    ) -> set[str]:
+        """Return the active components that reach `target_name` transitively."""
+        dependents = set()
+        for name in active:
+            try:
+                closure = self.dependency_closure([name], active_names=active)
+            except (RuntimeError, KeyError):
+                # A component whose graph cannot be resolved is not this
+                # diagnostic's problem; the activation path reports it.
+                continue
+            if name != target_name and target_name in closure:
+                dependents.add(name)
+        return dependents
+
+    def validate_component_names(
+            self,
+            names: Iterable[str] | None,
+            *,
+            source: str,
+            active_names: Iterable[str] | None = None,
+    ) -> set[str]:
+        """Resolve configured component names, or say which one is wrong.
+
+        `source` names the configuration key being checked, so a typo or a
+        component belonging to another session is reported against the line
+        that wrote it instead of silently doing nothing.
+        """
+        active = (
+            set(self.components)
+            if active_names is None
+            else set(active_names)
+        )
+        resolved_names = set()
+        for name in names or ():
+            resolved_name, _ = self._registered_component_class(name)
+            if resolved_name not in active:
+                raise RuntimeError(with_explanation(
+                    f"{source} names '{name}', which resolves to "
+                    f"'{resolved_name}' and is not configured in this "
+                    "session.",
+                    explain_missing_component(
+                        name,
+                        resolved_name,
+                        session_type=self.session_type,
+                        active_names=active,
+                    ),
+                ))
+            resolved_names.add(resolved_name)
+        return resolved_names
+
+    def rank_zero_component_names(
+            self,
+            *,
+            active_names: Iterable[str] | None = None,
+            declared: Iterable[str] | None = None,
+    ) -> set[str]:
+        """Return the active components a secondary rank does not build.
+
+        A component is rank-zero-only when its class is marked with
+        `@rank_zero_only` or when this session names it in
+        `ddp.rank_zero_components` (`declared`). The DDP resource itself is
+        never rank-zero-only.
+        """
+        active = (
+            set(self.components)
+            if active_names is None
+            else set(active_names)
+        )
+        rank_zero = {
+            name for name in active
+            if getattr(self._registered_component_class(name)[1],
+                       "rank_zero_only", False)
+        }
+        ddp_name = self.resolve_name("ddp")
+        declared_names = self.validate_component_names(
+            declared,
+            source="ddp.rank_zero_components",
+            active_names=active,
+        )
+        rank_zero |= declared_names
+        rank_zero.discard(ddp_name)
+
+        # Only the names this session wrote down are questioned. A class-level
+        # @rank_zero_only is its author's settled decision -- `timer` requires
+        # `optimizer`, which requires `ddp`, and it is still rank-zero-only on
+        # purpose -- while a config entry is a per-run override worth a second
+        # look, because excluding a participant in the collectives is what
+        # leaves the other ranks waiting.
+        using_ddp = sorted(
+            name for name in declared_names - {ddp_name}
+            if ddp_name in self.dependency_closure([name], active_names=active)
+        )
+        if using_ddp:
+            warnings.warn(
+                "ddp.rank_zero_components excludes components that require "
+                f"the DDP resource: {using_ddp}. They are built on rank 0 "
+                "only, so a collective they take part in can hang. Mark them "
+                "@rank_zero_only if they really are rank-zero-only work.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return rank_zero
+
+    def rank_parallel_names(
+            self,
+            *,
+            active_names: Iterable[str] | None = None,
+            parallel_components: Iterable[str] | None = None,
+            rank_zero_components: Iterable[str] | None = None,
+    ) -> set[str]:
+        """Return the component names a secondary rank builds.
+
+        Every configured component is kept except those declared
+        rank-zero-only. Nothing else is inferred: a component is dropped
+        because it was declared rank-zero-only, never because the framework
+        decided it was only needed by one. Leaving a component out of a rank
+        is what deadlocks a collective, so the mistake worth avoiding is
+        dropping too much, and a resource kept for nothing costs one
+        constructor call.
+
+        A rank-zero-only component that a kept one depends on is kept anyway,
+        with a warning: a prerequisite has to exist wherever its consumer does.
+
+        `parallel_components` is the deprecated opt-in list. When a session
+        provides it (even empty) it decides the answer on its own: only those
+        roots, their closure, and the DDP resource are kept.
+        """
+        active = (
+            set(self.components)
+            if active_names is None
+            else set(active_names)
+        )
+        ddp_name = self.resolve_name("ddp")
+
+        if parallel_components is not None:
+            keep = self.dependency_closure(
+                list(parallel_components) + ["ddp"],
+                active_names=active,
+            )
+            pruned = sorted(self._names_depending_on(ddp_name, active) - keep)
+            if pruned:
+                # The classic mistake the opt-in list invites: a component
+                # that takes part in the collectives is simply forgotten, and
+                # the run hangs instead of failing.
+                warnings.warn(
+                    "ddp.parallel_components omits components that require "
+                    f"the DDP resource: {pruned}. They are built on rank 0 "
+                    "only, so a collective they take part in can hang. Add "
+                    "them to the list, or remove parallel_components and let "
+                    "the framework decide.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return keep
+
+        rank_zero = self.rank_zero_component_names(
+            active_names=active,
+            declared=rank_zero_components,
+        )
+        keep = self.dependency_closure(
+            active - rank_zero,
+            active_names=active,
+        )
+        keep.add(ddp_name)
+
+        still_needed = sorted(rank_zero & keep)
+        if still_needed:
+            # Correctness wins over pruning: a prerequisite of a component
+            # this rank runs has to exist, whatever it is marked.
+            warnings.warn(
+                "Rank-zero-only components are built on every rank because "
+                "components this rank runs depend on them: "
+                f"{still_needed}.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return keep
+
     def register_resource(self, component: Resource, overwrite=False) -> str:
         self._validate_component(
             component,

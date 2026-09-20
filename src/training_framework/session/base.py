@@ -367,6 +367,19 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _component_dependency_closure(self, names) -> set[str]:
         return self._components.dependency_closure(names)
 
+    def validate_component_names(self, names, *, source: str) -> set[str]:
+        """Resolve configured component names against this session."""
+        return self._components.validate_component_names(names, source=source)
+
+    def rank_parallel_names(self, **kwargs) -> set[str]:
+        """Return the components a secondary DDP rank builds.
+
+        The engine calls this on the parent's session before it spawns
+        anything, so a name that does not resolve is reported by the launch
+        rather than by a worker the other ranks are already waiting for.
+        """
+        return self._components.rank_parallel_names(**kwargs)
+
     def activate_component(self, name: str, config=None) -> str:
         """Activate a registered component and its prerequisites.
 

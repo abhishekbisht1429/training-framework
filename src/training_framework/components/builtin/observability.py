@@ -15,6 +15,7 @@ from training_framework.components import (
     LifecycleHook,
     Resource,
     hook,
+    rank_zero_only,
     resource,
     wraps,
 )
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from training_framework.session import Session, TrainingSession
 
 
+@rank_zero_only
 @hook("logger")
 class Logger(LifecycleHook, ExtendableComponent):
 
@@ -96,6 +98,7 @@ class Logger(LifecycleHook, ExtendableComponent):
         self.call_every = self._config["log_every"]
 
 
+@rank_zero_only
 @resource("tensorboard")
 class Tensorboard(Resource):
 
@@ -153,6 +156,7 @@ class Tensorboard(Resource):
                 process.terminate()
 
 
+@rank_zero_only
 @wraps("optimizer")
 @hook("timer", session_type="training")
 class Timer(LifecycleHook):

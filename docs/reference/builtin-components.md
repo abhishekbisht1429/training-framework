@@ -51,7 +51,7 @@ ddp:
   backend: gloo
   master_addr: "127.0.0.1"
   master_port: "12355"
-  parallel_components: []
+  rank_zero_components: []   # optional; built on rank 0 only
 
 data_manager:
   batch_size: 32       # global batch size; divisible by world_size
@@ -93,6 +93,14 @@ a different number of GPUs — see
 [The launch decides the topology](../guide/05-distributed-training.md#the-launch-decides-the-topology).
 Because `batch_size` is global, a resize changes the per-rank batch while the
 global batch, and so the optimizer's step semantics, stay put.
+
+`ddp.rank_zero_components` is optional and lists components this session keeps
+off every rank but rank 0, on top of the ones whose classes are marked with
+`@rank_zero_only` — see
+[What each rank builds](../guide/05-distributed-training.md#what-each-rank-builds).
+The former `ddp.parallel_components`, which listed the components to keep *on*
+the other ranks, is deprecated: a session that still sets it keeps the old
+opt-in behaviour and warns.
 
 ### `optimizer`
 

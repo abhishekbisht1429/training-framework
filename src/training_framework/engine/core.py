@@ -93,6 +93,7 @@ class TrainingEngine:
             from_checkpoint=True,
         )
         world_size = 1 if topology is None else topology.world_size
+        self._check_rank_component_plan(session, world_size)
 
         self._session_process_wrappers = [
             SessionProcessWrapper(
@@ -102,6 +103,44 @@ class TrainingEngine:
             )
             for rank in range(world_size)
         ]
+
+    @staticmethod
+    def _check_rank_component_plan(session, world_size: int) -> None:
+        """Settle what the secondary ranks will build, before any of them run.
+
+        The workers resolve this for themselves, but by then rank 0 is on its
+        way into `init_process_group`: a name that does not resolve would
+        abort one worker while the others wait out the join timeout. Doing it
+        here turns that into a launch-time error, and surfaces the
+        rank-zero-only warnings where they can still be acted on.
+        """
+        if not session.has_resource("ddp"):
+            return
+        ddp_resource = session.get_resource("ddp")
+
+        if world_size <= 1:
+            # There is no rank to prune for, so no plan to settle. The names
+            # are still resolved: a typo here is dormant until the same
+            # configuration is run on more than one rank, and it should not
+            # take that launch to find it. The collective diagnostics stay
+            # off, because with one rank there is nobody left waiting.
+            for names, source in (
+                    (ddp_resource.rank_zero_components,
+                     "ddp.rank_zero_components"),
+                    (ddp_resource.parallel_components,
+                     "ddp.parallel_components"),
+            ):
+                session.validate_component_names(names, source=source)
+            return
+
+        session.rank_parallel_names(
+            parallel_components=(
+                ddp_resource.parallel_components
+                if ddp_resource.declares_parallel_components
+                else None
+            ),
+            rank_zero_components=ddp_resource.rank_zero_components,
+        )
 
     def register_session(
             self,
@@ -140,16 +179,22 @@ class TrainingEngine:
                 **topology.config_overlay(),
             }
 
+        sessions = [
+            session_class(
+                deepcopy(dict(config)),
+                **deepcopy(dict(session_kwargs)),
+            )
+            for _ in range(world_size)
+        ]
+        self._check_rank_component_plan(sessions[0], world_size)
+
         wrappers = [
             SessionProcessWrapper(
-                session=session_class(
-                    deepcopy(dict(config)),
-                    **deepcopy(dict(session_kwargs)),
-                ),
+                session=session,
                 rank=rank,
                 **self._wrapper_kwargs(topology),
             )
-            for rank in range(world_size)
+            for rank, session in enumerate(sessions)
         ]
         self._session_process_wrappers.extend(wrappers)
 

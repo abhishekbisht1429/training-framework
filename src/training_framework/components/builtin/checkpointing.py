@@ -13,7 +13,7 @@ from training_framework.components import (
     LifecycleHook,
     Stateful,
 )
-from training_framework.components import hook
+from training_framework.components import hook, rank_zero_only
 from training_framework.session.state import rng_restore_suppressed
 from training_framework.util import timestamp_str
 
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from training_framework.session import Session
 
 
+@rank_zero_only
 @hook("checkpointer")
 class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
 

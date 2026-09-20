@@ -151,6 +151,7 @@ documented in [`ModuleResource`](../concepts/module-resource.md#members).
 | `@requires_hook(name)` | Declare a Hook prerequisite for a Step |
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
 | `@wraps(name)` | Declare that a Hook wraps another Hook |
+| `@rank_zero_only` | Declare that a distributed session builds this component on rank 0 only |
 | `component_registry(session_type)` | Return shared components overlaid by the matching scoped registry |
 | `topological_sort_of_components(..., session_type=...)` | Validate and order the selected session type's component graph |
 | `@register_session_type(name)` | Register a concrete Session subclass for engine and checkpoint dispatch |
