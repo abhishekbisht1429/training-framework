@@ -9,6 +9,7 @@ from training_framework.components.graph import (
     render_execution_graph,
     topological_sort_components,
 )
+from training_framework.components.naming import validate_component_name
 
 
 _COMPONENT_TYPES = (Resource, Hook, Step)
@@ -136,6 +137,7 @@ def _component(
         overwrite=False,
         session_type: str | None = None,
 ):
+    validate_component_name(name)
     registry = _registration_registry(session_type)
 
     def wrapper(cls):
@@ -241,6 +243,7 @@ def role(
     is optional: @requires_resource/@requires_hook/@requires_step accept any
     name whether or not it has been declared as a role.
     """
+    validate_component_name(name, kind="Role name")
     if category not in _COMPONENT_TYPES:
         raise TypeError(
             "role() category must be Resource, Hook, or Step; got "
@@ -303,6 +306,14 @@ class ComponentBindings:
                 )
             if not role_name or not implementation_name:
                 raise ValueError("Component binding names must not be empty")
+            validate_component_name(
+                role_name,
+                kind="Component binding role name",
+            )
+            validate_component_name(
+                implementation_name,
+                kind="Component binding target",
+            )
             if (
                     role_name in reserved_names
                     or implementation_name in reserved_names
@@ -468,6 +479,8 @@ def _binding_resolver(
 
 
 def requires_step(step_name: str):
+    validate_component_name(step_name, kind="Required Step name")
+
     def wrapper(cls):
         if not issubclass(cls, Step):
             raise TypeError(
@@ -482,6 +495,8 @@ def requires_step(step_name: str):
 
 
 def requires_hook(hook_name: str):
+    validate_component_name(hook_name, kind="Required Hook name")
+
     def wrapper(cls):
         if not issubclass(cls, Step):
             raise TypeError(
@@ -496,6 +511,8 @@ def requires_hook(hook_name: str):
 
 
 def wraps(hook_name: str):
+    validate_component_name(hook_name, kind="Wrapped Hook name")
+
     def wrapper(cls):
         if not issubclass(cls, Hook):
             raise TypeError(
@@ -540,6 +557,8 @@ def rank_zero_only(cls):
 
 
 def requires_resource(resource_name: str):
+    validate_component_name(resource_name, kind="Required Resource name")
+
     def wrapper(cls):
         if not issubclass(cls, (Step, Hook, Resource)):
             raise TypeError(
