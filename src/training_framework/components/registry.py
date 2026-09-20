@@ -9,7 +9,10 @@ from training_framework.components.graph import (
     render_execution_graph,
     topological_sort_components,
 )
-from training_framework.components.naming import validate_component_name
+from training_framework.components.naming import (
+    parse_instance_name,
+    validate_component_name,
+)
 
 
 _COMPONENT_TYPES = (Resource, Hook, Step)
@@ -270,11 +273,27 @@ def role(
 
 
 class ComponentBindings:
-    """Bind session-scoped component roles to registered implementations."""
+    """Bind session-scoped component roles to registered implementations.
+
+    Two forms share the mapping, told apart by the value:
+
+    * ``role: implementation`` binds a role for the whole session, which is
+      the original form and still the common one.
+    * ``consumer: {role: target}`` binds a role for one consumer only. It is
+      how a session says which instance a component was wired to when more
+      than one instance of a component exists, and it is kept here rather
+      than inside the consumer's own configuration because a component's
+      configuration is passed verbatim to its constructor -- and because the
+      wiring has to be readable before anything is constructed.
+
+    A target may name an instance (``model#b``); a role name may not, since a
+    role is what a component class declares and a class cannot know which
+    instance it will be given.
+    """
 
     def __init__(
             self,
-            bindings: Mapping[str, str] | None = None,
+            bindings: "Mapping[str, str | Mapping[str, str]] | None" = None,
             *,
             session_type: str | None = None,
     ):
@@ -289,8 +308,81 @@ class ComponentBindings:
         self._session_type = normalized
         self._registry = component_registry(normalized)
         self._roles = role_registry(normalized)
-        self._bindings = dict(bindings)
+        self._bindings: dict[str, str] = {}
+        self._instance_bindings: dict[str, dict[str, str]] = {}
+        for key, value in dict(bindings).items():
+            if isinstance(value, Mapping):
+                self._instance_bindings[key] = dict(value)
+            else:
+                self._bindings[key] = value
         self._validate()
+        self._validate_instance_bindings()
+
+    def _target_implementation(self, target: str, *, role_name: str) -> str:
+        """Return the registered component name a binding target names.
+
+        A target may carry an instance suffix, in which case the component it
+        is an instance of is what has to be registered.
+        """
+        try:
+            implementation, _ = parse_instance_name(target)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Component binding '{role_name}' -> '{target}': {error}"
+            ) from error
+
+        if implementation not in self._registry:
+            # Imported lazily: diagnostics imports this module.
+            from training_framework.components.diagnostics import (
+                explain_missing_component,
+                with_explanation,
+            )
+
+            raise ValueError(with_explanation(
+                f"Component binding target '{target}' is not "
+                "a registered component",
+                explain_missing_component(
+                    implementation,
+                    implementation,
+                    session_type=self._session_type,
+                ),
+            ))
+        return implementation
+
+    def _validate_instance_bindings(self) -> None:
+        reserved_names = reserved_config_names(self._session_type)
+        reserved = ", ".join(sorted(reserved_names))
+        for consumer, wiring in self._instance_bindings.items():
+            if not isinstance(consumer, str) or not consumer:
+                raise ValueError("Component binding names must not be empty")
+            if consumer in reserved_names:
+                raise ValueError(f"{reserved} are reserved component names")
+            # The consumer names an instance, so its component must exist even
+            # though which instances are active is not known here.
+            self._target_implementation(consumer, role_name=consumer)
+
+            for role_name, target in wiring.items():
+                if not isinstance(role_name, str) or not isinstance(target, str):
+                    raise TypeError(
+                        "'component_bindings' must be a mapping of strings "
+                        "to strings"
+                    )
+                if not role_name or not target:
+                    raise ValueError(
+                        "Component binding names must not be empty"
+                    )
+                validate_component_name(
+                    role_name,
+                    kind=f"Component binding role name for '{consumer}'",
+                )
+                if role_name in reserved_names or target in reserved_names:
+                    raise ValueError(
+                        f"{reserved} are reserved component names"
+                    )
+                self._target_implementation(
+                    target,
+                    role_name=f"{consumer}.{role_name}",
+                )
 
     def _validate(self) -> None:
         targets = {}
@@ -309,10 +401,6 @@ class ComponentBindings:
             validate_component_name(
                 role_name,
                 kind="Component binding role name",
-            )
-            validate_component_name(
-                implementation_name,
-                kind="Component binding target",
             )
             if (
                     role_name in reserved_names
@@ -337,24 +425,12 @@ class ComponentBindings:
                     f"'{implementation_name}'"
                 )
 
-            if implementation_name not in self._registry:
-                # Imported lazily: diagnostics imports this module.
-                from training_framework.components.diagnostics import (
-                    explain_missing_component,
-                    with_explanation,
-                )
-
-                raise ValueError(with_explanation(
-                    f"Component binding target '{implementation_name}' is not "
-                    "a registered component",
-                    explain_missing_component(
-                        implementation_name,
-                        implementation_name,
-                        session_type=self._session_type,
-                    ),
-                ))
+            implementation = self._target_implementation(
+                implementation_name,
+                role_name=role_name,
+            )
             implementation_type = _component_type(
-                self._registry[implementation_name]
+                self._registry[implementation]
             )
             if (
                     role_name in self._registry
@@ -389,10 +465,24 @@ class ComponentBindings:
                     f"role name '{role_name}'."
                 )
 
-    def resolve(self, name: str) -> str:
+    def resolve(self, name: str, *, consumer: str | None = None) -> str:
+        """Return the name `name` is bound to, for `consumer` if it has wiring.
+
+        A consumer's own wiring wins over the session-wide binding, so one
+        component can be pointed at a particular instance without changing
+        what every other component sees.
+        """
+        if consumer is not None:
+            wiring = self._instance_bindings.get(consumer)
+            if wiring is not None and name in wiring:
+                return wiring[name]
         return self._bindings.get(name, name)
 
-    def is_bound(self, name: str) -> bool:
+    def is_bound(self, name: str, *, consumer: str | None = None) -> bool:
+        if consumer is not None:
+            wiring = self._instance_bindings.get(consumer)
+            if wiring is not None and name in wiring:
+                return True
         return name in self._bindings
 
     def is_alias(self, name: str) -> bool:
@@ -408,6 +498,14 @@ class ComponentBindings:
         return dict(self._bindings)
 
     @property
+    def instance_bindings(self) -> dict[str, dict[str, str]]:
+        """Return the per-consumer wiring, by consumer instance name."""
+        return {
+            consumer: dict(wiring)
+            for consumer, wiring in self._instance_bindings.items()
+        }
+
+    @property
     def session_type(self) -> str | None:
         return self._session_type
 
@@ -418,6 +516,8 @@ class ComponentBindings:
         legacy_bindings = state.pop("_aliases", None)
         if "_bindings" not in state and legacy_bindings is not None:
             state["_bindings"] = legacy_bindings
+        # Pickled before per-consumer wiring existed.
+        state.setdefault("_instance_bindings", {})
         self.__dict__.update(state)
 
 

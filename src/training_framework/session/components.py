@@ -23,7 +23,10 @@ from training_framework.components.diagnostics import (
     explain_missing_component,
     with_explanation,
 )
-from training_framework.components.naming import parse_instance_name
+from training_framework.components.naming import (
+    implementation_of,
+    parse_instance_name,
+)
 from training_framework.components.registry import (
     ComponentBindings,
     _coalesce_component_bindings,
@@ -55,24 +58,37 @@ class SessionComponentView(ComponentView):
             self,
             components: "SessionComponents",
             consumer: type[Component],
+            consumer_name: str | None = None,
     ):
         self._components = components
         self._consumer = consumer
+        # Which instance is being constructed, so its own wiring is applied.
+        # A component built outside the session has none.
+        self._consumer_name = consumer_name
 
     @property
     def session_type(self) -> str:
         return self._components.session_type
 
     def resolve_name(self, name: str) -> str:
-        return self._components.resolve_name(name)
+        return self._components.resolve_dependency(
+            name,
+            consumer=self._consumer_name,
+        )
 
     def has_resource(self, name: str) -> bool:
         self._require_declared(name)
-        return self._components.has_resource(name)
+        return self._components.has_resource(
+            name,
+            consumer=self._consumer_name,
+        )
 
     def get_resource(self, name: str) -> Resource:
         self._require_declared(name)
-        return self._components.get_resource(name)
+        return self._components.get_resource(
+            name,
+            consumer=self._consumer_name,
+        )
 
     def _require_declared(self, name: str) -> None:
         declared = getattr(self._consumer, "required_resources", ())
@@ -268,7 +284,8 @@ class SessionComponents:
             **kwargs,
     ) -> Component:
         """Construct a component with its declared prerequisites visible."""
-        with constructing_component(SessionComponentView(self, component_class)):
+        view = SessionComponentView(self, component_class, instance_name)
+        with constructing_component(view):
             component = component_class(*args, **kwargs)
         self._stamp_identity(component, instance_name)
         return component
@@ -422,9 +439,19 @@ class SessionComponents:
             expected_type: type[Component] | None = None,
             *,
             consumer: type[Component] | None = None,
+            resolved_name: str | None = None,
     ) -> tuple[str, type[Component]]:
-        resolved_name = self.resolve_name(name)
-        component_class = self.registry.get(resolved_name)
+        # `name` is kept as asked so the diagnostics can say what was looked
+        # for and which binding redirected it; only the lookup uses the
+        # resolved name, which a caller may have worked out per consumer.
+        if resolved_name is None:
+            resolved_name = self.resolve_name(name)
+        # The name identifies an instance; the class is registered under the
+        # component name the instance name is built from. The two differ only
+        # once a name carries an instance suffix.
+        component_class = self.registry.get(
+            implementation_of(resolved_name),
+        )
         explanation = lambda: explain_missing_component(  # noqa: E731
             name,
             resolved_name,
@@ -546,8 +573,10 @@ class SessionComponents:
     ) -> None:
         visiting: list[str] = []
 
-        def activate(name: str) -> None:
-            resolved_name, component_class = self._registered_component_class(name)
+        def activate(target: str) -> None:
+            resolved_name, component_class = self._registered_component_class(
+                target,
+            )
             if resolved_name in self.components:
                 return
             if resolved_name in visiting:
@@ -564,12 +593,19 @@ class SessionComponents:
                 for dependency_name, dependency_type in self._dependency_specs(
                         component_class,
                 ):
+                    # Resolved against this consumer, so a component wired to
+                    # a particular instance activates that one.
+                    dependency_target = self.resolve_dependency(
+                        dependency_name,
+                        consumer=resolved_name,
+                    )
                     self._registered_component_class(
                         dependency_name,
                         dependency_type,
                         consumer=component_class,
+                        resolved_name=dependency_target,
                     )
-                    activate(dependency_name)
+                    activate(dependency_target)
 
                 if resolved_name in component_configs:
                     component = self._construct(
@@ -590,7 +626,7 @@ class SessionComponents:
                 visiting.pop()
 
         for root in roots:
-            activate(root)
+            activate(self.resolve_dependency(root))
 
     def dependency_closure(
             self,
@@ -612,7 +648,9 @@ class SessionComponents:
         closure: set[str] = set()
 
         def visit(name: str) -> None:
-            resolved_name, component_class = self._registered_component_class(name)
+            resolved_name, component_class = self._registered_component_class(
+                self.resolve_dependency(name, active=active),
+            )
             if resolved_name not in active:
                 raise RuntimeError(with_explanation(
                     f"Component '{name}' resolves to '{resolved_name}', which "
@@ -631,12 +669,18 @@ class SessionComponents:
             for dependency_name, dependency_type in self._dependency_specs(
                     component_class,
             ):
+                dependency_target = self.resolve_dependency(
+                    dependency_name,
+                    consumer=resolved_name,
+                    active=active,
+                )
                 self._registered_component_class(
                     dependency_name,
                     dependency_type,
                     consumer=component_class,
+                    resolved_name=dependency_target,
                 )
-                visit(dependency_name)
+                visit(dependency_target)
 
         for name in names:
             visit(name)
@@ -863,15 +907,17 @@ class SessionComponents:
                 f"is not an instance of {base_type.__name__}!"
             )
 
-        if (
-                not hasattr(component, "name")
-                or component.name not in self.registry
-        ):
+        registered_name = (
+            implementation_of(component.name)
+            if hasattr(component, "name")
+            else None
+        )
+        if registered_name is None or registered_name not in self.registry:
             raise ValueError(
                 f"{base_type.__name__} '{type(component).__name__}' "
                 "is not registered as a component!"
             )
-        if _component_type(self.registry[component.name]) is not base_type:
+        if _component_type(self.registry[registered_name]) is not base_type:
             raise ValueError(
                 f"Component '{component.name}' is not registered as a "
                 f"{base_type.__name__}!"
@@ -924,8 +970,8 @@ class SessionComponents:
             )
         del self.components[registered_name]
 
-    def get_resource(self, name: str) -> Resource:
-        registered_name = self.resolve_name(name)
+    def get_resource(self, name: str, *, consumer: str | None = None) -> Resource:
+        registered_name = self.resolve_dependency(name, consumer=consumer)
         component = self.components.get(registered_name)
         if not isinstance(component, Resource):
             active_names = {
@@ -945,12 +991,76 @@ class SessionComponents:
             ))
         return component
 
-    def has_resource(self, name: str) -> bool:
-        component = self.components.get(self.resolve_name(name))
+    def has_resource(self, name: str, *, consumer: str | None = None) -> bool:
+        try:
+            registered_name = self.resolve_dependency(name, consumer=consumer)
+        except ComponentDependencyError:
+            # Several instances answer to the name. Which one is meant is
+            # undecided, but the question this answers -- is there such a
+            # resource -- is still yes; asking for it is what reports it.
+            return True
+        component = self.components.get(registered_name)
         return isinstance(component, Resource)
 
     def resolve_name(self, name: str) -> str:
+        """Return the name `name` is bound to, applying bindings only."""
         return self.component_bindings.resolve(name)
+
+    def _instances_of(
+            self,
+            name: str,
+            active: Iterable[str] | None = None,
+    ) -> list[str]:
+        """Return the active instances `name` could refer to.
+
+        An exact match is the answer on its own: a component named `model`
+        stays the answer to `model` however many `model#...` instances join
+        it, so adding an instance never silently rewires anything.
+        """
+        active = self.components if active is None else set(active)
+        if name in active:
+            return [name]
+        implementation = implementation_of(name)
+        return sorted(
+            instance_name for instance_name in active
+            if implementation_of(instance_name) == implementation
+        )
+
+    def resolve_dependency(
+            self,
+            name: str,
+            *,
+            consumer: str | None = None,
+            active: Iterable[str] | None = None,
+    ) -> str:
+        """Return the instance name that satisfies `name` for `consumer`.
+
+        Three rules, in order: the consumer's own wiring decides if it has
+        any; otherwise the sole active instance of the component; otherwise
+        it is an error naming the candidates. Picking one of several would
+        mean wiring a component to something its session never chose, which
+        produces a run that works and is quietly wrong.
+
+        A name with nothing active behind it is returned as bound, so a
+        component that is simply not configured is reported by the caller
+        that knows what it was looking for.
+        """
+        resolved = self.component_bindings.resolve(name, consumer=consumer)
+        candidates = self._instances_of(resolved, active)
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            return resolved
+        raise ComponentDependencyError(with_explanation(
+            f"Component '{name}' resolves to '{resolved}', which {len(candidates)} "
+            f"active components implement: {candidates}.",
+            "Fix: name the one that is meant with per-component wiring, "
+            "component_bindings: {'"
+            f"{consumer if consumer is not None else '<component>'}"
+            "': {'"
+            f"{name}': '{candidates[0]}'"
+            "}}.",
+        ))
 
     @property
     def bindings(self) -> dict[str, str]:

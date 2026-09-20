@@ -93,9 +93,8 @@ def test_binding_a_role_name_with_the_separator_is_rejected():
         ComponentBindings({"model#2": "trained_model"})
 
 
-def test_binding_to_a_target_with_the_separator_is_rejected():
-    with pytest.raises(ValueError, match="Component binding target"):
-        ComponentBindings({"model": "trained_model#2"})
+# A binding *target* may name an instance -- that is how a consumer is
+# pointed at one. See tests/components/test_instance_wiring.py.
 
 
 def test_the_rejection_explains_why_the_character_is_reserved():

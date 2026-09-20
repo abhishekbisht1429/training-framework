@@ -10,6 +10,7 @@ from training_framework.components.base import (
     SessionHook,
     Step,
 )
+from training_framework.components.naming import implementation_of
 
 if TYPE_CHECKING:
     from training_framework.components.registry import RoleDeclaration
@@ -39,6 +40,32 @@ def _missing_role_message(
         "existing implementation via component_bindings: "
         f"{{'{name}': '<implementation_name>'}}."
     )
+
+
+def _resolve_to_node(binding_resolver, nodes_by_name, consumer, name):
+    """Return the node satisfying `name` for `consumer`, and the name tried.
+
+    Mirrors the session's resolution: the consumer's own wiring first, then
+    the sole node the name can mean. An exact match wins outright, so a
+    second instance of a component never takes an edge away from the first.
+    Ambiguity is left to the session, which can explain it properly; here it
+    simply resolves to nothing and is reported as unconfigured.
+    """
+    resolved_name = binding_resolver.resolve(
+        name,
+        consumer=getattr(consumer, "name", None),
+    )
+    if resolved_name in nodes_by_name:
+        return resolved_name, nodes_by_name[resolved_name]
+
+    implementation = implementation_of(resolved_name)
+    candidates = [
+        node for node_name, node in nodes_by_name.items()
+        if implementation_of(node_name) == implementation
+    ]
+    if len(candidates) == 1:
+        return resolved_name, candidates[0]
+    return resolved_name, None
 
 
 def _is_component_type(
@@ -128,14 +155,19 @@ def topological_sort_components(
         else list(components)
     )
 
-    components_by_id = {
-        component.id: component
-        for component in selected_components
-    }
     prerequisites_graph: dict[str, list[str]] = {
         component.id: [] for component in selected_components
     }
-    active_names = {component.name for component in selected_components}
+    # Which node answers to a name. Sorting a session these are instances, so
+    # two instances of one component are two nodes; sorting the registry
+    # itself they are the classes. Either way a node is found by its own
+    # `name`, which is why an edge cannot be resolved to the registered class
+    # -- that would collapse every instance of a component onto one node.
+    nodes_by_name = {
+        component.name: component
+        for component in selected_components
+    }
+    active_names = set(nodes_by_name)
 
     for component in selected_components:
         requirements = (
@@ -145,8 +177,17 @@ def topological_sort_components(
         )
         for attribute, required_type in requirements:
             for required_name in getattr(component, attribute, []):
-                resolved_name = binding_resolver.resolve(required_name)
-                registered_class = registry.get(resolved_name)
+                resolved_name, prerequisite = _resolve_to_node(
+                    binding_resolver,
+                    nodes_by_name,
+                    component,
+                    required_name,
+                )
+                # A name may identify an instance; the class it is an
+                # instance of is what the registry holds.
+                registered_class = registry.get(
+                    implementation_of(resolved_name),
+                )
                 if (
                         registered_class is None
                         or not issubclass(registered_class, required_type)
@@ -183,9 +224,7 @@ def topological_sort_components(
                     ))
 
                 assert registered_class is not None
-                prerequisite_id = registered_class.id
-                prerequisites_graph[component.id].append(prerequisite_id)
-                if session_scoped and prerequisite_id not in prerequisites_graph:
+                if session_scoped and prerequisite is None:
                     raise RuntimeError(with_explanation(
                         f"unmet prerequisite! {required_type.__name__} "
                         f"'{required_name}' resolves to '{resolved_name}', which "
@@ -199,6 +238,12 @@ def topological_sort_components(
                             active_names=active_names,
                         ),
                     ))
+                prerequisite_id = (
+                    prerequisite.id
+                    if prerequisite is not None
+                    else registered_class.id
+                )
+                prerequisites_graph[component.id].append(prerequisite_id)
 
     for wrapper in selected_components:
         if not _is_component_type(wrapper, Hook):
@@ -206,8 +251,15 @@ def topological_sort_components(
 
         resolved_targets = set()
         for wrapped_name in getattr(wrapper, "wrapped_hooks", ()):
-            resolved_name = binding_resolver.resolve(wrapped_name)
-            registered_class = registry.get(resolved_name)
+            resolved_name, wrapped_node = _resolve_to_node(
+                binding_resolver,
+                nodes_by_name,
+                wrapper,
+                wrapped_name,
+            )
+            registered_class = registry.get(
+                implementation_of(resolved_name),
+            )
             if registered_class is None or not issubclass(registered_class, Hook):
                 declared_role = (
                     roles.get(resolved_name) if registered_class is None else None
@@ -234,7 +286,11 @@ def topological_sort_components(
                     ),
                 ))
 
-            wrapped_id = registered_class.id
+            wrapped_id = (
+                wrapped_node.id
+                if wrapped_node is not None
+                else registered_class.id
+            )
             if wrapped_id == wrapper.id:
                 raise RuntimeError(
                     f"Hook '{wrapper.name}' cannot wrap itself"
@@ -246,7 +302,7 @@ def topological_sort_components(
                 )
             resolved_targets.add(wrapped_id)
 
-            if session_scoped and wrapped_id not in prerequisites_graph:
+            if session_scoped and wrapped_node is None:
                 raise RuntimeError(with_explanation(
                     f"invalid wraps target! Hook '{wrapped_name}' resolves to "
                     f"'{resolved_name}', which is not configured in this session.",
@@ -260,7 +316,9 @@ def topological_sort_components(
                     ),
                 ))
 
-            wrapped = components_by_id.get(wrapped_id, registered_class)
+            wrapped = (
+                wrapped_node if wrapped_node is not None else registered_class
+            )
             _validate_wrapping_lifecycle(
                 wrapper,
                 wrapped,

@@ -86,6 +86,20 @@ def parse_instance_name(name: str) -> tuple[str, str | None]:
     return implementation, suffix
 
 
+def implementation_of(name: str) -> str:
+    """Return the registered component name `name` is an instance of.
+
+    Tolerant on purpose: a name this module cannot explain is handed back
+    unchanged, so a typo reaches the caller's own "not registered" reporting
+    instead of being rejected here as bad syntax.
+    """
+    try:
+        implementation, _ = parse_instance_name(name)
+    except (TypeError, ValueError):
+        return name
+    return implementation
+
+
 def format_instance_name(implementation: str, suffix: str | None) -> str:
     """Return the instance name for `implementation` and `suffix`."""
     if suffix is None:
