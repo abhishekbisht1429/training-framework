@@ -117,6 +117,16 @@ class Component(ABC, metaclass=ComponentMeta):
     def _component_name(cls) -> str:
         return getattr(cls, "name", cls.__name__)
 
+    @property
+    def implementation_name(self) -> str:
+        """Return the registered name of the class implementing this component.
+
+        Distinct from ``name``, which the session overwrites per instance:
+        several instances of one component share an implementation name and
+        have different names.
+        """
+        return type(self)._component_name()
+
     def _parse_config_schema(self, config: Mapping | None) -> None:
         """Populate ``self._cfg`` when the class declares a ``config_schema``."""
         if type(self).config_schema is None:
@@ -170,9 +180,15 @@ class Component(ABC, metaclass=ComponentMeta):
 
     @property
     def linked_components(self) -> dict[str, str]:
-        """Return the asked name -> implementation name map of prerequisites."""
+        """Return the asked name -> instance name map of prerequisites.
+
+        The *instance* is recorded, not merely the class implementing it, so
+        that rewiring a consumer between two instances of one component is
+        visible to the checkpoint guard rather than silently restoring one
+        instance's state into another.
+        """
         return {
-            name: getattr(type(component), "name", type(component).__name__)
+            name: getattr(component, "name", type(component).__name__)
             for name, component in self._linked_components.items()
         }
 

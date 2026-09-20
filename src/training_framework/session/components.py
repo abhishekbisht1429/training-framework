@@ -23,6 +23,7 @@ from training_framework.components.diagnostics import (
     explain_missing_component,
     with_explanation,
 )
+from training_framework.components.naming import parse_instance_name
 from training_framework.components.registry import (
     ComponentBindings,
     _coalesce_component_bindings,
@@ -161,6 +162,10 @@ class SessionComponents:
         return {
             name: {
                 "component_type": _component_type(component).__name__,
+                # The class behind the instance. A checkpoint key names an
+                # instance, which need not be the name it was registered
+                # under, so the two are recorded separately.
+                "implementation": component.implementation_name,
                 "state": (
                     component.get_state()
                     if isinstance(component, Stateful)
@@ -193,11 +198,17 @@ class SessionComponents:
         # The stored order is the activation order, which is already
         # prerequisite-first, so each constructor sees what it declared.
         for name, component_info in component_states.items():
-            component_class = self.registry.get(name)
+            implementation, _ = parse_instance_name(name)
+            component_class = self.registry.get(implementation)
             if component_class is None:
                 raise ValueError(
                     f"Checkpoint component '{name}' is not registered"
                 )
+            self._check_recorded_implementation(
+                name,
+                implementation,
+                component_info,
+            )
 
             component_type = _component_type(component_class)
             stored_type = component_info["component_type"]
@@ -211,6 +222,7 @@ class SessionComponents:
             init_args = component_info["init_args"]
             component: Component = self._construct(
                 component_class,
+                name,
                 *init_args["args"],
                 **init_args["kwargs"],
             )
@@ -223,15 +235,60 @@ class SessionComponents:
             if isinstance(component, Stateful):
                 component.set_state(component_states[name]["state"])
 
+    @staticmethod
+    def _check_recorded_implementation(
+            name: str,
+            implementation: str,
+            component_info: Mapping[str, Any],
+    ) -> None:
+        """Check a checkpointed instance agrees with its own name.
+
+        An instance name states its own implementation, so parsing it is
+        authoritative and a state written before instances were named needs
+        no special case: its keys are names with no instance suffix.
+
+        The recorded `implementation` is carried so that a future name which
+        does *not* encode its implementation can be restored without
+        migrating the state format again. Until then it is cross-checked
+        rather than trusted: a recorded value disagreeing with the key means
+        the state was written by something that did not share this encoding.
+        """
+        recorded = component_info.get("implementation")
+        if recorded is not None and recorded != implementation:
+            raise ValueError(
+                f"Checkpoint component '{name}' records implementation "
+                f"'{recorded}', which does not match its name"
+            )
+
     def _construct(
             self,
             component_class: type[Component],
+            instance_name: str,
             *args,
             **kwargs,
     ) -> Component:
         """Construct a component with its declared prerequisites visible."""
         with constructing_component(SessionComponentView(self, component_class)):
-            return component_class(*args, **kwargs)
+            component = component_class(*args, **kwargs)
+        self._stamp_identity(component, instance_name)
+        return component
+
+    @staticmethod
+    def _stamp_identity(component: Component, instance_name: str) -> None:
+        """Give a constructed component its own name and id.
+
+        Registration writes `name` and `id` onto the *class*, so every
+        instance of a component would otherwise report the same pair. The
+        session names the instance instead, which is what lets a name identify
+        one component rather than one component class.
+
+        Assigned through `__dict__` so that an `nn.Module` subclass needs no
+        `nn.Module.__init__` to have run first, matching how
+        `_linked_components` is stored.
+        """
+        category = _component_type(component).__name__
+        component.__dict__["name"] = instance_name
+        component.__dict__["id"] = f"{category}.{instance_name}"
 
     def _state_restore_order(
             self,
@@ -517,10 +574,11 @@ class SessionComponents:
                 if resolved_name in component_configs:
                     component = self._construct(
                         component_class,
+                        resolved_name,
                         component_configs[resolved_name],
                     )
                 elif component_class.__init__ is Component.__init__:
-                    component = self._construct(component_class)
+                    component = self._construct(component_class, resolved_name)
                 else:
                     raise RuntimeError(
                         f"Component '{resolved_name}' is required but defines "

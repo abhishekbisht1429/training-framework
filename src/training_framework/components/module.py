@@ -169,9 +169,12 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
     def _check_linked_components(self, state: Mapping[str, Any]) -> None:
         """Reject state captured by a differently wired instance.
 
-        Version 2 records `asked name -> implementation name`. Version 1
-        recorded `attribute -> implementation name`, and attributes are no
-        longer known, so a v1 state is compared on the implementations alone.
+        Version 2 records `asked name -> instance name`. A state written
+        before instances were named holds the registered name there, which is
+        the instance name of a component with no instance suffix, so it still
+        compares correctly. Version 1 recorded `attribute -> component name`,
+        and attributes are no longer known, so a v1 state is compared on the
+        values alone.
         """
         stored = dict(state.get("linked", {}))
         current = self.linked_components
