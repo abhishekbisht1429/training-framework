@@ -1,8 +1,10 @@
 # API Summary
 
-[← Documentation index](README.md) · [Project README](../README.md)
+[← Docs](../README.md) · [Project README](../../README.md)
 
-## API summary
+A flat list of the public imports and the members of each public type. This is
+a lookup table, not an explanation — each entry links to the page that explains
+it where one exists.
 
 The supported public imports are grouped by responsibility:
 
@@ -41,7 +43,7 @@ under a different topology.
 `resolve_launch_topology`, which settle a run's process topology from the
 command line, the environment and the configuration.
 
-### `Configurator`
+## `Configurator`
 
 | Member | Purpose |
 |---|---|
@@ -63,7 +65,7 @@ command line, the environment and the configuration.
 `mode` controls the launch workflow. It is separate from `session_type`, which
 selects the concrete session implementation.
 
-### `TrainingEngine`
+## `TrainingEngine`
 
 | Member | Purpose |
 |---|---|
@@ -82,7 +84,7 @@ with TrainingEngine(Configurator()) as engine:
 
 The engine monitors workers while leaving the context.
 
-### `Session`, `TrainingSession`, and `AnalysisSession`
+## `Session`, `TrainingSession`, and `AnalysisSession`
 
 | Member | Purpose |
 |---|---|
@@ -116,7 +118,7 @@ The engine monitors workers while leaving the context.
 | `Session.from_state(state)` | Reconstruct and dispatch to the concrete session class recorded in state |
 | `TrainingSession.update_max_iters(value)` | Replace a training session's maximum iteration count |
 
-### Writing a component
+## Writing a component
 
 | Member | Purpose |
 |---|---|
@@ -129,22 +131,16 @@ The engine monitors workers while leaving the context.
 
 Components are constructed prerequisite-first on every path, so
 `get_dependency` is how a component takes hold of another one for good; see
-[components](components.md#holding-another-component).
+[the component model](../concepts/component-model.md#holding-another-component).
 
-### `ModuleResource`
+## `ModuleResource`
 
-| Member | Purpose |
-|---|---|
-| `ModuleResource` | An `nn.Module` resource composed of other resources; see [built-in components](built-in-components.md#moduleresource) |
-| `linked_modules` | Resource names attached as submodules under the same attribute |
-| `attach_dependencies()` | Override to attach prerequisites conditionally or under another name |
-| `attach_linked_module(attribute, component)` | Attach one component as a submodule owned by another component |
-| `linked_components` | Copy of the attribute -> component name map; recorded in the checkpoint and checked on restore |
-| `captured_tensors()` | The live tensors this component checkpoints, by state key |
-| `usable_as_plain_module(cls)` | Whether a component class may be owned privately as an ordinary submodule |
-| `plain_module_api` | Members a privately owned component may not override |
+`ModuleResource` and its members — `linked_modules`, `attach_dependencies()`,
+`attach_linked_module()`, `linked_components`, `captured_tensors()`,
+`usable_as_plain_module()` and `plain_module_api` — are documented in
+[`ModuleResource`](../concepts/module-resource.md#members).
 
-### Registration decorators
+## Registration decorators
 
 | API | Purpose |
 |---|---|
@@ -158,3 +154,8 @@ Components are constructed prerequisite-first on every path, so
 | `component_registry(session_type)` | Return shared components overlaid by the matching scoped registry |
 | `topological_sort_of_components(..., session_type=...)` | Validate and order the selected session type's component graph |
 | `@register_session_type(name)` | Register a concrete Session subclass for engine and checkpoint dispatch |
+
+---
+
+**See also:** [built-in components](builtin-components.md) for the components
+these APIs register and configure.

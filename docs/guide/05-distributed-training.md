@@ -1,8 +1,14 @@
 # Distributed Training
 
-[← Documentation index](README.md) · [Project README](../README.md)
+[← Docs](../README.md) · [Project README](../../README.md)
 
-## Distributed training with DDP
+Adding a `ddp` component makes the engine spawn one worker process per rank and
+wrap your model in PyTorch `DistributedDataParallel`. This page covers the
+configuration, how a run's topology is decided at launch, what each rank builds,
+and how ranks stop together.
+
+The framework is single-node by design; see
+[Limitations](../concepts/limitations.md#distributed-training) for the scope.
 
 Adding a top-level `ddp` resource makes the engine create `world_size` worker processes.
 
@@ -36,7 +42,7 @@ sessions:
 
 `master_port` should be a string because it is assigned to the `MASTER_PORT` environment variable.
 
-### The launch decides the topology
+## The launch decides the topology
 
 `world_size`, `master_addr` and `master_port` describe the machine a run is
 launched on, not the run itself, so they are resolved once per launch and
@@ -62,7 +68,7 @@ written on eight GPUs resumes on four without being told to.
 `--resume-session` accepts these three overrides and rejects any other, which
 belongs to `--extend-session`.
 
-### Rank-specific session construction
+## Rank-specific session construction
 
 The parent session holds a placeholder DDP resource with rank `-1`. Each child
 process settles its own configuration *before* it builds anything: it pins its
@@ -81,7 +87,7 @@ a worker never builds a session and then rewires it.
 - Non-parallel logging, checkpointing, and other rank-zero-only work can
   therefore remain off secondary ranks by omitting those roots.
 
-### What the DDP resource does
+## What the DDP resource does
 
 During setup, the built-in DDP resource:
 
@@ -118,7 +124,7 @@ setup runs before DDP setup. Do not also declare that model as requiring `ddp`,
 because the two requirements would form a cycle. During teardown, the wrapped
 reference is cleared and the process group is destroyed.
 
-### Devices and ranks
+## Devices and ranks
 
 A rank runs on CUDA ordinal `rank % <visible devices>`. Ordinals are relative
 to `CUDA_VISIBLE_DEVICES`, so which physical GPUs a run uses is controlled
@@ -131,10 +137,8 @@ device without using `nccl` — a single-process run, or a `gloo` group over
 CUDA tensors — pins one too. A `gloo` run over CPU tensors pins nothing and
 never claims a GPU.
 
-### Current DDP scope
 
-Treat the implementation as a single-node design: the engine spawns every
-rank itself, so all of them share one `CUDA_VISIBLE_DEVICES` and take the
-first `world_size` entries of it. Multi-node execution, where a rank's global
-index and its local device index genuinely diverge, is not exposed by the
-framework.
+---
+
+**Next:** [Analysis sessions](06-analysis-sessions.md) — driving a trained
+checkpoint through an analysis workflow.

@@ -1,8 +1,13 @@
-# Sessions
+# Session Lifecycle
 
-[← Documentation index](README.md) · [Project README](../README.md)
+[← Docs](../README.md) · [Project README](../../README.md)
 
-## Session lifecycle
+The exact order in which a session builds, sets up, iterates, and tears down
+its components, what happens when one of those phases fails, and the two
+dictionaries components use to pass values to each other. Read this when you
+need to know precisely when your callback runs relative to someone else's.
+
+## Phases
 
 Both `TrainingSession` and `AnalysisSession` are context managers and iterators.
 
@@ -79,88 +84,6 @@ session.session_context["best_loss"] = best_loss
 
 It is included in `Session.get_state()` and restored with the concrete session. It is cleared when the session context exits. Values that exist when a checkpoint is created must therefore be serializable.
 
-## Analysis sessions
-
-Analysis sessions use the same resource, hook, step, context, and iteration
-lifecycle as training sessions. Their effective registry combines shared
-components with components registered using `session_type="analysis"`:
-
-```python
-from training_framework.components import Step, requires_resource, step
-
-
-@step("report", session_type="analysis")
-@requires_resource("trained_model")
-class ReportStep(Step):
-    def __init__(self, config):
-        self.output_path = config["output_path"]
-
-    def run(self, session):
-        model = session.get_resource("trained_model").model
-        # Analyze the model and write the configured report.
-        ...
-```
-
-An analysis configuration uses the same `sessions` structure. The shared
-`trained_model` resource and analysis logger are default roots. Because the
-trained-model resource has no default checkpoint, configure its checkpoint
-path in the component mapping:
-
-```yaml
-sessions:
-  - session_type: analysis
-
-    session_config:
-      rng_seed: 42
-      sessions_dir: ./analysis-runs
-      max_iterations: 1
-      components_package: my_project.analysis_components
-      device: cpu
-      show_execution_graph: true
-
-    trained_model:
-      model_checkpoint_path: ./runs/session_.../checkpoints/<checkpoint-name>
-
-    report:
-      output_path: ./analysis-runs/report.json
-```
-
-For direct execution, construct the concrete analysis subclass:
-
-```python
-from training_framework.session import AnalysisSession
-
-
-session = AnalysisSession(analysis_config)
-```
-
-Run the analysis entry through the same generic config path:
-
-```bash
-python -m my_project.train --config my_project/analysis.yaml
-```
-
-The configured `trained_model.model_checkpoint_path` must identify a framework
-`TrainingSession` checkpoint, not a standalone model state dictionary. The
-source session must expose a model through the `model` resource role, directly
-or through a component binding, and that resource must
-provide `to(device)` and `eval()`. During analysis setup, `trained_model` loads
-the source session on CPU, moves the recovered model to the analysis device,
-places it in evaluation mode, and exposes it through
-`session.get_resource("trained_model").model`. Gradients remain enabled for
-attribution-style analyses. Analysis does not activate the training
-checkpointer by default.
-
-`layer_inspector` is an available opt-in building block for analysis `Step`s
-that need per-layer activations — it automates layer discovery and
-forward-hook lifecycle management, leaving interpretation of the captured
-tensors (heatmaps or anything else) to the `Step`. See [`layer_inspector` in
-Built-in components](built-in-components.md#layer_inspector) for its
-configuration and API.
-
-Only load trusted checkpoints because session loading uses unrestricted Python
-deserialization.
-
 ## Direct session execution
 
 For single-process development or unit tests, either concrete session can be
@@ -182,7 +105,14 @@ with session:
 ```
 
 Construct `AnalysisSession` in the same way shown in
-[Analysis sessions](#analysis-sessions), then enter and iterate it with the same
-pattern. Direct execution bypasses spawned-worker supervision, error pipes,
+[Analysis sessions](../guide/06-analysis-sessions.md), then enter and iterate it
+with the same pattern. Direct execution bypasses spawned-worker supervision, error pipes,
 heartbeat monitoring, and rank-specific DDP reconstruction. Use
 `TrainingEngine` for the normal managed execution path.
+
+---
+
+**See also:** [Architecture and process model](architecture.md) for what the
+parent process does around this lifecycle, and
+[The component model](component-model.md) for what a component may do while it
+is being constructed.

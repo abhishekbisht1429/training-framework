@@ -9,7 +9,7 @@ A component-based framework for building, running, checkpointing, and supervisin
 
 Workflow code is organized into reusable **resources**, **hooks**, and **steps**. `TrainingSession` and `AnalysisSession` share the lifecycle implemented by the abstract `Session` base, while using separate component registries and defaults. `TrainingEngine` constructs or restores the appropriate session in the parent process, serializes its state, launches one or more spawned workers, and monitors them for completion, errors, interrupts, and missed heartbeats.
 
-> **Project status:** This project is under active development. The current API is suitable for experimentation and framework development, but review [Current behavior and limitations](docs/limitations.md) before using it for long-running or production workloads.
+> **Project status:** This project is under active development. The current API is suitable for experimentation and framework development, but review [Current behavior and limitations](docs/concepts/limitations.md) before using it for long-running or production workloads.
 
 
 ## Features
@@ -230,19 +230,26 @@ python -m my_project.train --config my_project/config.yaml --debug
 
 ## Documentation
 
-The README covers installation and a complete first run. Detailed guides are
-available in the [documentation index](docs/README.md):
+The README covers installation and a complete first run. Everything else is in
+the [documentation index](docs/README.md), which is organized in three tracks:
 
-- [Architecture and process model](docs/architecture.md)
-- [Components](docs/components.md)
-- [Sessions](docs/sessions.md)
-- [Configuration and CLI](docs/configuration.md)
-- [Distributed training](docs/distributed-training.md)
-- [Checkpointing, resume, and extension](docs/checkpointing.md)
-- [Built-in components and samplers](docs/built-in-components.md)
-- [API summary](docs/api.md)
-- [Development and testing](docs/development.md)
-- [Current behavior and limitations](docs/limitations.md)
+- **[Guide](docs/README.md#learn-it)** — a task-ordered path starting from
+  [resources, hooks, and steps](docs/guide/01-resources-hooks-steps.md) and
+  ending at [analysis sessions](docs/guide/06-analysis-sessions.md).
+- **[Reference](docs/README.md#look-it-up)** —
+  [built-in components](docs/reference/builtin-components.md),
+  [transformer blocks](docs/reference/transformer-blocks.md),
+  [samplers](docs/reference/samplers.md),
+  [CLI](docs/reference/cli.md) and [API](docs/reference/api.md).
+- **[Concepts](docs/README.md#understand-it)** —
+  [architecture](docs/concepts/architecture.md),
+  [session lifecycle](docs/concepts/session-lifecycle.md),
+  [the component model](docs/concepts/component-model.md),
+  [`ModuleResource`](docs/concepts/module-resource.md) and
+  [limitations](docs/concepts/limitations.md).
+
+Working on the framework itself? See
+[development and testing](docs/development.md).
 
 ## License
 

@@ -1,8 +1,13 @@
 # Architecture and Process Model
 
-[← Documentation index](README.md) · [Project README](../README.md)
+[← Docs](../README.md) · [Project README](../../README.md)
 
-## Architecture
+How a run is laid out across processes: what the parent does, what each
+spawned worker does, and how the parent notices a worker that has stopped
+making progress. Read this when you need to reason about failures,
+shutdown, or why a component is built where it is.
+
+## Process layout
 
 ```text
 Parent process
