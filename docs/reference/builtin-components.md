@@ -86,6 +86,10 @@ tensorboard:
 
 ### `ddp`
 
+The DDP resource is a [singleton](../guide/02-wiring-components.md#components-that-must-stay-unique):
+it owns the process group, and the engine, worker and session each expect
+exactly one, so configuring a second instance is rejected.
+
 `ddp.world_size`, `ddp.master_addr` and `ddp.master_port` describe the launch
 rather than the session. They are resolved on every run and may be overridden
 from the command line even when resuming, which is what lets a run continue on
@@ -185,7 +189,10 @@ checkpointer:
   checkpoint_first: false              # optional; defaults to false
 ```
 
-If `checkpoints_dir` is omitted, checkpoints are written to a `checkpoints` directory under the session directory.
+If `checkpoints_dir` is omitted, checkpoints are written to a `checkpoints`
+directory under the session directory. A [second instance](../guide/02-wiring-components.md#configuring-a-component-more-than-once)
+writes to `checkpoints_<suffix>` instead, so two checkpointers do not
+interleave their files; an explicit `checkpoints_dir` still wins.
 
 The checkpointer uses `torch.save(session, path)`. Because it is an iteration
 hook, it saves on:
@@ -209,7 +216,11 @@ tensorboard.summary_writer.add_scalar(
 )
 ```
 
-The executable must be available and the selected port must be free. Teardown
+The executable must be available and the selected port must be free. A
+[second instance](../guide/02-wiring-components.md#configuring-a-component-more-than-once)
+writes its events to a directory carrying its instance suffix, but **must be
+given a `port` of its own**: two servers cannot share one, and the port is
+not adjusted automatically. Teardown
 closes the writer and terminates the external process.
 If setup fails after creating either handle, rollback closes the writer when
 present and terminates the partially started process.

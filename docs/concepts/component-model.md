@@ -10,6 +10,37 @@ missing-dependency error, and opting a component into `--extend-session`.
 It assumes you have read [Resources, hooks, and steps](../guide/01-resources-hooks-steps.md)
 and [Wiring components together](../guide/02-wiring-components.md).
 
+## Two names a component has
+
+A component answers to two different names, and telling them apart is what
+lets a session hold more than one instance of it:
+
+| | |
+|---|---|
+| `component.implementation_name` | the name the **class** was registered under, with `@resource("logger")`. Every instance of it shares this. |
+| `component.name` | the name of this **instance** within the session — `logger`, or `logger#validation`. The session sets it when it constructs the component. |
+
+`component.id` is the instance name with its category, `Hook.logger#validation`,
+and is what the execution graph prints and what the dependency graph uses as a
+node key. `component.instance_suffix` is the part after the `#`, or `None` for
+a component that is the only instance of itself.
+
+Registration writes `name` and `id` onto the class; the session then writes
+them onto the instance, shadowing the class's. A component built by hand,
+outside a session, therefore still reports its class's name and has no suffix.
+
+A component **never names an instance itself**. `@requires_resource("model")`
+is evaluated at import time and lives on the class, so it names a role; if it
+named an instance, every instance of that class would be handed the same one
+and configuring the class twice would be pointless. Which instance fills the
+role is decided by the session — see
+[Configuring a component more than once](../guide/02-wiring-components.md#configuring-a-component-more-than-once).
+
+`linked_components` records the *instance* a component was handed, not merely
+the class, so a consumer rewired between two instances of one component is
+caught when its state is restored rather than silently loading the other
+instance's weights.
+
 ## Holding another component
 
 `setup(session)` is the first point where a component can reach another one,

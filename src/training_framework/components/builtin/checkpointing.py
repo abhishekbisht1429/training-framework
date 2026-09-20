@@ -35,9 +35,15 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
         if "checkpoints_dir" in self._config:
             self._checkpoints_dir = self._config["checkpoints_dir"]
         else:
+            # Two checkpointers writing timestamped files into one directory
+            # would interleave their runs, so an instance that has siblings
+            # gets its own. The sole checkpointer keeps the plain name.
+            directory = "checkpoints"
+            if self.instance_suffix is not None:
+                directory = f"checkpoints_{self.instance_suffix}"
             self._checkpoints_dir = os.path.join(
                 session.session_config.session_dir,
-                "checkpoints",
+                directory,
             )
         os.makedirs(self._checkpoints_dir, exist_ok=True)
 

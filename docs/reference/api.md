@@ -43,6 +43,12 @@ under a different topology.
 `resolve_launch_topology`, which settle a run's process topology from the
 command line, the environment and the configuration.
 
+`training_framework.components.naming` holds the instance-name syntax:
+`INSTANCE_SEPARATOR`, `parse_instance_name(name)` (returning the component
+name and the suffix), `format_instance_name`, `is_instance_name` and
+`implementation_of`. It is the only module that parses the separator; see
+[configuring a component more than once](../guide/02-wiring-components.md#configuring-a-component-more-than-once).
+
 ## `Configurator`
 
 | Member | Purpose |
@@ -101,7 +107,7 @@ The engine monitors workers while leaving the context.
 | `component_bindings` | Copy of the session's role-to-implementation bindings |
 | `component_aliases` | Deprecated compatibility property for `component_bindings` |
 | `resolve_component_name(name)` | Resolve an expected or actual component name to its registered name |
-| `get_resource(name)` | Retrieve a configured resource |
+| `get_resource(name)` | Retrieve a configured resource; an error when several instances could be meant |
 | `has_resource(name)` | Test whether a resource is present |
 | `get_all_resources()` | Return configured resources |
 | `get_all_hooks()` | Return configured hooks |
@@ -124,7 +130,10 @@ The engine monitors workers while leaving the context.
 |---|---|
 | `Component.get_dependency(name)` | Return a declared prerequisite, recording the wiring; valid only while the component is being constructed |
 | `Component.has_dependency(name)` | Whether a declared prerequisite is active during construction |
-| `Component.linked_components` | The asked name -> implementation name map of prerequisites handed to this component |
+| `Component.linked_components` | The asked name -> instance name map of prerequisites handed to this component |
+| `Component.name` / `Component.id` | This instance's name (`logger#validation`) and its category-qualified id (`Hook.logger#validation`) |
+| `Component.implementation_name` | The name this component's class was registered under, shared by every instance of it |
+| `Component.instance_suffix` | The part after `#`, or `None` for the only instance of a component; use it to keep two instances' output apart |
 | `Component.config_schema` | Optional dataclass; the configuration mapping is parsed into `self._cfg` |
 | `parse_component_config(cls, config)` | Parse a mapping against a `config_schema` directly |
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
@@ -152,6 +161,7 @@ documented in [`ModuleResource`](../concepts/module-resource.md#members).
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
 | `@wraps(name)` | Declare that a Hook wraps another Hook |
 | `@rank_zero_only` | Declare that a distributed session builds this component on rank 0 only |
+| `@singleton` | Declare that a session may hold only one instance of this component |
 | `component_registry(session_type)` | Return shared components overlaid by the matching scoped registry |
 | `topological_sort_of_components(..., session_type=...)` | Validate and order the selected session type's component graph |
 | `@register_session_type(name)` | Register a concrete Session subclass for engine and checkpoint dispatch |

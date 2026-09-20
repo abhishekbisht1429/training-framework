@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from training_framework.components.naming import parse_instance_name
 from training_framework.util import CaptureInitMeta, context_entry, context_exit
 
 if TYPE_CHECKING:
@@ -124,6 +125,25 @@ class Component(ABC, metaclass=ComponentMeta):
     @classmethod
     def _component_name(cls) -> str:
         return getattr(cls, "name", cls.__name__)
+
+    @property
+    def instance_suffix(self) -> str | None:
+        """Return the suffix telling this instance from its siblings.
+
+        None when the component is the only instance of itself, which is the
+        usual case. A component that writes somewhere named after itself --
+        a directory, a file, a run name -- uses this to keep two instances
+        from landing on top of each other, while leaving the single-instance
+        name exactly as it was.
+        """
+        name = getattr(self, "name", None)
+        if not isinstance(name, str):
+            return None
+        try:
+            _, suffix = parse_instance_name(name)
+        except (TypeError, ValueError):
+            return None
+        return suffix
 
     @property
     def implementation_name(self) -> str:

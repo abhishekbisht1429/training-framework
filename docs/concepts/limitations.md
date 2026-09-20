@@ -64,6 +64,18 @@ The engine builds the session before spawning workers, so a model's weights are 
 
 Wiring happens during construction, so such a component must be activated by the session -- through configuration or `session.activate_component(name, config)`. Replacing an already-constructed component is not supported.
 
+### An ambiguous dependency is an error, not a choice
+
+A session may hold several instances of one component. When a dependency could mean more than one of them and neither an exact name match nor per-consumer wiring settles it, activation fails instead of choosing. Wiring a component to an instance the session never chose would give a run that trains and is quietly wrong, which is worse than a launch that stops. Name the instance in `component_bindings`.
+
+### Some components may only be configured once
+
+A component marked `@singleton` is rejected if configured twice, before anything is built. The built-in `ddp` resource is one: it owns the process group, and the engine, worker and session each expect exactly one. Marking a component this way is a one-way door -- existing configurations that hold two of it would stop loading.
+
+### A component that names its own output must keep instances apart
+
+Nothing stops two instances of a component writing to the same place. The built-ins that derive a path from their own identity use their instance suffix to avoid it, but `tensorboard`'s `port` is not adjusted, because two servers cannot share one: a second instance needs a port of its own in configuration. A user-written component that names a file or directory after itself should use `component.instance_suffix`.
+
 ### Component registration is global per interpreter
 
 Resource, hook, and step names share one namespace within each shared or session-specific scope. Duplicate names in one scope fail; a matching scoped component overrides a shared component with the same name. Test suites that reset registration must account for Python's module import cache before expecting decorators to run again.

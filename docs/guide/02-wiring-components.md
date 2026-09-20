@@ -62,9 +62,13 @@ as `@requires_step("optimizer")` resolve to `my_custom_optimizer`. The
 registered name is used in component state and shown in the execution graph,
 which also includes a `COMPONENT BINDINGS` section.
 
-Bindings are session-scoped and one-to-one. Binding chains, cycles, unknown or
-ambiguous targets, category changes, and top-level role configuration are
-rejected. Built-in defaults such as `logger` and `checkpointer` can be replaced
+Bindings are session-scoped, and two roles may not bind to the same target. A
+target may name a particular *instance* of a component (see
+[Configuring a component more than once](#configuring-a-component-more-than-once));
+a role name may not, because a role is what a component class declares and a
+class cannot know which instance it will be handed. Binding chains, cycles,
+unknown or ambiguous targets, category changes, and top-level role
+configuration are rejected. Built-in defaults such as `logger` and `checkpointer` can be replaced
 through the same mechanism. `ddp.rank_zero_components` may contain either role
 or implementation names; a bound DDP resource must support the same `config`
 and `rank` construction interface as the built-in resource.
@@ -73,6 +77,96 @@ The former `aliases` key is deprecated but temporarily accepted with the same
 role-to-implementation direction. It cannot be combined with
 `component_bindings`, and configuration still belongs under the implementation
 name.
+
+## Configuring a component more than once
+
+A session may hold several instances of one component. Add an instance suffix
+to the top-level key, after a `#`:
+
+```yaml
+data_manager#train:
+  batch_size: 64
+data_manager#validation:
+  batch_size: 256
+```
+
+Each instance is built separately, keeps its own configuration and its own
+checkpointed state, and is its own node in the execution graph, where it
+appears under its full name (`Resource.data_manager#validation`). A suffix is
+one or more letters, digits or underscores; `data_manager#validation` reads
+better in a graph or an error than `data_manager#2`, and both are legal.
+
+A key without a suffix is still an instance — the only one of its component —
+so nothing about an existing configuration changes.
+
+### Which instance a dependency gets
+
+A component declares the *role* it needs, never the instance:
+`@requires_resource("data_manager")` is on the class, shared by every instance
+of it, so it cannot name one. The session decides, in this order:
+
+1. **The consumer's own wiring**, if it has any.
+2. **An exact name match.** A component named `data_manager` answers to
+   `data_manager` however many `data_manager#...` instances exist alongside it,
+   so adding an instance never silently rewires anything.
+3. **The sole instance** of that component, when there is exactly one.
+4. Otherwise it is **an error** naming the candidates. The framework does not
+   pick one: wiring a component to something the session never chose gives a
+   run that works and is quietly wrong.
+
+### Naming the instance a component should use
+
+Wiring for one consumer is a nested entry in `component_bindings`, keyed by the
+consumer's instance name:
+
+```yaml
+component_bindings:
+  evaluator:
+    data_manager: data_manager#validation
+
+data_manager#train: {batch_size: 64}
+data_manager#validation: {batch_size: 256}
+evaluator: {}
+```
+
+`evaluator` is built with `data_manager#validation`; every other consumer of
+`data_manager` resolves on its own. The wiring lives here rather than inside
+`evaluator`'s own configuration because a component's configuration is passed
+to its constructor unchanged, and because the session has to know how things
+are wired before anything is constructed. The flat
+`role: implementation` form is unchanged and can be mixed with it freely.
+
+### Components that must stay unique
+
+Some components cannot have a second instance, and their class says so with
+`@singleton`:
+
+```python
+@singleton
+@resource("my_resource")
+class MyResource(Resource):
+    ...
+```
+
+Configuring one twice is rejected before anything is built, naming every
+instance involved. The built-in `ddp` resource is marked this way: it owns the
+process group, and the engine, worker and session all expect exactly one.
+
+### Built-ins with more than one instance
+
+A component that writes somewhere named after itself has to keep its instances
+apart. The built-ins do this with their instance suffix, leaving the
+single-instance path exactly where it was:
+
+- `checkpointer` writes to `<session_dir>/checkpoints`, and a suffixed instance
+  to `<session_dir>/checkpoints_<suffix>`. An explicit `checkpoints_dir` still
+  wins.
+- `tensorboard` appends the suffix to its event directory. Its `port` is
+  **not** adjusted: two servers cannot share one, so a second instance needs a
+  port of its own in configuration.
+
+`ddp.rank_zero_components` accepts an instance name, so one instance can be
+kept off the secondary ranks while its sibling runs on all of them.
 
 ## Declaring abstract roles
 

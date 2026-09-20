@@ -124,10 +124,16 @@ class Tensorboard(Resource):
         ]
         print("Tensorboard Arguments: ", " ".join(tensorboard_args))
         self._tb_process = subprocess.Popen(tensorboard_args)
+        # Named per instance, so two writers do not merge their scalars into
+        # one event directory. The port cannot be shared and is not defaulted:
+        # a second instance must be given one of its own.
+        writer_dir = f"{type(self).__name__}_tensorboard"
+        if self.instance_suffix is not None:
+            writer_dir = f"{writer_dir}_{self.instance_suffix}"
         self._tb_summary_writer = SummaryWriter(
             log_dir=os.path.join(
                 session.session_config.session_dir,
-                f"{type(self).__name__}_tensorboard",
+                writer_dir,
             )
         )
         time.sleep(3)
