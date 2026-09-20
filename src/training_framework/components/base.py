@@ -101,6 +101,14 @@ class Component(ABC, metaclass=ComponentMeta):
     config_schema: ClassVar[type | None] = None
     """Optional dataclass describing this component's configuration."""
 
+    singleton: ClassVar[bool] = False
+    """Whether a session may hold only one instance of this component.
+
+    Set by :func:`singleton`. Most components may be configured more than
+    once; this marks the ones where a second instance would be meaningless or
+    harmful because they own something process-wide.
+    """
+
     rank_zero_only: ClassVar[bool] = False
     """Whether a distributed session builds this component on rank 0 only.
 

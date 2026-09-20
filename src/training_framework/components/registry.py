@@ -630,6 +630,30 @@ def wraps(hook_name: str):
     return wrapper
 
 
+def singleton(cls):
+    """Mark a component a session may hold only one instance of.
+
+    Applied directly to the class, without arguments::
+
+        @singleton
+        @resource("my_resource")
+        class MyResource(Resource):
+            ...
+
+    Components may be configured more than once by default. This is for the
+    ones where a second instance could not work -- typically because the
+    component owns something there is only one of in the process.
+    """
+    if not isinstance(cls, type) or not issubclass(cls, (Step, Hook, Resource)):
+        name = getattr(cls, "__name__", repr(cls))
+        raise TypeError(
+            "@singleton can only be applied to Step, Hook, or Resource "
+            f"subclasses. '{name}' is neither."
+        )
+    cls.singleton = True
+    return cls
+
+
 def rank_zero_only(cls):
     """Mark a component that a distributed session builds on rank 0 only.
 

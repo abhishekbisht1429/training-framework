@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING, Any, override
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from training_framework.components import Resource, requires_resource, resource, role
+from training_framework.components import (
+    Resource,
+    requires_resource,
+    resource,
+    role,
+    singleton,
+)
 from training_framework.util import requires_context
 
 if TYPE_CHECKING:
@@ -51,6 +57,7 @@ def _component_name_list(config: Mapping, key: str) -> list[str] | None:
     return names
 
 
+@singleton
 @requires_resource("model")
 @resource("ddp", session_type="training")
 class DDPResource(Resource):

@@ -572,6 +572,15 @@ class SessionComponents:
             component_configs: Mapping[str, Mapping],
     ) -> None:
         visiting: list[str] = []
+        # Every instance this call will end up holding. A dependency has to be
+        # resolved against all of them, not against the ones built so far, or
+        # a component activated early would see a second instance as the only
+        # one simply because the first had not been constructed yet.
+        planned = set(component_configs) | {
+            self.resolve_name(root) for root in roots
+        }
+
+        self._check_instance_limits(planned)
 
         def activate(target: str) -> None:
             resolved_name, component_class = self._registered_component_class(
@@ -598,6 +607,7 @@ class SessionComponents:
                     dependency_target = self.resolve_dependency(
                         dependency_name,
                         consumer=resolved_name,
+                        active=planned | set(self.components),
                     )
                     self._registered_component_class(
                         dependency_name,
@@ -626,7 +636,38 @@ class SessionComponents:
                 visiting.pop()
 
         for root in roots:
-            activate(self.resolve_dependency(root))
+            # A configured name says which instance to create, so it is taken
+            # literally. Only a *dependency* is resolved to an instance.
+            activate(root)
+
+    def _check_instance_limits(self, planned: Iterable[str]) -> None:
+        """Reject a second instance of a component that must stay unique.
+
+        Checked over everything the session will hold rather than as each is
+        constructed, so the error does not depend on activation order and can
+        name every instance involved.
+        """
+        by_implementation: dict[str, set[str]] = {}
+        for name in planned:
+            implementation = implementation_of(self.resolve_name(name))
+            by_implementation.setdefault(implementation, set()).add(name)
+
+        for implementation, names in sorted(by_implementation.items()):
+            if len(names) < 2:
+                continue
+            component_class = self.registry.get(implementation)
+            # An unregistered name is not this check's problem; activation
+            # reports it with the diagnostics that explain why.
+            if component_class is None:
+                continue
+            if not getattr(component_class, "singleton", False):
+                continue
+            raise ValueError(
+                f"Component '{implementation}' allows only one instance per "
+                f"session, but {sorted(names)} are configured. It is marked "
+                "@singleton because a second instance could not work "
+                "alongside the first."
+            )
 
     def dependency_closure(
             self,
