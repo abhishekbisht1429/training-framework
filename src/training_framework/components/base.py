@@ -119,6 +119,21 @@ class Component(ABC, metaclass=ComponentMeta):
         )
         self._cfg = parse_component_config(type(self), config)
 
+    @property
+    def _linked_components(self) -> dict[str, "Resource"]:
+        """Return the prerequisites handed to this component, by asked name.
+
+        Created on first use: a component may ask for a dependency before -- or
+        without ever -- calling ``Component.__init__``.
+        """
+        linked = self.__dict__.get("_linked_components_map")
+        if linked is None:
+            linked = {}
+            # Assigned through __dict__ so that an nn.Module subclass needs no
+            # nn.Module.__init__ to have run first.
+            self.__dict__["_linked_components_map"] = linked
+        return linked
+
     def get_dependency(self, name: str) -> "Resource":
         """Return a prerequisite resource. Valid only during construction.
 
@@ -127,6 +142,10 @@ class Component(ABC, metaclass=ComponentMeta):
         session yet: no device, no iteration context, and no
         ``@requires_context`` access. Work needing those belongs in
         :meth:`Resource.setup`.
+
+        What is handed out is recorded, so the framework knows this component
+        was wired to another one wherever the caller puts the reference --
+        an attribute, a container module, or nowhere at all.
         """
         view = active_component_view()
         if view is None:
@@ -137,7 +156,17 @@ class Component(ABC, metaclass=ComponentMeta):
                 "configuration or Session.activate_component() -- rather than "
                 "constructed directly."
             )
-        return view.get_resource(name)
+        component = view.get_resource(name)
+        self._linked_components[name] = component
+        return component
+
+    @property
+    def linked_components(self) -> dict[str, str]:
+        """Return the asked name -> implementation name map of prerequisites."""
+        return {
+            name: getattr(type(component), "name", type(component).__name__)
+            for name, component in self._linked_components.items()
+        }
 
     def has_dependency(self, name: str) -> bool:
         """Return whether a declared prerequisite is active."""

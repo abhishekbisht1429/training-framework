@@ -843,10 +843,17 @@ class PatchTransformer(ModuleResource):
     parallel_blocks: ClassVar[tuple[str, ...]] = ()
     """Roles that feed the chain sideways and must match its width."""
 
-    linked_modules = block_chain + parallel_blocks
+    @classmethod
+    def blocks(cls) -> tuple[str, ...]:
+        """Return every role this composite attaches, chain first."""
+        return cls.block_chain + cls.parallel_blocks
 
     def __init__(self, config: Mapping | None = None) -> None:
         super().__init__(config)
+        for role_name in type(self).blocks():
+            # Attached under the role's own name: the forward pass and the
+            # width check both read the blocks that way.
+            setattr(self, role_name, self.get_dependency(role_name))
         embed_dim = self._check_block_widths()
         if self._cfg.class_token is not None:
             self.class_token = ClassToken(embed_dim, **self._cfg.class_token)
@@ -863,7 +870,7 @@ class PatchTransformer(ModuleResource):
         """Check every block agrees on token width, and return it."""
         widths = {
             role: _block_widths(getattr(self, role))
-            for role in type(self).linked_modules
+            for role in type(self).blocks()
         }
         missing = sorted(
             role for role, (in_dim, out_dim) in widths.items()
@@ -953,8 +960,6 @@ class PooledPatchTransformer(PatchTransformer):
         "pooling",
     )
     parallel_blocks: ClassVar[tuple[str, ...]] = ("pooling_query",)
-
-    linked_modules = block_chain + parallel_blocks
 
     def forward(
             self,

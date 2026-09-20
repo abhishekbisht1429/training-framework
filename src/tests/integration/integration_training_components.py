@@ -339,7 +339,11 @@ class ScaleFactor(ModuleResource):
 class ComposedLinearModel(ModuleResource):
     """A model whose weights are owned entirely by a linked child resource."""
 
-    linked_modules = ("integration_scale_factor",)
+    def __init__(self, config=None) -> None:
+        super().__init__(config)
+        self.integration_scale_factor = self.get_dependency(
+            "integration_scale_factor",
+        )
 
     @property
     def weight(self) -> nn.Parameter:

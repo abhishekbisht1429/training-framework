@@ -26,13 +26,16 @@ save time exists again at load time.
 @requires_resource("text_encoder")
 @resource("model")
 class CaptionedImageModel(ModuleResource):
-    linked_modules = ("text_encoder",)
-
     def __init__(self, config=None):
-        super().__init__(config)          # attaches text_encoder
+        super().__init__(config)
+        self.text_encoder = self.get_dependency("text_encoder")
         dim = self.text_encoder.embed_dim
         self.head = nn.Linear(2 * dim, self._config["num_classes"])
 ```
+
+What `get_dependency` hands out is recorded, so the framework knows the two
+components are wired together wherever the reference ends up -- an attribute, a
+container module, or nowhere at all.
 
 Construction is deliberately weaker than `setup`:
 

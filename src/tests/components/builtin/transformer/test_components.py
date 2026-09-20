@@ -185,7 +185,7 @@ def test_transformer_components_and_roles_are_registered():
         "patch_embedding", "positional_embedding", "sequence_encoder",
     }
     assert set(PooledPatchTransformer.required_resources) == set(
-        PooledPatchTransformer.linked_modules
+        PooledPatchTransformer.blocks()
     )
 
 
@@ -648,7 +648,7 @@ def test_a_composite_owns_only_its_class_token(tmp_path):
     }
     assert state["pooled_patch_transformer"]["state"]["linked"] == {
         role: name for role, name in zip(
-            PooledPatchTransformer.linked_modules,
+            PooledPatchTransformer.blocks(),
             [
                 "conv_patch_embedding",
                 "learned_positional_embedding_2d",
@@ -822,7 +822,7 @@ def test_training_session_trains_checkpoints_and_restores_the_model(tmp_path):
         not torch.equal(before[name], p) for name, p in model.named_parameters()
     )
     assert {name.split(".")[0] for name, _ in model.named_parameters()} == set(
-        PooledPatchTransformer.linked_modules
+        PooledPatchTransformer.blocks()
     )
 
     checkpoint_path = tmp_path / "checkpoint.pt"

@@ -122,8 +122,9 @@ The engine monitors workers while leaving the context.
 
 | Member | Purpose |
 |---|---|
-| `Component.get_dependency(name)` | Return a declared prerequisite; valid only while the component is being constructed |
+| `Component.get_dependency(name)` | Return a declared prerequisite, recording the wiring; valid only while the component is being constructed |
 | `Component.has_dependency(name)` | Whether a declared prerequisite is active during construction |
+| `Component.linked_components` | The asked name -> implementation name map of prerequisites handed to this component |
 | `Component.config_schema` | Optional dataclass; the configuration mapping is parsed into `self._cfg` |
 | `parse_component_config(cls, config)` | Parse a mapping against a `config_schema` directly |
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
@@ -135,10 +136,9 @@ Components are constructed prerequisite-first on every path, so
 
 ## `ModuleResource`
 
-`ModuleResource` and its members — `linked_modules`, `attach_dependencies()`,
-`attach_linked_module()`, `linked_components`, `captured_tensors()`,
-`usable_as_plain_module()` and `plain_module_api` — are documented in
-[`ModuleResource`](../concepts/module-resource.md#members).
+`ModuleResource` and its members — `get_dependency()`, `linked_components`,
+`captured_tensors()`, `usable_as_plain_module()` and `plain_module_api` — are
+documented in [`ModuleResource`](../concepts/module-resource.md#members).
 
 ## Registration decorators
 

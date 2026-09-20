@@ -151,9 +151,8 @@ class SessionComponents:
                         f"'{name}.{key}' and '{other_name}.{other_key}' are "
                         "the same tensor, so it would be checkpointed twice. "
                         "A component that holds another component's weights "
-                        "must attach it with attach_linked_module(), so the "
-                        "component that created them is the one that saves "
-                        "them."
+                        "must take it from get_dependency(), so the component "
+                        "that created them is the one that saves them."
                     )
                 owners[id(tensor)] = (name, key)
 
@@ -743,8 +742,10 @@ class SessionComponents:
         )
 
     def _any_component_attaches_components(self) -> bool:
+        # Instance level: what a component was actually handed is only known
+        # once it has been constructed. Every caller runs after construction.
         return any(
-            getattr(type(component), "linked_modules", ())
+            component._linked_components
             for component in self.components.values()
         )
 

@@ -69,10 +69,9 @@ def _declare_encoder_and_model():
     @requires_resource("mr_encoder")
     @resource("mr_model")
     class Model(ModuleResource):
-        linked_modules = ("mr_encoder",)
-
         def __init__(self, config=None):
             super().__init__(config)
+            self.mr_encoder = self.get_dependency("mr_encoder")
             self.head = nn.Linear(4, 2)
 
         def forward(self, inputs):
@@ -117,10 +116,11 @@ def test_a_child_attached_twice_still_contributes_its_parameters_once():
     @requires_resource("mr_encoder")
     @resource("mr_twice")
     class Twice(ModuleResource):
-        def attach_dependencies(self):
+        def __init__(self, config=None):
+            super().__init__(config)
             encoder = self.get_dependency("mr_encoder")
-            self.attach_linked_module("first", encoder)
-            self.attach_linked_module("second", encoder)
+            self.first = encoder
+            self.second = encoder
 
     components = _activate({"mr_twice": {}, "mr_encoder": {}})
     twice = components.get_resource("mr_twice")
@@ -178,7 +178,9 @@ def test_constructing_a_dependent_component_by_hand_is_rejected():
     @requires_resource("mr_encoder")
     @resource("mr_handmade")
     class Handmade(ModuleResource):
-        linked_modules = ("mr_encoder",)
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.mr_encoder = self.get_dependency("mr_encoder")
 
     with pytest.raises(ComponentDependencyError, match="activate_component"):
         Handmade({})
@@ -190,7 +192,9 @@ def test_a_stub_view_is_enough_to_construct_a_component_under_test():
     @requires_resource("mr_encoder")
     @resource("mr_stubbed")
     class Stubbed(ModuleResource):
-        linked_modules = ("mr_encoder",)
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.mr_encoder = self.get_dependency("mr_encoder")
 
     encoder = PicklableEncoder({})
     with constructing_component(_StubView({"mr_encoder": encoder})):
@@ -199,7 +203,7 @@ def test_a_stub_view_is_enough_to_construct_a_component_under_test():
     assert stubbed.mr_encoder is encoder
 
 
-def test_attaching_a_non_module_dependency_is_rejected():
+def test_a_non_module_prerequisite_contributes_no_tensors():
     @resource("mr_plain")
     class Plain(Resource):
         def setup(self, session):
@@ -211,60 +215,65 @@ def test_attaching_a_non_module_dependency_is_rejected():
     @requires_resource("mr_plain")
     @resource("mr_needs_module")
     class NeedsModule(ModuleResource):
-        linked_modules = ("mr_plain",)
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.plain = self.get_dependency("mr_plain")
+            self.own = nn.Linear(2, 2)
 
-    with pytest.raises(TypeError, match="to be an nn.Module resource"):
-        _activate({"mr_needs_module": {}, "mr_plain": {}})
+    components = _activate({"mr_needs_module": {}, "mr_plain": {}})
+    needs_module = components.get_resource("mr_needs_module")
 
-
-def test_attaching_a_different_child_to_a_taken_attribute_is_rejected():
-    _declare_encoder_and_model()
-    components = _activate()
-    model = components.get_resource("mr_model")
-
-    with pytest.raises(
-        ComponentDependencyError,
-        match="cannot attach 'mr_encoder'",
-    ):
-        model.attach_linked_module("mr_encoder", PicklableEncoder({}))
+    assert needs_module.plain is components.get_resource("mr_plain")
+    assert needs_module.linked_components == {"mr_plain": "mr_plain"}
+    assert set(needs_module.get_state()["state_dict"]) == {
+        "own.weight", "own.bias",
+    }
 
 
-def test_capturing_another_components_weights_is_rejected():
-    _declare_encoder_and_model()
-
-    @requires_resource("mr_encoder")
-    @resource("mr_sloppy")
-    class Sloppy(ModuleResource):
-        def attach_dependencies(self):
-            # Bypasses attach_linked_module, so the child's weights would be
-            # captured twice.
-            self.encoder = self.get_dependency("mr_encoder")
-
-    components = _activate({"mr_sloppy": {}, "mr_encoder": {}})
-
-    with pytest.raises(
-        ComponentDependencyError,
-        match="are the same tensor, so it would be checkpointed twice",
-    ):
-        components.get_state()
-
-
-def test_another_components_weights_are_found_below_a_direct_child():
+def test_a_prerequisite_may_be_held_inside_a_container_module():
     _declare_encoder_and_model()
 
     @requires_resource("mr_encoder")
     @resource("mr_nested")
     class Nested(ModuleResource):
-        def attach_dependencies(self):
-            # Hidden inside a container, where a tree walk from the parent
-            # alone could miss it.
+        def __init__(self, config=None):
+            super().__init__(config)
+            # Not under an attribute of its own: a prerequisite is recognised
+            # by identity, so it may be held anywhere in the tree.
             self.wrapper = nn.Sequential(self.get_dependency("mr_encoder"))
+            self.gate = nn.Linear(4, 4)
 
     components = _activate({"mr_nested": {}, "mr_encoder": {}})
+    nested = components.get_resource("mr_nested")
+
+    assert nested.wrapper[0] is components.get_resource("mr_encoder")
+    assert set(nested.get_state()["state_dict"]) == {"gate.weight", "gate.bias"}
+    assert nested.get_state()["linked"] == {"mr_encoder": "mr_encoder"}
+    # The encoder's weights are checkpointed once, by the encoder.
+    components.get_state()
+
+
+def test_two_components_capturing_the_same_tensor_is_rejected():
+    shared = nn.Linear(4, 4)
+
+    @resource("mr_first_owner")
+    class FirstOwner(ModuleResource):
+        def __init__(self, config=None):
+            super().__init__(config)
+            self.borrowed = shared
+
+    @resource("mr_second_owner")
+    class SecondOwner(ModuleResource):
+        def __init__(self, config=None):
+            # Nested, where a walk from the parent alone could miss it.
+            super().__init__(config)
+            self.wrapper = nn.Sequential(shared)
+
+    components = _activate({"mr_first_owner": {}, "mr_second_owner": {}})
 
     with pytest.raises(
         ComponentDependencyError,
-        match=r"mr_nested\.wrapper\.0\.linear\.weight",
+        match="are the same tensor, so it would be checkpointed twice",
     ):
         components.get_state()
 
@@ -336,7 +345,7 @@ def test_a_privately_owned_component_the_session_drives_is_rejected():
 def test_a_privately_owned_component_with_prerequisites_is_rejected():
     _, model_class = _declare_encoder_and_model()
 
-    # mr_model declares linked_modules, so only the session can wire it.
+    # mr_model declares a prerequisite, so only the session can wire it.
     with constructing_component(_StubView({"mr_encoder": PicklableEncoder({})})):
         dependent = model_class({})
 
@@ -356,10 +365,9 @@ def test_a_child_may_hold_components_of_its_own():
     @requires_resource("mr_model")
     @resource("mr_outer")
     class Outer(ModuleResource):
-        linked_modules = ("mr_model",)
-
         def __init__(self, config=None):
             super().__init__(config)
+            self.mr_model = self.get_dependency("mr_model")
             self.gate = nn.Linear(2, 2)
 
     components = _activate(
@@ -471,10 +479,9 @@ def test_a_child_shared_by_two_models_is_restored_as_one_instance(tmp_path):
     @requires_resource("mr_encoder")
     @resource("mr_second_model")
     class SecondModel(ModuleResource):
-        linked_modules = ("mr_encoder",)
-
         def __init__(self, config=None):
             super().__init__(config)
+            self.mr_encoder = self.get_dependency("mr_encoder")
             self.tail = nn.Linear(4, 1)
 
     config = _training_config(tmp_path, "shared-child")
@@ -546,10 +553,9 @@ def _declare_named_model():
     @resource("model", session_type="training")
     @resource("model", session_type="analysis")
     class Model(ModuleResource):
-        linked_modules = ("mr_encoder",)
-
         def __init__(self, config=None):
             super().__init__(config)
+            self.mr_encoder = self.get_dependency("mr_encoder")
             self.head = nn.Linear(4, 2)
 
         def forward(self, inputs):
