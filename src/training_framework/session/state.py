@@ -39,6 +39,26 @@ def rng_restore_enabled() -> bool:
     return _RESTORE_RNG.get()
 
 
+@contextmanager
+def rng_preserved():
+    """Leave the process's RNG exactly as it was on entry.
+
+    Suppressing the restore only keeps a checkpoint's saved RNG out; the
+    components rebuilt while loading still draw from the generators -- a
+    constructor that initialises weights the saved state then overwrites,
+    say. Putting the caller's state back afterwards makes the load invisible
+    to whatever random work comes next, however much the load drew.
+
+    A CUDA stream is only put back if CUDA was already initialised on entry;
+    a load that is the first to touch CUDA has no earlier stream to return to.
+    """
+    saved = capture_rng_state()
+    try:
+        yield
+    finally:
+        restore_rng_state(saved)
+
+
 def capture_rng_state(carried_cuda_state: Any = None) -> dict[str, Any]:
     return {
         "torch_rng_state": torch.get_rng_state(),

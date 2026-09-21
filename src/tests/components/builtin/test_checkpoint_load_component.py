@@ -85,9 +85,9 @@ def _draw_after(seed, load):
 
 
 def test_loading_a_component_does_not_adopt_the_checkpoints_rng(tmp_path):
-    """Rebuilding the checkpoint's components draws from the generator either
-    way; what matters is whether the caller's seed still decides what comes
-    next, or the checkpoint's saved generator state does."""
+    """Whether the caller's seed still decides what comes next, or the
+    checkpoint's saved generator state does. That the load leaves the caller's
+    sequence untouched is checked in tests/session/test_rng_state.py."""
     path = save_checkpoint(tmp_path, loadable_model={})
 
     # Loading the whole session adopts its RNG: the caller's seed is lost.

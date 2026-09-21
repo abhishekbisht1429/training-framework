@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import ExitStack
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
 
@@ -14,7 +14,10 @@ from training_framework.components import (
     Stateful,
 )
 from training_framework.components import hook, rank_zero_only
-from training_framework.session.state import rng_restore_suppressed
+from training_framework.session.state import (
+    rng_preserved,
+    rng_restore_suppressed,
+)
 from training_framework.util import timestamp_str
 
 if TYPE_CHECKING:
@@ -105,9 +108,14 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
 
         `restore_rng=False` loads it without adopting its RNG, for a caller
         that wants what the session holds rather than the run it came from.
+        The caller's RNG is then left exactly as it was: whatever rebuilding
+        the components draws is undone, so the caller's seed still decides
+        what comes next.
         """
-        rng = nullcontext() if restore_rng else rng_restore_suppressed()
-        with rng:
+        with ExitStack() as stack:
+            if not restore_rng:
+                stack.enter_context(rng_restore_suppressed())
+                stack.enter_context(rng_preserved())
             return torch.load(
                 path,
                 map_location=map_location,
@@ -129,7 +137,8 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
         the trained model an analysis session inspects, say. `name` is resolved
         through the checkpoint's own bindings, so a role such as `model` finds
         whatever that run bound it to; the loading session's wiring says
-        nothing about another run. The checkpoint's RNG is not adopted.
+        nothing about another run. The checkpoint's RNG is not adopted, and
+        the caller's is left exactly as it was.
 
         `session_type`, when given, is the kind of session the checkpoint must
         hold. Raises `KeyError` when the checkpoint has no such resource, and

@@ -377,3 +377,84 @@ def test_the_trained_model_resource_leaves_the_rng_alone(tmp_path):
     resource_named(session, "trained_model").setup(session)
 
     assert _next_draws() == expected
+
+
+class _DrawingModel(nn.Module, StatefulResource):
+    """A model whose rebuild draws from every generator, as weight
+    initialisation does, before its saved state overwrites the result."""
+
+    def __init__(self, config):
+        nn.Module.__init__(self)
+        self._config = config
+        self.weight = nn.Parameter(torch.rand(1))
+        random.random()
+        np.random.rand()
+
+    def setup(self, session):
+        pass
+
+    def teardown(self, session):
+        pass
+
+    def get_state(self):
+        return {
+            "weights": self.state_dict(),
+            "fail_on_restore": self._config.get("fail_on_restore", False),
+        }
+
+    def set_state(self, state):
+        torch.rand(1)
+        random.random()
+        np.random.rand()
+        if state["fail_on_restore"]:
+            raise RuntimeError("restore failed")
+        self.load_state_dict(state["weights"])
+
+
+def _drawing_checkpoint(tmp_path, **model_config):
+    resource("rng_state_drawing_model")(_DrawingModel)
+    source = TrainingSession({
+        "session_config": _session_config(tmp_path / "training"),
+        "component_bindings": {"model": "rng_state_drawing_model"},
+        "rng_state_drawing_model": model_config,
+    })
+    checkpoint_path = tmp_path / "drawing-session.pt"
+    torch.save(source, checkpoint_path)
+    return checkpoint_path
+
+
+def test_loading_a_component_leaves_the_callers_sequence_unchanged(tmp_path):
+    checkpoint_path = _drawing_checkpoint(tmp_path)
+
+    _seed_everything(4321)
+    expected = _next_draws()
+
+    _seed_everything(4321)
+    Checkpointer.load_component(checkpoint_path, "model")
+
+    assert _next_draws() == expected
+
+
+def test_loading_without_the_rng_undoes_what_rebuilding_drew(tmp_path):
+    checkpoint_path = _drawing_checkpoint(tmp_path)
+
+    _seed_everything(4321)
+    expected = _next_draws()
+
+    _seed_everything(4321)
+    Checkpointer.load_checkpoint(checkpoint_path, restore_rng=False)
+
+    assert _next_draws() == expected
+
+
+def test_a_failed_load_still_leaves_the_rng_alone(tmp_path):
+    checkpoint_path = _drawing_checkpoint(tmp_path, fail_on_restore=True)
+
+    _seed_everything(4321)
+    expected = _next_draws()
+
+    _seed_everything(4321)
+    with pytest.raises(RuntimeError, match="restore failed"):
+        Checkpointer.load_component(checkpoint_path, "model")
+
+    assert _next_draws() == expected
