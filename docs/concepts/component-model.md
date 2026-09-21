@@ -41,17 +41,34 @@ the class, so a consumer rewired between two instances of one component is
 caught when its state is restored rather than silently loading the other
 instance's weights.
 
-## Holding another component
+## Taking a prerequisite
 
-`setup(session)` is the first point where a component can reach another one,
-and it does not run when a session is restored from a checkpoint. A component
-that needs to *hold* another component therefore takes it during construction.
+A component declares what it needs with `@requires_resource(name)` and takes it
+with `self.get_dependency(name)`. That is the only way, and it works at every
+point in the component's life -- in `__init__`, in `setup`, in a hook callback,
+in a running step.
+
+The session resolves each declared name **for the component that declared
+it**, honouring that component's own per-component wiring in
+`component_bindings`, and hands the results to the component *before* its
+`__init__` runs. So construction, `setup` and every later call see the same
+instance, and a component wired to `dataset#b` is given `dataset#b` even when a
+session-wide binding points the role somewhere else.
+
+```python
+@requires_resource("dataset")
+@resource("data_manager")
+class DataManager(Resource):
+    def setup(self, session):
+        dataset = self.get_dependency("dataset")
+        ...
+```
 
 Components are constructed prerequisite-first on every path -- fresh
 configuration, checkpoint restore and worker start-up -- so by the time a
-constructor runs, everything it declared with `@requires_resource` already
-exists. `self.get_dependency(name)` returns it, and a reference captured at
-save time exists again at load time.
+constructor runs, everything it declared already exists. A component that
+needs to *hold* another component takes it there, so that a reference captured
+at save time exists again at load time:
 
 ```python
 @requires_resource("text_encoder")
@@ -68,25 +85,46 @@ What `get_dependency` hands out is recorded, so the framework knows the two
 components are wired together wherever the reference ends up -- an attribute, a
 container module, or nowhere at all.
 
+Lookup is restricted to declared prerequisites. Asking for a resource the
+class did not declare raises `ComponentDependencyError` naming the
+`@requires_resource` to add, and `self.has_dependency(name)` reports whether a
+name was declared. The declaration is not a formality: it is the edge in the
+graph that orders setup before the consumer and keeps the prerequisite on
+every rank that builds the consumer.
+
 Construction is deliberately weaker than `setup`:
 
 - There is no session, so no device, no iteration context, no
   `@requires_context` access and no initialised process group. Work that needs
   those stays in `setup`.
-- Lookup is restricted to declared prerequisites. Asking for a resource the
-  class did not declare with `@requires_resource` raises
-  `ComponentDependencyError`, which is what makes the prerequisite-first order
-  a guarantee.
 - A dependency graph with a cycle has no valid construction order and is
   rejected, naming the chain that closed it.
 
-Because wiring happens at construction, a component that declares dependencies
-must be built *by the session*. Configuration is the usual way;
-`session.activate_component(name, config)` is the programmatic one, and it
-resolves bindings and activates the dependency closure the same way. Handing
-`session.register_resource()` an instance you constructed yourself stays
-supported for components that declare no dependencies. Constructing one that
-does raises `ComponentDependencyError` pointing at `activate_component`.
+Configuration is the usual way for a component to join a session, and
+`session.activate_component(name, config)` is the programmatic one; both
+resolve bindings and activate the dependency closure. A component you
+construct yourself and hand to `session.register_resource()` /
+`register_hook()` / `add_step()` is given its prerequisites when it is
+registered, so they are available from `setup` onwards. Only a component that
+calls `get_dependency` in its own `__init__` must be built by the session;
+constructing one by hand raises `ComponentDependencyError` pointing at
+`activate_component`. Registering a component under a name that consumers are
+already wired to -- replacing it -- hands them the new one.
+
+### `session.get_resource` is deprecated
+
+`session.get_resource(name)` and `session.has_resource(name)` still work and
+now emit a `FutureWarning`. They are handed a name but not the component
+asking, so they can only resolve **session-wide**: a component wired to one
+instance of a component configured twice is given whichever instance the
+session-wide binding picks. Declare the prerequisite and use
+`self.get_dependency(name)` instead.
+
+The replacement is stricter, not a rename: `get_dependency` serves only
+declared names, so a step or hook that fetched something it never declared
+must add `@requires_resource`. That adds an edge to the graph, which can change
+setup order and what a secondary DDP rank builds -- see
+[what each rank builds](../guide/05-distributed-training.md#what-each-rank-builds).
 
 [`ModuleResource`](module-resource.md) implements all of this for `nn.Module`
 resources, including the rules for owning another component's weights versus
@@ -135,7 +173,7 @@ component that understands them.
 ## Missing-dependency errors
 
 When a dependency, wrapping target, configured root, binding target, or
-`session.get_resource(name)` lookup cannot be satisfied, the error keeps its
+resource lookup cannot be satisfied, the error keeps its
 short headline and adds an indented explanation: which component required it,
 any `component_bindings` redirection, a `Reason:` and a `Fix:`. The reason
 distinguishes:
@@ -163,7 +201,7 @@ unmet prerequisite! Resource 'ddp' resolves to 'ddp', which is not registered as
   Fix: Use it from a 'training' session, register a Resource for this session type with @resource('ddp', session_type='analysis'), or register it as shared with @resource('ddp').
 ```
 
-`session.get_resource()` raises `ComponentNotFoundError`, a `KeyError`
+A failed resource lookup raises `ComponentNotFoundError`, a `KeyError`
 subclass, so existing `except KeyError` handlers keep working.
 
 ## Opting into extension

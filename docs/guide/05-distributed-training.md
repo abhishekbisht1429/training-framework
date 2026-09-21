@@ -167,10 +167,11 @@ not interrupt a collective already in progress. Worker failures and unhealthy
 process groups still rely on the supervisor's configured graceful-join timeout
 and terminate/kill fallback. Non-DDP workers keep using their local stop event.
 
-The wrapped module is available only inside the active session context:
+The wrapped module is available only inside the active session context, to a
+component that declares `@requires_resource("ddp")`:
 
 ```python
-ddp_resource = session.get_resource("ddp")
+ddp_resource = self.get_dependency("ddp")
 prediction = ddp_resource.wrapped_model(batch)
 ```
 

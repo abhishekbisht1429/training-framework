@@ -40,7 +40,7 @@ A rank runs on CUDA ordinal `rank % <visible devices>`, and the engine spawns ev
 
 ### The built-in DDP resource requires a compatible model resource
 
-The `model` role must resolve to a module accepted by PyTorch DDP. Distributed forward passes should use `session.get_resource("ddp").wrapped_model` while the session is active.
+The `model` role must resolve to a module accepted by PyTorch DDP. Distributed forward passes should use `self.get_dependency("ddp").wrapped_model`, from a component that declares `@requires_resource("ddp")`, while the session is active.
 
 ### Only the DDP root's module tree is gradient-synchronised
 
@@ -60,9 +60,13 @@ Components are wired to each other as they are built, so `--extend-session` can 
 
 The engine builds the session before spawning workers, so a model's weights are allocated in the parent and shipped to each rank inside the session state. Every rank therefore starts from identical weights, at the cost of one model's memory in the parent.
 
-### A component that declares dependencies cannot be constructed by hand
+### A component that uses a dependency in its constructor cannot be constructed by hand
 
-Wiring happens during construction, so such a component must be activated by the session -- through configuration or `session.activate_component(name, config)`. Replacing an already-constructed component is not supported.
+The session hands a component its prerequisites. One built by hand and registered with `register_resource()`, `register_hook()` or `add_step()` receives them on registration, so it can use them from `setup` onwards -- but not in its own `__init__`, which has already run. A component whose constructor calls `get_dependency` must be activated by the session, through configuration or `session.activate_component(name, config)`. Replacing a registered component hands its consumers the new instance on their next `get_dependency` call; a reference a consumer already stored for itself is not updated.
+
+### `session.get_resource` resolves session-wide
+
+`session.get_resource(name)` is handed a name but not the component asking, so it cannot honour per-component wiring. When a session-wide binding contradicts a consumer's own wiring, or a bare-named instance sits alongside suffixed ones, it returns the session-wide answer: a run that trains and is quietly wrong. It is deprecated with a `FutureWarning` for this reason. `self.get_dependency(name)` resolves for the component that declared the prerequisite. When several instances answer and nothing decides between them, `get_resource` raises rather than picking one.
 
 ### An ambiguous dependency is an error, not a choice
 

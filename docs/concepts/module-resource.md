@@ -19,7 +19,7 @@ declared with `self.get_dependency(name)` once `super().__init__()` has run.
 The reference is theirs to place: an attribute, a container module, or nowhere
 at all if the constructor only needed to read a width off it. Components are
 constructed [prerequisite-first on every
-path](component-model.md#holding-another-component), so a restored model is usable
+path](component-model.md#taking-a-prerequisite), so a restored model is usable
 without `setup()` -- which is what `trained_model` relies on.
 
 ```python
@@ -45,13 +45,13 @@ class CaptionedImageModel(ModuleResource):
 `@requires_resource` is the whole declaration: it orders construction, and a
 component may only ask for what it declared. Holding a child conditionally is
 an ordinary `if` in the constructor, and `has_dependency(name)` reports whether
-an optional prerequisite is active.
+`name` is a declared prerequisite.
 
 ## Members
 
 | Member | Purpose |
 |---|---|
-| `get_dependency(name)` | The live prerequisite, during construction; records that this component was wired to it |
+| `get_dependency(name)` | The live prerequisite, resolved for this component, in `__init__` or later; records that this component was wired to it |
 | `linked_components` | The asked name -> implementation name map; recorded in the checkpoint and checked on restore |
 | `captured_tensors()` | The live tensors this component checkpoints, by state key |
 | `config_schema` | Optional dataclass; parsed into `self._cfg` (see [declaring a configuration schema](component-model.md#declaring-a-configuration-schema)) |

@@ -27,7 +27,7 @@ class ReportStep(Step):
         self.output_path = config["output_path"]
 
     def run(self, session):
-        model = session.get_resource("trained_model").model
+        model = self.get_dependency("trained_model").model
         # Analyze the model and write the configured report.
         ...
 ```
@@ -81,8 +81,9 @@ source session must expose a model through the `model` resource role, directly
 or through a component binding, and that resource must
 provide `to(device)` and `eval()`. During analysis setup, `trained_model` loads
 the source session on CPU, moves the recovered model to the analysis device,
-places it in evaluation mode, and exposes it through
-`session.get_resource("trained_model").model`. Gradients remain enabled for
+places it in evaluation mode, and exposes it as `.model` -- a component that
+declares `@requires_resource("trained_model")` reads it with
+`self.get_dependency("trained_model").model`. Gradients remain enabled for
 attribution-style analyses. Analysis does not activate the training
 checkpointer by default.
 

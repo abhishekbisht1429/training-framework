@@ -122,7 +122,7 @@ class IncrementStep(Step):
         self.amount = int(config.get("amount", 1))
 
     def run(self, session: TrainingSession) -> None:
-        counter = session.get_resource("counter")
+        counter = self.get_dependency("counter")
         counter.value += self.amount
         session.iteration_context["counter_value"] = counter.value
 

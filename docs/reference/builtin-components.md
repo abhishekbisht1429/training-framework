@@ -208,7 +208,8 @@ The TensorBoard resource starts the external `tensorboard` command, creates a
 PyTorch `SummaryWriter`, and exposes it through `summary_writer`:
 
 ```python
-tensorboard = session.get_resource("tensorboard")
+# In a component that declares @requires_resource("tensorboard")
+tensorboard = self.get_dependency("tensorboard")
 tensorboard.summary_writer.add_scalar(
     "train/loss",
     loss,
@@ -272,11 +273,12 @@ or `max_iterations`. The partial final iteration is not counted.
 
 ```python
 @requires_resource("data_manager")
+@requires_resource("trained_model")
 @step("embed_batches", session_type="analysis")
 class EmbedBatches(Step):
     def run(self, session):
-        batch = next(session.get_resource("data_manager").data_iter)
-        model = session.get_resource("trained_model").model
+        batch = next(self.get_dependency("data_manager").data_iter)
+        model = self.get_dependency("trained_model").model
         session.iteration_context["embeddings"] = model(batch)
 ```
 
@@ -306,11 +308,12 @@ matches one of `name_patterns`, or whose type matches one of `module_types`
 class). A module matched by both registers exactly one hook. If nothing
 matches, `setup()` raises `ValueError` rather than silently doing nothing.
 
-A `Step` reads captures through the resource:
+A `Step` that declares `@requires_resource("layer_inspector")` and
+`@requires_resource("trained_model")` reads captures through the resource:
 
 ```python
-inspector = session.get_resource("layer_inspector")
-model = session.get_resource("trained_model").model
+inspector = self.get_dependency("layer_inspector")
+model = self.get_dependency("trained_model").model
 
 model(some_input)  # triggers the registered forward hooks
 

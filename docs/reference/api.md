@@ -107,15 +107,15 @@ The engine monitors workers while leaving the context.
 | `component_bindings` | Copy of the session's role-to-implementation bindings |
 | `component_aliases` | Deprecated compatibility property for `component_bindings` |
 | `resolve_component_name(name)` | Resolve an expected or actual component name to its registered name |
-| `get_resource(name)` | Retrieve a configured resource; an error when several instances could be meant |
-| `has_resource(name)` | Test whether a resource is present |
+| `get_resource(name)` | **Deprecated** (`FutureWarning`). Resolves session-wide, ignoring the calling component's own wiring; declare the prerequisite and use `Component.get_dependency(name)` |
+| `has_resource(name)` | **Deprecated** (`FutureWarning`); use `Component.has_dependency(name)` |
 | `get_all_resources()` | Return configured resources |
 | `get_all_hooks()` | Return configured hooks |
 | `get_all_steps()` | Return configured steps |
 | `activate_component(name, config)` | Activate a registered component and its prerequisites; only before setup, and the way to add one that declares dependencies |
-| `register_resource(resource)` | Add a registered resource instance that declares no dependencies |
-| `register_hook(hook)` | Add a registered hook instance that declares no dependencies |
-| `add_step(step)` | Add a registered step instance that declares no dependencies |
+| `register_resource(resource)` | Add a registered resource instance built by hand; its declared prerequisites are given to it on registration, from `setup` onwards |
+| `register_hook(hook)` | Add a registered hook instance built by hand; its declared prerequisites are given to it on registration, from `setup` onwards |
+| `add_step(step)` | Add a registered step instance built by hand; its declared prerequisites are given to it on registration, from `setup` onwards |
 | `unregister_resource(name)` | Remove a resource from the session |
 | `unregister_hook(name)` | Remove a hook from the session |
 | `remove_step(name)` | Remove a step from the session |
@@ -128,8 +128,8 @@ The engine monitors workers while leaving the context.
 
 | Member | Purpose |
 |---|---|
-| `Component.get_dependency(name)` | Return a declared prerequisite, recording the wiring; valid only while the component is being constructed |
-| `Component.has_dependency(name)` | Whether a declared prerequisite is active during construction |
+| `Component.get_dependency(name)` | Return a declared prerequisite, resolved for this component's own wiring and recorded; valid at any point in the component's life |
+| `Component.has_dependency(name)` | Whether `name` is a declared prerequisite of this component |
 | `Component.linked_components` | The asked name -> instance name map of prerequisites handed to this component |
 | `Component.name` / `Component.id` | This instance's name (`logger#validation`) and its category-qualified id (`Hook.logger#validation`) |
 | `Component.implementation_name` | The name this component's class was registered under, shared by every instance of it |
@@ -139,9 +139,16 @@ The engine monitors workers while leaving the context.
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
 | `Stateful.get_state()` / `set_state(state)` | Capture and restore a component's own state |
 
-Components are constructed prerequisite-first on every path, so
-`get_dependency` is how a component takes hold of another one for good; see
-[the component model](../concepts/component-model.md#holding-another-component).
+`get_dependency` is the one way a component takes a prerequisite, whether in
+`__init__` or at run time; see
+[the component model](../concepts/component-model.md#taking-a-prerequisite).
+
+**Removed:** `ComponentView`, `constructing_component` and
+`active_component_view` are no longer exported from
+`training_framework.components`. Prerequisites are handed to a component
+directly rather than through a bound view, so there is nothing left for them to
+do. A test that built a component against a stub view can construct it and
+then register it into a session, which gives it its prerequisites.
 
 ## `ModuleResource`
 
