@@ -46,7 +46,6 @@ class TrainedModel(Resource):
                 f"Model checkpoint does not exist: {normalized_path}"
             )
 
-        self._source_session = None
         self._model: Any = None
         self._model_checkpoint_path = normalized_path
 
@@ -56,31 +55,15 @@ class TrainedModel(Resource):
         return self._model
 
     def setup(self, session: Session) -> Any:
-        from training_framework.session import (
-            Session as FrameworkSession,
-            TRAINING_SESSION_TYPE,
-        )
-
-        source_session = Checkpointer.load_checkpoint(
-            self._model_checkpoint_path,
-            map_location="cpu",
-            # The weights are wanted, not the run they came from: restoring
-            # the source session's RNG would reseed this one mid-setup.
-            restore_rng=False,
-        )
-        if not isinstance(source_session, FrameworkSession):
-            raise TypeError(
-                "Analysis model checkpoint must contain a framework Session"
-            )
-        if source_session.session_type != TRAINING_SESSION_TYPE:
-            raise ValueError(
-                "Analysis model checkpoint must contain a training session"
-            )
+        from training_framework.session import TRAINING_SESSION_TYPE
 
         try:
-            # A foreign session: this session's wiring says nothing
-            # about it, so the lookup is deliberately session-wide.
-            model = source_session._components.get_resource("model")
+            model = Checkpointer.load_component(
+                self._model_checkpoint_path,
+                "model",
+                map_location="cpu",
+                session_type=TRAINING_SESSION_TYPE,
+            )
         except (KeyError, ComponentDependencyError) as error:
             # Missing, or several instances with nothing to choose between
             # them: either way the checkpoint names no single model.
@@ -96,8 +79,6 @@ class TrainedModel(Resource):
         moved_model = model.to(session.device)
         self._model = model if moved_model is None else moved_model
         self._model.eval()
-        self._source_session = source_session
 
     def teardown(self, session: Session) -> None:
         self._model = None
-        self._source_session = None

@@ -113,3 +113,42 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
                 map_location=map_location,
                 weights_only=False,
             )
+
+    @classmethod
+    def load_component(
+            cls,
+            path,
+            name: str,
+            *,
+            map_location="cpu",
+            session_type: str | None = None,
+    ):
+        """Return one resource out of a checkpoint.
+
+        For a component that needs something a *different* run produced --
+        the trained model an analysis session inspects, say. `name` is resolved
+        through the checkpoint's own bindings, so a role such as `model` finds
+        whatever that run bound it to; the loading session's wiring says
+        nothing about another run. The checkpoint's RNG is not adopted.
+
+        `session_type`, when given, is the kind of session the checkpoint must
+        hold. Raises `KeyError` when the checkpoint has no such resource, and
+        `ComponentDependencyError` when several instances answer and nothing
+        in the checkpoint decides between them.
+        """
+        from training_framework.session import Session as FrameworkSession
+
+        source = cls.load_checkpoint(
+            path,
+            map_location=map_location,
+            restore_rng=False,
+        )
+        if not isinstance(source, FrameworkSession):
+            raise TypeError("Checkpoint must contain a framework Session")
+        if session_type is not None and source.session_type != session_type:
+            article = "an" if session_type[:1] in "aeiou" else "a"
+            raise ValueError(
+                f"Checkpoint must contain {article} {session_type} session, "
+                f"but holds a '{source.session_type}' one"
+            )
+        return source._components.get_resource(name)

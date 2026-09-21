@@ -202,6 +202,15 @@ hook, it saves on:
 - the first iteration only when it is also the final iteration or
   `checkpoint_first: true`.
 
+A component that needs something another run produced reads it with
+`Checkpointer.load_component(path, name, session_type=None)`. The name is
+resolved through the *checkpoint's* bindings -- `model` finds whatever that
+run bound it to -- and the checkpoint's RNG is not adopted, so the caller's
+seed still decides what comes next. It raises `KeyError` when the checkpoint
+has no such resource and `ComponentDependencyError` when several instances
+answer; `session_type="training"` also rejects a checkpoint of another kind.
+This is how the analysis `trained_model` gets its model.
+
 ### `tensorboard`
 
 The TensorBoard resource starts the external `tensorboard` command, creates a

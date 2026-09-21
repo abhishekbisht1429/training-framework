@@ -136,6 +136,7 @@ The engine monitors workers while leaving the context.
 | `parse_component_config(cls, config)` | Parse a mapping against a `config_schema` directly |
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
 | `Stateful.get_state()` / `set_state(state)` | Capture and restore a component's own state |
+| `Checkpointer.load_component(path, name, session_type=None)` | Read one resource out of a checkpoint, resolved through the checkpoint's own bindings, without adopting its RNG |
 
 `get_dependency` is the one way a component takes a prerequisite, whether in
 `__init__` or at run time; see
