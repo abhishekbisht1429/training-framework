@@ -333,6 +333,7 @@ def test_pickled_ddp_resource_and_optimizer_run_through_public_session_api(
         assert ddp.wrapped_model.device_ids is None
         assert distributed_calls["initializations"] == [{
             "backend": "gloo",
+            "init_method": "tcp://localhost:12355",
             "rank": -1,
             "world_size": 1,
         }]

@@ -37,7 +37,10 @@ sessions:
       checkpoint_every: 100
 ```
 
-`master_port` should be a string because it is assigned to the `MASTER_PORT` environment variable.
+`master_addr` and `master_port` are handed to the process group as a
+`tcp://` address; the resource never writes `MASTER_ADDR` or `MASTER_PORT`
+into the environment, so nothing it sets outlives the session. An IPv6
+`master_addr` is bracketed for you.
 
 ## The launch decides the topology
 
@@ -146,10 +149,9 @@ list as rank-zero-only instead.
 
 During setup, the built-in DDP resource:
 
-- sets `MASTER_ADDR` and `MASTER_PORT`;
 - selects CUDA device `rank` for the NCCL backend;
 - updates `session.device` to that CUDA device;
-- initializes the process group;
+- initializes the process group at `tcp://<master_addr>:<master_port>`;
 - retrieves the `model` resource, moving it to the rank-local CUDA device when
   using NCCL; and
 - wraps the model with `torch.nn.parallel.DistributedDataParallel`.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import warnings
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
@@ -28,6 +27,21 @@ role(
     description="the model being trained; a Resource exposing an nn.Module",
     session_type="training",
 )
+
+
+def _tcp_init_method(master_addr: str, master_port) -> str:
+    """Return the `tcp://` rendezvous address for a process group.
+
+    Handed to `init_process_group` directly so that nothing is written to
+    `MASTER_ADDR` / `MASTER_PORT`: the environment is process-wide, and launch
+    topology deliberately lets it outrank a checkpoint's stored port, so a
+    value left behind would become the next run's rendezvous. An IPv6 host is
+    bracketed, as a URL requires.
+    """
+    host = str(master_addr)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"tcp://{host}:{master_port}"
 
 
 def _component_name_list(config: Mapping, key: str) -> list[str] | None:
@@ -137,9 +151,6 @@ class DDPResource(Resource):
 
     @override
     def setup(self, session: Session) -> Any:
-        os.environ["MASTER_ADDR"] = self._master_addr
-        os.environ["MASTER_PORT"] = self._master_port
-
         uses_cuda = self._backend == "nccl" and torch.cuda.is_available()
         if uses_cuda:
             device_count = torch.cuda.device_count()
@@ -157,6 +168,7 @@ class DDPResource(Resource):
 
         torch.distributed.init_process_group(
             backend=self._backend,
+            init_method=_tcp_init_method(self._master_addr, self._master_port),
             rank=self._rank,
             world_size=self._world_size,
         )
