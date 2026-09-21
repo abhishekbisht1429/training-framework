@@ -86,6 +86,22 @@ class Component(ABC, metaclass=ComponentMeta):
             return None
         return suffix
 
+    def _stamp_identity(self, instance_name: str) -> None:
+        """Give this instance its own name and id.
+
+        Registration writes `name` and `id` onto the *class*, so every
+        instance of a component would otherwise report the same pair. The
+        session names the instance instead, which is what lets a name identify
+        one component rather than one component class.
+
+        Assigned through `__dict__` so that an `nn.Module` subclass needs no
+        `nn.Module.__init__` to have run first.
+        """
+        self.__dict__["name"] = instance_name
+        self.__dict__["id"] = (
+            f"{self._component_category_name()}.{instance_name}"
+        )
+
     @property
     def implementation_name(self) -> str:
         """Return the registered name of the class implementing this component.
@@ -243,11 +259,20 @@ class Stateful(ABC):
         if not isinstance(self, Component):
             return self.get_state()
 
-        return {
+        envelope = {
             self._PICKLE_VERSION_KEY: self._PICKLE_VERSION,
             "init_args": self._init_args,
             "state": self.get_state(),
         }
+        # Reconstruction runs __init__, which does not name the instance, so
+        # a suffixed instance would come back under its class's name and, for
+        # a component that names its output after itself, write on top of its
+        # sibling. Optional: an envelope without it is simply unnamed, so the
+        # pickle version does not change.
+        instance_name = self.__dict__.get("name")
+        if instance_name is not None:
+            envelope["instance_name"] = instance_name
+        return envelope
 
     def __setstate__(self, state: Any) -> None:
         if (
@@ -260,6 +285,9 @@ class Stateful(ABC):
                 *init_args["args"],
                 **init_args["kwargs"],
             )
+            instance_name = state.get("instance_name")
+            if instance_name is not None:
+                self._stamp_identity(instance_name)
             self.set_state(state["state"])
             return
 

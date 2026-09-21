@@ -23,6 +23,7 @@ from training_framework.components.diagnostics import (
 )
 from training_framework.components.naming import (
     implementation_of,
+    is_instance_name,
     parse_instance_name,
 )
 from training_framework.components.registry import (
@@ -142,6 +143,11 @@ class SessionComponents:
             component_states: dict[str, dict[str, Any]],
             restored_components: dict[str, Component],
     ) -> None:
+        # A checkpoint is not a trusted plan: it may predate a component being
+        # marked @singleton, or have been edited. Checked before anything is
+        # built; set_state restores the previous components if it raises.
+        self._check_instance_limits(component_states)
+
         # Pass 1: rebuild every component from its constructor arguments,
         # prerequisites first. The stored order is usually already
         # prerequisite-first, since it is the activation order, but a
@@ -302,20 +308,8 @@ class SessionComponents:
 
     @staticmethod
     def _stamp_identity(component: Component, instance_name: str) -> None:
-        """Give a constructed component its own name and id.
-
-        Registration writes `name` and `id` onto the *class*, so every
-        instance of a component would otherwise report the same pair. The
-        session names the instance instead, which is what lets a name identify
-        one component rather than one component class.
-
-        Assigned through `__dict__` so that an `nn.Module` subclass needs no
-        `nn.Module.__init__` to have run first, matching how
-        `_linked_components` is stored.
-        """
-        category = _component_type(component).__name__
-        component.__dict__["name"] = instance_name
-        component.__dict__["id"] = f"{category}.{instance_name}"
+        """Give a constructed component its own name and id."""
+        component._stamp_identity(instance_name)
 
     def _state_restore_order(
             self,
@@ -595,7 +589,10 @@ class SessionComponents:
             self.resolve_name(root) for root in roots
         }
 
-        self._check_instance_limits(planned)
+        # Checked against everything the session will hold, not only what
+        # this call adds, or a second activate_component() would slip a
+        # second instance past it.
+        self._check_instance_limits(planned | set(self.components))
 
         def activate(target: str) -> None:
             resolved_name, component_class = self._registered_component_class(
@@ -648,6 +645,24 @@ class SessionComponents:
                         resolved_name,
                         component_configs[resolved_name],
                         dependencies=resource_dependencies,
+                    )
+                elif is_instance_name(resolved_name):
+                    # Only a configured key declares an instance. Creating one
+                    # because something is wired to it would turn a mistyped
+                    # suffix into a fresh, unconfigured instance -- a run that
+                    # works and is quietly wrong.
+                    configured = sorted(
+                        name for name in planned | set(self.components)
+                        if implementation_of(name)
+                        == implementation_of(resolved_name)
+                    )
+                    raise ComponentDependencyError(
+                        f"Component instance '{resolved_name}' is not "
+                        "configured in this session, so nothing can be wired "
+                        "to it. An instance is created only by a top-level "
+                        f"'{resolved_name}' key. Configured instances of "
+                        f"'{implementation_of(resolved_name)}': "
+                        f"{configured or 'none'}."
                     )
                 elif component_class.__init__ is Component.__init__:
                     component = self._construct(
@@ -958,6 +973,9 @@ class SessionComponents:
     ) -> str:
         self._validate_component(component, base_type, overwrite=overwrite)
         if inject:
+            self._check_instance_limits(
+                set(self.components) | {component.name},
+            )
             self._inject_dependencies(component)
             self._repoint_consumers(component)
         self.components[component.name] = component
@@ -1063,7 +1081,8 @@ class SessionComponents:
     def _remove_component(self, name, component_type) -> None:
         kind = component_type.__name__
         registered_name = self.resolve_name(name)
-        registered_class = self.registry.get(registered_name)
+        # The name may identify an instance; the registry holds its class.
+        registered_class = self.registry.get(implementation_of(registered_name))
         if (
                 registered_class is None
                 or not issubclass(registered_class, component_type)
@@ -1131,6 +1150,11 @@ class SessionComponents:
         active = self.components if active is None else set(active)
         if name in active:
             return [name]
+        if is_instance_name(name):
+            # A suffixed name is a precise reference. When that instance is
+            # not active the answer is "not configured", never a sibling that
+            # happens to share its implementation.
+            return []
         implementation = implementation_of(name)
         return sorted(
             instance_name for instance_name in active

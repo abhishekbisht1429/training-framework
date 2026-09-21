@@ -10,7 +10,10 @@ from training_framework.components.base import (
     SessionHook,
     Step,
 )
-from training_framework.components.naming import implementation_of
+from training_framework.components.naming import (
+    implementation_of,
+    is_instance_name,
+)
 
 if TYPE_CHECKING:
     from training_framework.components.registry import RoleDeclaration
@@ -57,6 +60,9 @@ def _resolve_to_node(binding_resolver, nodes_by_name, consumer, name):
     )
     if resolved_name in nodes_by_name:
         return resolved_name, nodes_by_name[resolved_name]
+    if is_instance_name(resolved_name):
+        # A precise reference to an instance that is not here; never a sibling.
+        return resolved_name, None
 
     implementation = implementation_of(resolved_name)
     candidates = [
