@@ -5,3 +5,4 @@ src/tests/outputs
 
 .claude/.cc-writes
 .claude/settings.local.json
+**/__pycache__
