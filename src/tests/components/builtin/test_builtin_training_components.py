@@ -379,6 +379,7 @@ def test_ddp_resource_moves_model_to_rank_local_cuda_before_wrapping(
 
     events = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(
         torch.cuda,
         "set_device",
