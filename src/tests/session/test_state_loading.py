@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from tests.test_utils import make_config
+from tests.test_utils import make_config, resource_named
 from training_framework.components import (
     hook,
     resource,
@@ -231,7 +231,7 @@ def test_checkpoint_pickle_round_trip_restores_resources_hooks_and_state(tmp_pat
     assert restored.iteration == 1
     assert restored.session_config.max_iterations == 3
 
-    restored_resource = restored.get_resource(resource_id)
+    restored_resource = resource_named(restored, resource_id)
     restored_hook = next(
         component
         for component in restored.get_all_hooks()
@@ -276,7 +276,7 @@ def test_checkpoint_restores_inherited_constructor_args(tmp_path):
     assert resource_obj.teardown_calls == 1
 
     restored = pickle.loads(pickle.dumps(session))
-    restored_resource = restored.get_resource(resource_id)
+    restored_resource = resource_named(restored, resource_id)
 
     assert restored_resource.label == "delta"
     assert restored_resource.factor == 13

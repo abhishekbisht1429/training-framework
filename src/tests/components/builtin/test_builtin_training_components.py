@@ -18,7 +18,7 @@ from training_framework.components import (
     step,
 )
 from training_framework.session import TrainingSession
-from tests.test_utils import inject_dependencies
+from tests.test_utils import has_resource_named, inject_dependencies, resource_named
 
 
 class FakeDistributedDataParallel(nn.Module):
@@ -74,7 +74,7 @@ def _register_training_components():
             self.target = float(config["target"])
 
         def run(self, session):
-            wrapped_model = session.get_resource("ddp").wrapped_model
+            wrapped_model = self.get_dependency("ddp").wrapped_model
             prediction = wrapped_model(torch.tensor(1.0))
             session.iteration_context["loss"] = (
                 prediction - self.target
@@ -245,7 +245,7 @@ def test_data_manager_runs_through_public_session_lifecycle(
 
     session = TrainingSession(config)
     _remove_default_hooks(session)
-    placeholder_ddp = session.get_resource("ddp")
+    placeholder_ddp = resource_named(session, "ddp")
     ranked_ddp = type(placeholder_ddp)(
         config=placeholder_ddp.config,
         rank=0,
@@ -253,7 +253,7 @@ def test_data_manager_runs_through_public_session_lifecycle(
     session.unregister_resource("ddp")
     session.register_resource(ranked_ddp)
 
-    data_manager = session.get_resource("data_manager")
+    data_manager = resource_named(session, "data_manager")
     graph = session.execution_graph()
     manager_setup = graph.index("Resource.data_manager.setup()")
     assert graph.index("Resource.public_test_dataset.setup()") < manager_setup
@@ -293,7 +293,7 @@ def test_ddp_resource_activates_its_model_dependency(tmp_path):
         },
     })
 
-    assert session.has_resource("model")
+    assert has_resource_named(session, "model")
     graph = session.execution_graph()
     assert graph.index("Resource.model.setup()") < graph.index(
         "Resource.ddp.setup()"
@@ -309,11 +309,11 @@ def test_pickled_ddp_resource_and_optimizer_run_through_public_session_api(
     session = TrainingSession(_training_config(tmp_path))
     _remove_default_hooks(session)
 
-    ddp = session.get_resource("ddp")
+    ddp = resource_named(session, "ddp")
     ddp = pickle.loads(pickle.dumps(ddp))
     session.unregister_resource("ddp")
     session.register_resource(ddp)
-    model = session.get_resource("model")
+    model = resource_named(session, "model")
     optimizer = _optimizer_hook(session)
     graph = session.execution_graph()
 
@@ -368,8 +368,8 @@ def test_ddp_resource_moves_model_to_rank_local_cuda_before_wrapping(
 
     session = TrainingSession(config)
     _remove_default_hooks(session)
-    model = session.get_resource("model")
-    placeholder_ddp = session.get_resource("ddp")
+    model = resource_named(session, "model")
+    placeholder_ddp = resource_named(session, "ddp")
     ranked_ddp = type(placeholder_ddp)(
         config=placeholder_ddp.config,
         rank=1,
@@ -434,7 +434,7 @@ def test_ddp_resource_cleans_up_when_model_wrapping_fails(
     del config["public_test_loss"]
     session = TrainingSession(config)
     _remove_default_hooks(session)
-    ddp = session.get_resource("ddp")
+    ddp = resource_named(session, "ddp")
 
     with pytest.raises(RuntimeError, match="could not wrap model"):
         with session:
@@ -477,8 +477,8 @@ def test_pickled_optimizer_state_matches_uninterrupted_training(
         assert list(restored) == [2, 3]
 
     torch.testing.assert_close(
-        restored.get_resource("model").weight,
-        uninterrupted.get_resource("model").weight,
+        resource_named(restored, "model").weight,
+        resource_named(uninterrupted, "model").weight,
     )
     assert (
         _optimizer_hook(restored).get_state()["lr_scheduler_state"][

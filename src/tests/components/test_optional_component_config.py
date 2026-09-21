@@ -19,6 +19,7 @@ from training_framework.components import (
     wraps,
 )
 from training_framework.session import TrainingSession
+from tests.test_utils import has_resource_named, resource_named
 
 
 def _session_config(tmp_path):
@@ -222,11 +223,11 @@ def test_alias_can_be_activated_only_through_a_dependency(tmp_path):
         "alias_consumer": {},
     })
 
-    assert session.has_resource("alias_resource_role")
-    assert not session.has_resource("unused_resource_role")
+    assert has_resource_named(session, "alias_resource_role")
+    assert not has_resource_named(session, "unused_resource_role")
     state = session.get_state()
     restored = TrainingSession.from_state(state)
-    assert restored.has_resource("alias_resource_role")
+    assert has_resource_named(restored, "alias_resource_role")
 
 
 def test_aliased_default_is_activated_with_empty_config(tmp_path):
@@ -357,7 +358,7 @@ def test_required_custom_constructor_uses_supplied_mapping(tmp_path):
         "configured_dependency": {"value": 11},
     })
 
-    assert session.get_resource("configured_dependency").value == 11
+    assert resource_named(session, "configured_dependency").value == 11
 
 
 def test_configurator_returns_mapping_components_only():
@@ -458,9 +459,9 @@ def test_secondary_rank_keeps_parallel_component_dependency_closure(tmp_path):
         rank=1,
     )
 
-    assert rank_one.get_resource("ddp").rank == 1
-    assert rank_one.has_resource("parallel_dependency")
-    assert not rank_one.has_resource("rank_zero_dependency")
+    assert resource_named(rank_one, "ddp").rank == 1
+    assert has_resource_named(rank_one, "parallel_dependency")
+    assert not has_resource_named(rank_one, "rank_zero_dependency")
     assert {component.name for component in rank_one.get_all_steps()} == {
         "parallel_root"
     }

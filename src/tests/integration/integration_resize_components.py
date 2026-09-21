@@ -36,7 +36,7 @@ class ResizableDataLoadingStep(Step):
 
     @override
     def run(self, session: TrainingSession) -> None:
-        data_manager = session.get_resource("data_manager")
+        data_manager = self.get_dependency("data_manager")
         batch = next(data_manager.data_iter)
         session.iteration_context["sample_indices"] = [
             int(value) for value in batch[:, 0].tolist()
@@ -72,7 +72,7 @@ class ResizableRankResultHook(LifecycleHook):
 
     @override
     def post_session(self, session: TrainingSession) -> None:
-        ddp = session.get_resource("ddp")
+        ddp = self.get_dependency("ddp")
         self._output_dir.mkdir(parents=True, exist_ok=True)
         (self._output_dir / f"rank_{ddp.rank}.json").write_text(
             json.dumps({

@@ -144,10 +144,7 @@ are wired before anything is constructed. The flat
 The wiring holds wherever the consumer takes its prerequisite with
 `self.get_dependency(name)` -- in its constructor, in `setup`, or while an
 iteration runs -- because the session resolves it for that consumer and hands
-it over before the consumer is constructed. The deprecated
-`session.get_resource(name)` cannot honour it: it is given a name, not the
-component asking, so it resolves session-wide and would hand `evaluator`
-whatever a flat `data_manager` binding points at. See
+it over before the consumer is constructed. See
 [taking a prerequisite](../concepts/component-model.md#taking-a-prerequisite).
 
 ### Components that must stay unique

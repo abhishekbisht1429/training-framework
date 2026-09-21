@@ -6,7 +6,7 @@ registry fixture clears the global registries before each test.
 
 import pytest
 
-from tests.test_utils import make_config
+from tests.test_utils import make_config, resource_named
 from training_framework.components import (
     ComponentDependencyError,
     Resource,
@@ -154,8 +154,8 @@ def test_activate_component_wires_a_late_component(tmp_path):
     session.activate_component("wire_late_child", {})
     session.activate_component("wire_late_parent", {})
 
-    parent = session.get_resource("wire_late_parent")
-    assert parent.child is session.get_resource("wire_late_child")
+    parent = resource_named(session, "wire_late_parent")
+    assert parent.child is resource_named(session, "wire_late_child")
 
 
 def test_activating_a_component_after_setup_is_rejected(tmp_path):

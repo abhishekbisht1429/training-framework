@@ -98,3 +98,27 @@ def inject_dependencies(component, **dependencies):
 
     component.__dict__[Component.DEPENDENCIES_ATTR] = dict(dependencies)
     return component
+
+
+def resource_named(session, name):
+    """Return the resource `name` refers to, for a test to inspect.
+
+    Code outside a component has no consumer to resolve for, so this applies
+    the session-wide bindings -- a role such as `model` finds the
+    implementation bound to it -- and matches the instance name exactly.
+    Components take their prerequisites with `get_dependency` instead.
+    """
+    target = session.resolve_component_name(name)
+    for component in session.get_all_resources():
+        if component.name == target:
+            return component
+    raise KeyError(f"{name} not found in resources!")
+
+
+def has_resource_named(session, name) -> bool:
+    """Whether `resource_named(session, name)` would find a resource."""
+    try:
+        resource_named(session, name)
+    except KeyError:
+        return False
+    return True

@@ -63,10 +63,10 @@ class _CaptureCountingStep(Step):
         self.capture_counts: list[int] = []
 
     def run(self, session):
-        model = session.get_resource("trained_model").model
+        model = self.get_dependency("trained_model").model
         if session.iteration not in self._skip_iterations:
             model(torch.tensor(float(session.iteration)))
-        inspector = session.get_resource("layer_inspector")
+        inspector = self.get_dependency("layer_inspector")
         self.capture_counts.append(
             len(inspector.captures.get("attention", []))
         )

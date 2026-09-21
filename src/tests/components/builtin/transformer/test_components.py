@@ -30,6 +30,7 @@ from training_framework.components.builtin.transformer import (
     TorchTransformerEncoder,
 )
 from training_framework.session import AnalysisSession, TrainingSession
+from tests.test_utils import resource_named
 
 
 EMBED_DIM = 8
@@ -599,7 +600,7 @@ def _composite(model_class, tmp_path, **overrides):
 
 
 def test_patch_transformer_config_only_accepts_class_token(tmp_path):
-    assert not _composite(PatchTransformer, tmp_path).get_resource(
+    assert not resource_named(_composite(PatchTransformer, tmp_path), 
         "model"
     ).has_class_token
 
@@ -607,7 +608,7 @@ def test_patch_transformer_config_only_accepts_class_token(tmp_path):
         PatchTransformer, tmp_path,
         extra={"patch_transformer": {"class_token": True}},
     )
-    assert with_token.get_resource("model").has_class_token
+    assert resource_named(with_token, "model").has_class_token
 
     with pytest.raises(ValueError, match="unknown keys"):
         _composite(
@@ -673,7 +674,7 @@ def test_class_token_is_prepended_after_positional_embedding(tmp_path):
         PatchTransformer, tmp_path,
         extra={"patch_transformer": {"class_token": True}},
     )
-    model = session.get_resource("model")
+    model = resource_named(session, "model")
 
     assert isinstance(model.class_token, ClassToken)
     assert model.class_token.embed_dim == EMBED_DIM
@@ -689,7 +690,7 @@ def test_class_token_widens_the_padding_mask_for_encoder_and_pooling(tmp_path):
         PooledPatchTransformer, tmp_path,
         extra={"pooled_patch_transformer": {"class_token": True}},
     )
-    model = session.get_resource("model")
+    model = resource_named(session, "model")
     seen_masks = []
     model.sequence_encoder.register_forward_hook(
         lambda module, args, kwargs, output: seen_masks.append(kwargs["key_padding_mask"]),
@@ -712,12 +713,12 @@ def test_class_token_widens_the_padding_mask_for_encoder_and_pooling(tmp_path):
 
 def test_a_composite_is_usable_as_soon_as_it_is_constructed(tmp_path):
     session = _composite(PatchTransformer, tmp_path)
-    model = session.get_resource("model")
+    model = resource_named(session, "model")
 
     # No `with session:` -- no setup has run.
     assert model.embed_dim == EMBED_DIM
     assert isinstance(model.patch_embedding, ConvPatchEmbedding)
-    assert model.patch_embedding is session.get_resource("conv_patch_embedding")
+    assert model.patch_embedding is resource_named(session, "conv_patch_embedding")
     assert model(torch.randn(2, 3, 8, 8)).shape == (2, 4, EMBED_DIM)
     # Larger inputs resize the learned positional table.
     assert model(torch.randn(2, 3, 12, 16)).shape == (2, 12, EMBED_DIM)
@@ -727,7 +728,7 @@ def test_pooled_patch_transformer_forwards_conditioning_to_query(tmp_path):
     session = _composite(
         PooledPatchTransformer, tmp_path, query="conditioned_pooling_query",
     )
-    model = session.get_resource("model")
+    model = resource_named(session, "model")
 
     assert model(torch.randn(2, 3, 8, 8), **_conditioning()).shape == (
         2, 1, EMBED_DIM,
@@ -784,7 +785,7 @@ def _register_sgd_step():
             self.losses = []
 
         def run(self, session):
-            model = session.get_resource("model")
+            model = self.get_dependency("model")
             model.train()
             output = model(torch.ones(2, 3, 8, 8), **_conditioning())
             loss = output.pow(2).mean()
@@ -813,7 +814,7 @@ def test_training_session_trains_checkpoints_and_restores_the_model(tmp_path):
     assert initial_state["conv_patch_embedding"]["state"]["state_dict"]
 
     with session:
-        model = session.get_resource("model")
+        model = resource_named(session, "model")
         before = {name: p.detach().clone() for name, p in model.named_parameters()}
         for _ in session:
             pass
@@ -828,7 +829,7 @@ def test_training_session_trains_checkpoints_and_restores_the_model(tmp_path):
     checkpoint_path = tmp_path / "checkpoint.pt"
     torch.save(session, checkpoint_path)
     restored_session = torch.load(checkpoint_path, weights_only=False)
-    restored_model = restored_session.get_resource("model")
+    restored_model = resource_named(restored_session, "model")
 
     # The checkpoint is self-contained: no setup() needed to use the model.
     images = torch.randn(2, 3, 8, 8)
@@ -850,7 +851,7 @@ def test_session_state_round_trip_builds_in_a_worker(tmp_path):
         pickle.loads(pickle.dumps(session.get_state()))
     )
     with worker_session:
-        model = worker_session.get_resource("model")
+        model = resource_named(worker_session, "model")
         assert isinstance(model.positional_embedding, SinusoidalPositionalEmbedding2D)
         assert model(torch.randn(3, 3, 8, 8)).shape == (3, 2, EMBED_DIM)
 
@@ -858,7 +859,7 @@ def test_session_state_round_trip_builds_in_a_worker(tmp_path):
 def test_patch_transformer_without_pooling_in_a_session(tmp_path):
     session = TrainingSession(_pooled_config(tmp_path, model="patch_transformer"))
     with session:
-        model = session.get_resource("model")
+        model = resource_named(session, "model")
         assert type(model) is PatchTransformer
         assert model(torch.randn(1, 3, 8, 8)).shape == (1, 4, EMBED_DIM)
 
@@ -869,7 +870,7 @@ def test_trained_model_loads_transformer_checkpoint_for_analysis(tmp_path, class
     config["pooled_patch_transformer"] = {"class_token": class_token}
     session = TrainingSession(config)
     with session:
-        trained = session.get_resource("model")
+        trained = resource_named(session, "model")
     checkpoint_path = tmp_path / "training.pt"
     torch.save(session, checkpoint_path)
 
@@ -878,8 +879,8 @@ def test_trained_model_loads_transformer_checkpoint_for_analysis(tmp_path, class
         "trained_model": {"model_checkpoint_path": str(checkpoint_path)},
     })
     with analysis:
-        model = analysis.get_resource("trained_model").model
-        assert isinstance(analysis.get_resource("trained_model"), TrainedModel)
+        model = resource_named(analysis, "trained_model").model
+        assert isinstance(resource_named(analysis, "trained_model"), TrainedModel)
         assert model.has_class_token is class_token
         images = torch.randn(2, 3, 8, 8)
         conditioning = _conditioning()
@@ -895,6 +896,6 @@ def test_a_block_is_shared_by_two_composites_as_one_instance(tmp_path):
 
     session = TrainingSession(config)
 
-    pooled = session.get_resource("pooled_patch_transformer")
-    plain = session.get_resource("patch_transformer")
+    pooled = resource_named(session, "pooled_patch_transformer")
+    plain = resource_named(session, "patch_transformer")
     assert pooled.patch_embedding is plain.patch_embedding

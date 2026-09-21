@@ -342,39 +342,6 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _clear_iteration_state(self):
         clear_iteration_state(self)
 
-    def get_resource(self, key: str):
-        """Return a resource, resolved session-wide. Deprecated.
-
-        A session-wide lookup cannot honour the caller's own
-        `component_bindings` wiring, because it is handed a name and not the
-        component asking for it. A component wired to one instance of a
-        component configured twice is therefore given whichever instance wins
-        session-wide. Declare the prerequisite with `@requires_resource` and
-        call `self.get_dependency(name)`, which resolves for the consumer.
-        """
-        warnings.warn(
-            "Session.get_resource is deprecated: it resolves session-wide and "
-            "ignores the calling component's own component_bindings wiring. "
-            f"Declare the prerequisite with @requires_resource('{key}') and "
-            f"use self.get_dependency('{key}') instead.",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self._components.get_resource(key)
-
-    def has_resource(self, resource_name):
-        """Return whether a resource is active. Deprecated, see get_resource."""
-        warnings.warn(
-            "Session.has_resource is deprecated: it resolves session-wide and "
-            "ignores the calling component's own component_bindings wiring. "
-            f"Declare the prerequisite with @requires_resource"
-            f"('{resource_name}') and use "
-            f"self.has_dependency('{resource_name}') instead.",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self._components.has_resource(resource_name)
-
     @property
     def component_aliases(self) -> dict[str, str]:
         warnings.warn(

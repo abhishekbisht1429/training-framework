@@ -17,6 +17,7 @@ from training_framework.session.state import (
     restore_rng_state,
     rng_restore_suppressed,
 )
+from tests.test_utils import resource_named
 
 
 class _FakeCuda:
@@ -373,6 +374,6 @@ def test_the_trained_model_resource_leaves_the_rng_alone(tmp_path):
     expected = _next_draws()
 
     _seed_everything(4321)
-    session.get_resource("trained_model").setup(session)
+    resource_named(session, "trained_model").setup(session)
 
     assert _next_draws() == expected

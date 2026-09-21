@@ -12,6 +12,7 @@ from training_framework.dataloader import (
     consumed_in_epoch,
 )
 from training_framework.session import TrainingSession
+from tests.test_utils import resource_named
 
 
 _COMPONENTS_PACKAGE = "tests.integration.integration_training_components"
@@ -314,7 +315,7 @@ def test_a_data_manager_resumes_on_a_smaller_world(
 ):
     source = _session(tmp_path / "source", rank=0, world_size=2)
     with source:
-        manager = source.get_resource("data_manager")
+        manager = resource_named(source, "data_manager")
         next(manager.data_iter)
         saved = manager.get_state()
 
@@ -322,7 +323,7 @@ def test_a_data_manager_resumes_on_a_smaller_world(
     assert saved["sampler_state"]["consumed_in_epoch"] == 4
 
     target = _session(tmp_path / "target", rank=0, world_size=1)
-    restored = target.get_resource("data_manager")
+    restored = resource_named(target, "data_manager")
     restored.set_state(saved)
 
     with target:

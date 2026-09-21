@@ -49,7 +49,7 @@ class IntegrationAnalysisProbe(Step):
         self._output_path = Path(config["output_path"])
 
     def run(self, session):
-        model = session.get_resource("trained_model").model
+        model = self.get_dependency("trained_model").model
         payload = {
             "iteration": session.iteration,
             "prediction": float(model(torch.tensor(2.0)).detach()),
@@ -69,7 +69,7 @@ class IntegrationWeightUpdate(Step):
         self._delta = float(config["delta"])
 
     def run(self, session):
-        model = session.get_resource("model")
+        model = self.get_dependency("model")
         with torch.no_grad():
             model.weight.add_(self._delta)
 
@@ -102,8 +102,8 @@ class IntegrationAnalysisBatchProbe(Step):
         self._output_path = Path(config["output_path"])
 
     def run(self, session):
-        batch = next(session.get_resource("data_manager").data_iter)
-        model = session.get_resource("trained_model").model
+        batch = next(self.get_dependency("data_manager").data_iter)
+        model = self.get_dependency("trained_model").model
         with torch.no_grad():
             predictions = model(batch)
         payload = {

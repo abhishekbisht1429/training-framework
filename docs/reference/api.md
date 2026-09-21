@@ -107,8 +107,6 @@ The engine monitors workers while leaving the context.
 | `component_bindings` | Copy of the session's role-to-implementation bindings |
 | `component_aliases` | Deprecated compatibility property for `component_bindings` |
 | `resolve_component_name(name)` | Resolve an expected or actual component name to its registered name |
-| `get_resource(name)` | **Deprecated** (`FutureWarning`). Resolves session-wide, ignoring the calling component's own wiring; declare the prerequisite and use `Component.get_dependency(name)` |
-| `has_resource(name)` | **Deprecated** (`FutureWarning`); use `Component.has_dependency(name)` |
 | `get_all_resources()` | Return configured resources |
 | `get_all_hooks()` | Return configured hooks |
 | `get_all_steps()` | Return configured steps |
@@ -143,9 +141,11 @@ The engine monitors workers while leaving the context.
 `__init__` or at run time; see
 [the component model](../concepts/component-model.md#taking-a-prerequisite).
 
-**Removed:** `ComponentView`, `constructing_component` and
-`active_component_view` are no longer exported from
-`training_framework.components`. Prerequisites are handed to a component
+**Removed:** `Session.get_resource` and `Session.has_resource` -- a component
+takes its prerequisites with `get_dependency` (see
+[the component model](../concepts/component-model.md#there-is-no-session-wide-lookup)).
+`ComponentView`, `constructing_component` and `active_component_view` are no
+longer exported from `training_framework.components`. Prerequisites are handed to a component
 directly rather than through a bound view, so there is nothing left for them to
 do. A test that built a component against a stub view can construct it and
 then register it into a session, which gives it its prerequisites.

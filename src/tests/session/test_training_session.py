@@ -7,7 +7,7 @@ from training_framework.components import (
     resource,
 )
 from training_framework.session import TrainingSession
-from tests.test_utils import read_events, register_test_components, session_config
+from tests.test_utils import has_resource_named, read_events, register_test_components, session_config
 
 
 def _component(session: TrainingSession, name: str):
@@ -75,7 +75,7 @@ def test_default_components_are_available_through_public_api(tmp_path):
         component.name for component in session.get_all_hooks()
     }
     assert {"logger", "checkpointer"} <= hook_names
-    assert not session.has_resource("tensorboard")
+    assert not has_resource_named(session, "tensorboard")
 
 
 def test_explicit_builtin_configs_override_defaults_and_enable_tensorboard(tmp_path):
@@ -92,7 +92,7 @@ def test_explicit_builtin_configs_override_defaults_and_enable_tensorboard(tmp_p
     hooks = {component.name: component for component in session.get_all_hooks()}
     assert hooks["logger"].call_every == 3
     assert hooks["checkpointer"].call_every == 2
-    assert session.has_resource("tensorboard")
+    assert has_resource_named(session, "tensorboard")
 
 
 @pytest.mark.parametrize(

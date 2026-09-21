@@ -107,7 +107,7 @@ class StatefulTrainingStep(StatefulStep):
 
     @override
     def run(self, session: TrainingSession) -> None:
-        model: StatefulModelResource = session.get_resource("it_3d45_model")
+        model: StatefulModelResource = self.get_dependency("it_3d45_model")
         noise_scale = float(self.config.get("noise_scale", 0.05))
         noise = float(torch.rand((), dtype=model.weight.dtype).item()) * noise_scale
         target = torch.tensor(

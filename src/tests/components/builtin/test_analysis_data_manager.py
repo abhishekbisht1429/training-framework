@@ -19,6 +19,7 @@ from training_framework.components.builtin import (
 )
 from training_framework.components.registry import component_registry
 from training_framework.session import AnalysisSession, Session, TrainingSession
+from tests.test_utils import resource_named
 
 
 class _SourceModel(nn.Module, StatefulResource):
@@ -66,7 +67,7 @@ class _BatchRecorder(Step):
         self.batches = []
 
     def run(self, session):
-        batch = next(session.get_resource("data_manager").data_iter)
+        batch = next(self.get_dependency("data_manager").data_iter)
         self.batches.append(
             batch if isinstance(batch, list) else batch.tolist()
         )
@@ -202,7 +203,7 @@ def test_analysis_data_manager_releases_loader_on_teardown(tmp_path):
 
     with session:
         next(session)
-        data_manager = session.get_resource("data_manager")
+        data_manager = resource_named(session, "data_manager")
         assert data_manager.dataloader is not None
 
     assert data_manager.dataloader is None
@@ -214,5 +215,5 @@ def test_analysis_session_with_data_manager_round_trips_through_state(tmp_path):
 
     restored = Session.from_state(session.get_state())
 
-    assert isinstance(restored.get_resource("data_manager"), AnalysisDataManager)
+    assert isinstance(resource_named(restored, "data_manager"), AnalysisDataManager)
     assert _run(restored).batches == [[0, 1], [2, 3], [4]]

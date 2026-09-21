@@ -10,7 +10,7 @@ import pytest
 import torch
 from torch import nn
 
-from tests.test_utils import make_config
+from tests.test_utils import make_config, resource_named
 from training_framework.components import (
     Component,
     ComponentDependencyError,
@@ -308,11 +308,11 @@ def test_a_privately_owned_component_survives_a_state_round_trip(tmp_path):
     config["mr_private_round_trip"] = {}
     session = TrainingSession(config)
     with torch.no_grad():
-        session.get_resource("mr_private_round_trip").private.linear.weight.fill_(0.5)
+        resource_named(session, "mr_private_round_trip").private.linear.weight.fill_(0.5)
 
     restored = TrainingSession.from_state(session.get_state())
 
-    weight = restored.get_resource("mr_private_round_trip").private.linear.weight
+    weight = resource_named(restored, "mr_private_round_trip").private.linear.weight
     assert torch.equal(weight, torch.full((4, 4), 0.5))
 
 
@@ -438,20 +438,20 @@ def test_a_restored_session_rewires_the_model_without_setup(tmp_path):
     _declare_encoder_and_model()
     session = TrainingSession(_training_config(tmp_path, "round-trip"))
     with torch.no_grad():
-        session.get_resource("mr_encoder").linear.weight.fill_(0.75)
-        session.get_resource("mr_model").head.bias.fill_(-1.5)
+        resource_named(session, "mr_encoder").linear.weight.fill_(0.75)
+        resource_named(session, "mr_model").head.bias.fill_(-1.5)
 
     restored = TrainingSession.from_state(session.get_state())
 
     # No `with restored:` -- this is the `trained_model` analysis contract.
-    model = restored.get_resource("mr_model")
-    encoder = restored.get_resource("mr_encoder")
+    model = resource_named(restored, "mr_model")
+    encoder = resource_named(restored, "mr_encoder")
     assert model.mr_encoder is encoder
     assert torch.equal(encoder.linear.weight, torch.full((4, 4), 0.75))
     assert torch.equal(model.head.bias, torch.full((2,), -1.5))
     assert torch.equal(
         model(torch.ones(1, 4)),
-        session.get_resource("mr_model")(torch.ones(1, 4)),
+        resource_named(session, "mr_model")(torch.ones(1, 4)),
     )
 
 
@@ -484,9 +484,9 @@ def test_a_child_shared_by_two_models_is_restored_as_one_instance(tmp_path):
 
     restored = TrainingSession.from_state(session.get_state())
 
-    encoder = restored.get_resource("mr_encoder")
-    assert restored.get_resource("mr_model").mr_encoder is encoder
-    assert restored.get_resource("mr_second_model").mr_encoder is encoder
+    encoder = resource_named(restored, "mr_encoder")
+    assert resource_named(restored, "mr_model").mr_encoder is encoder
+    assert resource_named(restored, "mr_second_model").mr_encoder is encoder
 
 
 def test_pickling_uses_the_stateful_reconstruction_envelope():
@@ -505,17 +505,17 @@ def test_a_saved_checkpoint_restores_the_composed_model(tmp_path):
     _declare_encoder_and_model()
     session = TrainingSession(_training_config(tmp_path, "checkpoint"))
     with session:
-        model = session.get_resource("mr_model")
+        model = resource_named(session, "mr_model")
         with torch.no_grad():
-            session.get_resource("mr_encoder").linear.bias.fill_(0.125)
+            resource_named(session, "mr_encoder").linear.bias.fill_(0.125)
         expected = model.eval()(torch.ones(1, 4))
 
     checkpoint_path = tmp_path / "linked.pt"
     torch.save(session, checkpoint_path)
     restored_session = Checkpointer.load_checkpoint(checkpoint_path)
 
-    restored_model = restored_session.get_resource("mr_model")
-    assert restored_model.mr_encoder is restored_session.get_resource("mr_encoder")
+    restored_model = resource_named(restored_session, "mr_model")
+    assert restored_model.mr_encoder is resource_named(restored_session, "mr_encoder")
     torch.testing.assert_close(restored_model.eval()(torch.ones(1, 4)), expected)
 
 
@@ -568,9 +568,9 @@ def test_a_worker_builds_the_rank_specific_ddp_resource(tmp_path, rank):
         rank,
     )
 
-    assert worker_session.get_resource("ddp").rank == rank
-    model = worker_session.get_resource("model")
-    assert model.mr_encoder is worker_session.get_resource("mr_encoder")
+    assert resource_named(worker_session, "ddp").rank == rank
+    model = resource_named(worker_session, "model")
+    assert model.mr_encoder is resource_named(worker_session, "mr_encoder")
     assert len(list(model.parameters())) == 4
 
 
@@ -581,9 +581,9 @@ def test_a_composed_model_is_loaded_for_analysis_by_trained_model(tmp_path):
     config["model"] = {}
     session = TrainingSession(config)
     with session:
-        trained = session.get_resource("model")
+        trained = resource_named(session, "model")
         with torch.no_grad():
-            session.get_resource("mr_encoder").linear.weight.fill_(0.3)
+            resource_named(session, "mr_encoder").linear.weight.fill_(0.3)
         expected = trained.eval()(torch.ones(2, 4))
 
     checkpoint_path = tmp_path / "training.pt"
@@ -600,7 +600,7 @@ def test_a_composed_model_is_loaded_for_analysis_by_trained_model(tmp_path):
         "trained_model": {"model_checkpoint_path": str(checkpoint_path)},
     })
     with analysis:
-        model = analysis.get_resource("trained_model").model
+        model = resource_named(analysis, "trained_model").model
         assert model.mr_encoder.linear.weight.allclose(torch.full((4, 4), 0.3))
         torch.testing.assert_close(model(torch.ones(2, 4)), expected)
 
@@ -608,11 +608,11 @@ def test_a_composed_model_is_loaded_for_analysis_by_trained_model(tmp_path):
 def test_setup_moves_the_whole_attached_tree_to_the_session_device(tmp_path):
     _declare_encoder_and_model()
     session = TrainingSession(_training_config(tmp_path, "device"))
-    model = session.get_resource("mr_model")
-    encoder_weight = session.get_resource("mr_encoder").linear.weight
+    model = resource_named(session, "mr_model")
+    encoder_weight = resource_named(session, "mr_encoder").linear.weight
 
     with session:
         assert model.head.weight.device == session.device
         assert encoder_weight.device == session.device
         # The optimizer's view of the child survives the move.
-        assert session.get_resource("mr_encoder").linear.weight is encoder_weight
+        assert resource_named(session, "mr_encoder").linear.weight is encoder_weight

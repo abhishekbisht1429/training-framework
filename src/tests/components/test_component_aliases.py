@@ -4,7 +4,7 @@ import pickle
 
 import pytest
 
-from tests.test_utils import COMPONENTS_PACKAGE, register_test_components
+from tests.test_utils import COMPONENTS_PACKAGE, has_resource_named, register_test_components, resource_named
 from training_framework.engine import Configurator
 from training_framework.engine import load_session_for_worker
 from training_framework.components import (
@@ -93,12 +93,12 @@ def test_component_bindings_substitute_dependencies_and_public_names(tmp_path):
 
     session = TrainingSession(config)
 
-    model_component = session.get_resource("model")
-    assert model_component is session.get_resource("custom_model")
+    model_component = resource_named(session, "model")
+    assert model_component is resource_named(session, "custom_model")
     assert model_component.name == "custom_model"
     assert model_component.label == "primary"
-    assert session.has_resource("model")
-    assert session.has_resource("custom_model")
+    assert has_resource_named(session, "model")
+    assert has_resource_named(session, "custom_model")
     assert session.component_bindings == config["component_bindings"]
     assert session.resolve_component_name("optimizer_step") == "custom_optimizer"
 
@@ -128,7 +128,7 @@ def test_component_bindings_substitute_dependencies_and_public_names(tmp_path):
     assert "custom_optimizer" not in {
         component.name for component in session.get_all_steps()
     }
-    assert not session.has_resource("model")
+    assert not has_resource_named(session, "model")
 
 
 def test_binding_replaces_a_default_component_without_duplicate(tmp_path):
@@ -212,8 +212,8 @@ def test_ddp_parallel_components_accept_bound_role_names(tmp_path):
         rank=1,
     )
 
-    assert rank_one.has_resource("model")
-    assert rank_one.has_resource("it_3d45_model")
+    assert has_resource_named(rank_one, "model")
+    assert has_resource_named(rank_one, "it_3d45_model")
     assert "it_3d45_train" in {
         component.name for component in rank_one.get_all_steps()
     }

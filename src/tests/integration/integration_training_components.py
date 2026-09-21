@@ -172,7 +172,7 @@ class DistributedDataLoadingStep(Step):
 
     @override
     def run(self, session: TrainingSession) -> None:
-        data_manager = session.get_resource("data_manager")
+        data_manager = self.get_dependency("data_manager")
         batch = next(data_manager.data_iter)
         session.iteration_context["sample_index"] = int(batch[:, 0].item())
         session.iteration_context["inputs"] = batch[:, 1:2].to(session.device)
@@ -188,7 +188,7 @@ class DDPTrainingStep(Step):
 
     @override
     def run(self, session: TrainingSession) -> None:
-        model = session.get_resource("ddp").wrapped_model
+        model = self.get_dependency("ddp").wrapped_model
         session.iteration_context["prediction"] = model(
             session.iteration_context["inputs"]
         )
@@ -220,7 +220,7 @@ class RankReadyHook(SessionHook):
 
     @override
     def pre_session(self, session: TrainingSession) -> None:
-        rank = session.get_resource("ddp").rank
+        rank = self.get_dependency("ddp").rank
         self._ready_dir.mkdir(parents=True, exist_ok=True)
         (self._ready_dir / f"rank_{rank}.ready").touch()
 
@@ -252,7 +252,7 @@ class HeartbeatingRankDelayHook(LifecycleHook):
     def post_iteration_callback(self, session: TrainingSession) -> None:
         if session.iteration != 1:
             return
-        if session.get_resource("ddp").rank != self._rank:
+        if self.get_dependency("ddp").rank != self._rank:
             return
 
         self._marker_dir.mkdir(parents=True, exist_ok=True)
@@ -301,13 +301,13 @@ class RankResultHook(LifecycleHook):
             "loss": float(session.iteration_context["loss"].detach().item()),
         })
         if self._progress_dir is not None:
-            rank = session.get_resource("ddp").rank
+            rank = self.get_dependency("ddp").rank
             self._progress_dir.mkdir(parents=True, exist_ok=True)
             (self._progress_dir / f"rank_{rank}.progress").touch()
 
     @override
     def post_session(self, session: TrainingSession) -> None:
-        ddp = session.get_resource("ddp")
+        ddp = self.get_dependency("ddp")
         model = ddp.wrapped_model.module
         payload = {
             "rank": ddp.rank,

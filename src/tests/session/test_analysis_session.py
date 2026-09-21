@@ -7,6 +7,7 @@ from torch import nn
 from training_framework.components import Resource, StatefulResource, resource
 from training_framework.components.builtin import TrainedModel
 from training_framework.session import AnalysisSession, Session, TrainingSession
+from tests.test_utils import resource_named
 
 
 class _AnalysisSourceModel(nn.Module, StatefulResource):
@@ -90,11 +91,11 @@ def test_analysis_session_loads_component_configured_model(tmp_path):
     session = AnalysisSession(_analysis_config(tmp_path, checkpoint_path))
 
     assert not hasattr(session, "model_checkpoint_path")
-    assert isinstance(session.get_resource("trained_model"), TrainedModel)
+    assert isinstance(resource_named(session, "trained_model"), TrainedModel)
     assert "model_checkpoint_path" not in session.get_state()
 
     with session:
-        model = session.get_resource("trained_model").model
+        model = resource_named(session, "trained_model").model
         assert not model.training
         torch.testing.assert_close(
             model(torch.tensor(2.0)),
@@ -111,7 +112,7 @@ def test_analysis_session_round_trips_component_owned_checkpoint_path(tmp_path):
     assert type(restored) is AnalysisSession
     assert not hasattr(restored, "model_checkpoint_path")
     with restored:
-        model = restored.get_resource("trained_model").model
+        model = resource_named(restored, "trained_model").model
         torch.testing.assert_close(
             model(torch.tensor(2.0)),
             torch.tensor(7.0),
@@ -159,6 +160,6 @@ def test_analysis_session_allows_bound_trained_model_implementation(tmp_path):
     })
 
     assert isinstance(
-        session.get_resource("trained_model"),
+        resource_named(session, "trained_model"),
         AnalysisModelReplacement,
     )

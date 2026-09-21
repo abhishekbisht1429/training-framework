@@ -11,6 +11,7 @@ import torch
 
 from training_framework.components import Step, requires_resource, step
 from training_framework.session import TrainingSession
+from tests.test_utils import resource_named
 
 
 _COMPONENTS_PACKAGE = "tests.integration.integration_training_components"
@@ -132,7 +133,7 @@ def test_data_manager_uses_dataset_collate_function_after_restore(tmp_path):
     restored = TrainingSession.from_state(source.get_state())
 
     with restored:
-        batch = next(restored.get_resource("data_manager").data_iter)
+        batch = next(resource_named(restored, "data_manager").data_iter)
 
     assert batch["collated"] is True
     assert batch["indices"].shape == (2,)
@@ -153,7 +154,7 @@ def test_data_manager_rejects_non_callable_dataset_collate_function(tmp_path):
 def test_data_manager_resume_returns_the_exact_next_logical_batch(tmp_path):
     paused = _new_session(tmp_path, num_workers=1)
     with paused:
-        data_manager = paused.get_resource("data_manager")
+        data_manager = resource_named(paused, "data_manager")
         first_batch = next(data_manager.data_iter)
         checkpoint_state = paused.get_state()
         expected_next_batch = next(data_manager.data_iter)
@@ -161,7 +162,7 @@ def test_data_manager_resume_returns_the_exact_next_logical_batch(tmp_path):
     restored = TrainingSession.from_state(checkpoint_state)
     with restored:
         actual_next_batch = next(
-            restored.get_resource("data_manager").data_iter
+            resource_named(restored, "data_manager").data_iter
         )
 
     assert not torch.equal(
@@ -177,7 +178,7 @@ def test_data_manager_resume_returns_the_exact_next_logical_batch(tmp_path):
 def test_pickled_data_manager_resumes_at_the_exact_next_batch(tmp_path):
     source = _new_session(tmp_path / "source")
     with source:
-        source_manager = source.get_resource("data_manager")
+        source_manager = resource_named(source, "data_manager")
         first_batch = next(source_manager.data_iter)
         restored_manager = pickle.loads(pickle.dumps(source_manager))
         expected_next_batch = next(source_manager.data_iter)
@@ -211,7 +212,7 @@ def test_data_manager_restores_the_same_position_for_each_current_rank(
         world_size=2,
     )
     with rank_zero:
-        rank_zero_manager = rank_zero.get_resource("data_manager")
+        rank_zero_manager = resource_named(rank_zero, "data_manager")
         next(rank_zero_manager.data_iter)
         rank_zero_state = rank_zero_manager.get_state()
 
@@ -223,7 +224,7 @@ def test_data_manager_restores_the_same_position_for_each_current_rank(
         world_size=2,
     )
     with rank_one_baseline:
-        baseline_manager = rank_one_baseline.get_resource("data_manager")
+        baseline_manager = resource_named(rank_one_baseline, "data_manager")
         next(baseline_manager.data_iter)
         expected_rank_one_batch = next(baseline_manager.data_iter)
 
@@ -234,7 +235,7 @@ def test_data_manager_restores_the_same_position_for_each_current_rank(
         rank=1,
         world_size=2,
     )
-    restored_manager = restored_rank_one.get_resource("data_manager")
+    restored_manager = resource_named(restored_rank_one, "data_manager")
     restored_manager.set_state(rank_zero_state)
     with restored_rank_one:
         actual_rank_one_batch = next(restored_manager.data_iter)
@@ -261,7 +262,7 @@ def test_data_manager_rejects_incompatible_sampler_state(
 ):
     source = _new_session(tmp_path / "source")
     with source:
-        source_manager = source.get_resource("data_manager")
+        source_manager = resource_named(source, "data_manager")
         next(source_manager.data_iter)
         manager_state = source_manager.get_state()
 
@@ -270,7 +271,7 @@ def test_data_manager_rejects_incompatible_sampler_state(
         register_components=False,
         **override,
     )
-    target.get_resource("data_manager").set_state(manager_state)
+    resource_named(target, "data_manager").set_state(manager_state)
     with pytest.raises(ValueError, match=message):
         with target:
             pass
@@ -278,7 +279,7 @@ def test_data_manager_rejects_incompatible_sampler_state(
 
 def test_data_manager_rejects_state_from_a_different_batch_size(tmp_path):
     source = _new_session(tmp_path / "source", batch_size=2)
-    manager_state = source.get_resource("data_manager").get_state()
+    manager_state = resource_named(source, "data_manager").get_state()
 
     target = _new_session(
         tmp_path / "target",
@@ -286,12 +287,12 @@ def test_data_manager_rejects_state_from_a_different_batch_size(tmp_path):
         batch_size=1,
     )
     with pytest.raises(ValueError, match="different batch_size"):
-        target.get_resource("data_manager").set_state(manager_state)
+        resource_named(target, "data_manager").set_state(manager_state)
 
 
 def test_data_manager_stops_worker_processes_during_teardown(tmp_path):
     session = _new_session(tmp_path, batch_size=1, num_workers=1)
-    data_manager = session.get_resource("data_manager")
+    data_manager = resource_named(session, "data_manager")
 
     with session:
         data_iter = data_manager.data_iter

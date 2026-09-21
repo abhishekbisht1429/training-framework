@@ -4,7 +4,7 @@ Prerequisites are resolved for the component that declared them -- honouring
 its own `component_bindings` wiring -- and handed to it before `__init__`
 runs, so construction, `setup`, a hook callback and a running step all see the
 same instance. `Session.get_resource`, which is handed only a name and so can
-only resolve session-wide, is deprecated in its favour.
+only resolve session-wide, is removed in its favour.
 
 Every scenario wires the consumer to `rt_dep#b` while a session-wide binding
 says `rt_dep#a`. That is the shape in which a session-wide lookup is silently
@@ -13,8 +13,6 @@ wrong rather than loudly ambiguous.
 Components are declared inside the test functions on purpose: the autouse
 registry fixture clears the global registries before each test.
 """
-
-import warnings
 
 import pytest
 
@@ -264,30 +262,16 @@ def test_a_replaced_prerequisite_survives_a_checkpoint_round_trip(tmp_path):
     assert seen == [("setup", "replacement"), ("teardown", "replacement")]
 
 
-# -- the deprecated session-wide lookup -------------------------------------
+# -- no session-wide lookup for components --------------------------------
 
 
-def test_session_get_resource_warns_and_still_resolves_session_wide(tmp_path):
+def test_a_session_offers_no_session_wide_lookup(tmp_path):
+    """A lookup handed only a name cannot know which consumer is asking, so
+    it would resolve session-wide and ignore the caller's own wiring. It is
+    gone rather than deprecated: get_dependency is the one way in."""
     declare_dependency()
     declare_resource_consumer([])
     session = TrainingSession(wired_config(tmp_path, "rt_consumer"))
 
-    with pytest.warns(FutureWarning, match=r"self\.get_dependency\('rt_source'\)"):
-        resolved = session.get_resource("rt_source")
-    with pytest.warns(FutureWarning, match=r"self\.has_dependency\('rt_source'\)"):
-        assert session.has_resource("rt_source")
-
-    # Unchanged while deprecated: the session-wide binding, not the
-    # consumer's own wiring. This is why it is being retired.
-    assert resolved.tag == "a"
-
-
-def test_the_framework_does_not_trip_its_own_deprecation(tmp_path):
-    declare_dependency()
-    declare_resource_consumer([])
-    session = TrainingSession(wired_config(tmp_path, "rt_consumer"))
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", FutureWarning)
-        with session:
-            assert list(session) == [1, 2]
+    assert not hasattr(session, "get_resource")
+    assert not hasattr(session, "has_resource")

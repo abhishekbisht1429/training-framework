@@ -23,7 +23,7 @@ from training_framework.components import (
 )
 from training_framework.session import TrainingSession
 
-from tests.test_utils import make_config
+from tests.test_utils import make_config, resource_named
 
 
 class CriticalCheckpointAccumulatorStepBase(Step, Stateful):
@@ -419,7 +419,7 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
     assert session.session_context == {}
 
     restored = pickle.loads(checkpoint_payload)
-    restored_resource = restored.get_resource(resource_id)
+    restored_resource = resource_named(restored, resource_id)
     restored_stateful_hook = _component(
         restored.get_all_hooks(),
         "critical_checkpoint_stateful_hook",

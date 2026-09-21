@@ -64,10 +64,6 @@ The engine builds the session before spawning workers, so a model's weights are 
 
 The session hands a component its prerequisites. One built by hand and registered with `register_resource()`, `register_hook()` or `add_step()` receives them on registration, so it can use them from `setup` onwards -- but not in its own `__init__`, which has already run. A component whose constructor calls `get_dependency` must be activated by the session, through configuration or `session.activate_component(name, config)`. Replacing a registered component hands its consumers the new instance on their next `get_dependency` call; a reference a consumer already stored for itself is not updated.
 
-### `session.get_resource` resolves session-wide
-
-`session.get_resource(name)` is handed a name but not the component asking, so it cannot honour per-component wiring. When a session-wide binding contradicts a consumer's own wiring, or a bare-named instance sits alongside suffixed ones, it returns the session-wide answer: a run that trains and is quietly wrong. It is deprecated with a `FutureWarning` for this reason. `self.get_dependency(name)` resolves for the component that declared the prerequisite. When several instances answer and nothing decides between them, `get_resource` raises rather than picking one.
-
 ### An ambiguous dependency is an error, not a choice
 
 A session may hold several instances of one component. When a dependency could mean more than one of them and neither an exact name match nor per-consumer wiring settles it, activation fails instead of choosing. Wiring a component to an instance the session never chose would give a run that trains and is quietly wrong, which is worse than a launch that stops. Name the instance in `component_bindings`.

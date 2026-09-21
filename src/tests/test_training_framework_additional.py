@@ -26,6 +26,7 @@ from training_framework.components import (
 )
 from training_framework.session import TrainingSession
 from training_framework.util import timestamp_str
+from tests.test_utils import has_resource_named, resource_named
 
 
 class DummyDataset(Dataset):
@@ -331,9 +332,9 @@ def test_registration_validation_and_lookup(minimal_session_config_2):
     assert resource_id == "test_additional_resource"
     assert step_obj in session.get_all_steps()
     assert hook_obj in session.get_all_hooks()
-    assert session.get_resource(resource_id) is resource_obj
+    assert resource_named(session, resource_id) is resource_obj
     with pytest.raises(KeyError):
-        session.get_resource("missing-resource")
+        resource_named(session, "missing-resource")
 
 def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
     @step("test_additional_step")
@@ -422,8 +423,8 @@ def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
     }
     assert hook_a in session.get_all_hooks()
     assert hook_b in session.get_all_hooks()
-    assert session.get_resource(resource_a_id) is resource_a
-    assert session.get_resource(resource_b_id) is resource_b
+    assert resource_named(session, resource_a_id) is resource_a
+    assert resource_named(session, resource_b_id) is resource_b
 
     with session as active_session:
         assert active_session is session
@@ -759,6 +760,6 @@ def test_configurator_create_sessions_attaches_expected_components(tmp_path, mon
 
     assert {"logger", "checkpointer"} <= first_hook_names
     assert {"logger", "checkpointer"} <= second_hook_names
-    assert sessions[0].has_resource("tensorboard")
-    assert sessions[0].get_resource("tensorboard").name == "tensorboard"
-    assert not sessions[1].has_resource("tensorboard")
+    assert has_resource_named(sessions[0], "tensorboard")
+    assert resource_named(sessions[0], "tensorboard").name == "tensorboard"
+    assert not has_resource_named(sessions[1], "tensorboard")

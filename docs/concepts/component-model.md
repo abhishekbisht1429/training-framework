@@ -111,18 +111,17 @@ constructing one by hand raises `ComponentDependencyError` pointing at
 `activate_component`. Registering a component under a name that consumers are
 already wired to -- replacing it -- hands them the new one.
 
-### `session.get_resource` is deprecated
+### There is no session-wide lookup
 
-`session.get_resource(name)` and `session.has_resource(name)` still work and
-now emit a `FutureWarning`. They are handed a name but not the component
-asking, so they can only resolve **session-wide**: a component wired to one
-instance of a component configured twice is given whichever instance the
-session-wide binding picks. Declare the prerequisite and use
-`self.get_dependency(name)` instead.
+`Session` has no `get_resource` / `has_resource`. A lookup handed only a name
+cannot know which component is asking, so it could only resolve session-wide,
+and a component wired to one instance of a component configured twice would
+be given whichever instance the session-wide binding picks. Declare the
+prerequisite and use `self.get_dependency(name)`.
 
-The replacement is stricter, not a rename: `get_dependency` serves only
-declared names, so a step or hook that fetched something it never declared
-must add `@requires_resource`. That adds an edge to the graph, which can change
+That is stricter than the old lookup, not a rename of it: `get_dependency`
+serves only declared names, so a step or hook that fetched something it never
+declared must add `@requires_resource`. That adds an edge to the graph, which can change
 setup order and what a secondary DDP rank builds -- see
 [what each rank builds](../guide/05-distributed-training.md#what-each-rank-builds).
 

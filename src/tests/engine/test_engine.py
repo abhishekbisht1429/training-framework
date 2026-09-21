@@ -19,6 +19,7 @@ from tests.test_utils import (
     COMPONENTS_PACKAGE,
     iteration_events,
     register_test_components,
+    resource_named,
     session_config,
 )
 
@@ -360,10 +361,10 @@ def test_worker_loading_builds_rank_specific_ddp_sessions_without_patching(tmp_p
         session_update_params={"max_iterations": 8},
     )
 
-    assert source.get_resource("ddp").rank == -1
+    assert resource_named(source, "ddp").rank == -1
     assert source.session_config.max_iterations == 3
-    assert rank_zero.get_resource("ddp").rank == 0
-    assert rank_one.get_resource("ddp").rank == 1
+    assert resource_named(rank_zero, "ddp").rank == 0
+    assert resource_named(rank_one, "ddp").rank == 1
     assert rank_zero.session_config.max_iterations == 8
     assert rank_one.session_config.max_iterations == 8
 
