@@ -162,7 +162,7 @@ class DDPResource(Resource):
         )
 
         try:
-            model = session.get_resource("model")
+            model = self.get_dependency("model")
             if uses_cuda:
                 model.to(session.device)
             device_ids = [self._local_rank] if uses_cuda else None

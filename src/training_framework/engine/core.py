@@ -86,8 +86,8 @@ class TrainingEngine:
         # so this launch decides how many processes to run and where they
         # meet, not the stored configuration.
         topology = resolve_launch_topology(
-            session.get_resource("ddp").config
-            if session.has_resource("ddp")
+            session._components.get_resource("ddp").config
+            if session._components.has_resource("ddp")
             else None,
             overrides=self._topology_overrides,
             from_checkpoint=True,
@@ -114,9 +114,9 @@ class TrainingEngine:
         here turns that into a launch-time error, and surfaces the
         rank-zero-only warnings where they can still be acted on.
         """
-        if not session.has_resource("ddp"):
+        if not session._components.has_resource("ddp"):
             return
-        ddp_resource = session.get_resource("ddp")
+        ddp_resource = session._components.get_resource("ddp")
 
         if world_size <= 1:
             # There is no rank to prune for, so no plan to settle. The names

@@ -140,8 +140,8 @@ def report_worker_exception(
     if session._worker_exception_reported:
         return
     rank = (
-        cast(Any, session.get_resource("ddp")).rank
-        if session.has_resource("ddp")
+        cast(Any, session._components.get_resource("ddp")).rank
+        if session._components.has_resource("ddp")
         else 0
     )
     try:

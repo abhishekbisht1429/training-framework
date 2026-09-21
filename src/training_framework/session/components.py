@@ -5,8 +5,6 @@ from typing import Any
 from training_framework.components import (
     Component,
     ComponentDependencyError,
-    ComponentView,
-    constructing_component,
     ExtendableComponent,
     Hook,
     IterationHook,
@@ -44,72 +42,6 @@ class ComponentNotFoundError(KeyError):
 
     def __str__(self) -> str:
         return str(self.args[0]) if self.args else ""
-
-
-class SessionComponentView(ComponentView):
-    """Expose one consumer's declared prerequisites while it is constructed.
-
-    Restricting lookup to declared dependencies is what makes the
-    prerequisite-first construction order a guarantee: a component can only
-    ask for something that was constructed before it.
-    """
-
-    def __init__(
-            self,
-            components: "SessionComponents",
-            consumer: type[Component],
-            consumer_name: str | None = None,
-    ):
-        self._components = components
-        self._consumer = consumer
-        # Which instance is being constructed, so its own wiring is applied.
-        # A component built outside the session has none.
-        self._consumer_name = consumer_name
-
-    @property
-    def session_type(self) -> str:
-        return self._components.session_type
-
-    def resolve_name(self, name: str) -> str:
-        return self._components.resolve_dependency(
-            name,
-            consumer=self._consumer_name,
-        )
-
-    def has_resource(self, name: str) -> bool:
-        self._require_declared(name)
-        return self._components.has_resource(
-            name,
-            consumer=self._consumer_name,
-        )
-
-    def get_resource(self, name: str) -> Resource:
-        self._require_declared(name)
-        return self._components.get_resource(
-            name,
-            consumer=self._consumer_name,
-        )
-
-    def _require_declared(self, name: str) -> None:
-        declared = getattr(self._consumer, "required_resources", ())
-        if name in declared:
-            return
-        resolved = self._components.resolve_name(name)
-        if resolved in declared or any(
-                self._components.resolve_name(declared_name) == resolved
-                for declared_name in declared
-        ):
-            return
-        consumer_name = getattr(
-            self._consumer,
-            "name",
-            self._consumer.__name__,
-        )
-        raise ComponentDependencyError(
-            f"{consumer_name} requested resource '{name}' while being "
-            f"constructed but does not declare it. Add "
-            f"@requires_resource('{name}') so it is constructed first."
-        )
 
 
 class SessionComponents:
@@ -210,10 +142,25 @@ class SessionComponents:
             component_states: dict[str, dict[str, Any]],
             restored_components: dict[str, Component],
     ) -> None:
-        # Pass 1: rebuild every component from its constructor arguments.
-        # The stored order is the activation order, which is already
-        # prerequisite-first, so each constructor sees what it declared.
-        for name, component_info in component_states.items():
+        # Pass 1: rebuild every component from its constructor arguments,
+        # prerequisites first. The stored order is usually already
+        # prerequisite-first, since it is the activation order, but a
+        # component registered by hand -- say a prerequisite replaced after
+        # its consumer was built -- is stored after the components that use
+        # it. Each component is handed its prerequisites as it is built, so
+        # they are built first here rather than trusted to come first.
+        building: list[str] = []
+
+        def build(name: str) -> None:
+            if name in restored_components:
+                return
+            if name in building:
+                chain = " -> ".join([*building, name])
+                raise ValueError(
+                    f"Checkpoint components depend on each other in a "
+                    f"cycle: {chain}"
+                )
+            component_info = component_states[name]
             implementation, _ = parse_instance_name(name)
             component_class = self.registry.get(implementation)
             if component_class is None:
@@ -235,14 +182,38 @@ class SessionComponents:
                     f"{component_type.__name__}"
                 )
 
+            # Resolved against every name in the checkpoint, not just the ones
+            # rebuilt so far, so a sibling instance not yet rebuilt cannot make
+            # this one look like the only one.
+            dependencies = self._resource_dependencies(
+                component_class,
+                name,
+                active=set(component_states),
+            )
+            building.append(name)
+            try:
+                for asked, target in dependencies.items():
+                    if target not in component_states:
+                        raise ValueError(
+                            f"Checkpoint component '{name}' requires "
+                            f"'{asked}', which resolves to '{target}', but the "
+                            "checkpoint does not contain it"
+                        )
+                    build(target)
+            finally:
+                building.pop()
+
             init_args = component_info["init_args"]
-            component: Component = self._construct(
+            restored_components[name] = self._construct(
                 component_class,
                 name,
                 *init_args["args"],
+                dependencies=dependencies,
                 **init_args["kwargs"],
             )
-            restored_components[name] = component
+
+        for name in component_states:
+            build(name)
 
         # Pass 2: restore state in prerequisite-first order, so a component
         # that inspects a dependency sees it already restored.
@@ -276,17 +247,56 @@ class SessionComponents:
                 f"'{recorded}', which does not match its name"
             )
 
+    def _resource_dependencies(
+            self,
+            component_class: type[Component],
+            consumer: str,
+            active: Iterable[str] | None = None,
+    ) -> dict[str, str]:
+        """Resolve a consumer's declared resources to instance names.
+
+        Only resources are injected: `required_hooks` / `required_steps` and
+        `@wraps` targets are ordering declarations, and a hook or step is not
+        servable through `get_dependency`.
+        """
+        return {
+            name: self.resolve_dependency(
+                name,
+                consumer=consumer,
+                active=active,
+            )
+            for name, dependency_type in self._dependency_specs(component_class)
+            if dependency_type is Resource
+        }
+
     def _construct(
             self,
             component_class: type[Component],
             instance_name: str,
             *args,
+            dependencies: Mapping[str, str] | None = None,
             **kwargs,
     ) -> Component:
-        """Construct a component with its declared prerequisites visible."""
-        view = SessionComponentView(self, component_class, instance_name)
-        with constructing_component(view):
-            component = component_class(*args, **kwargs)
+        """Construct a component with its declared prerequisites injected.
+
+        `dependencies` maps each declared name to the instance name that
+        satisfies it *for this consumer*. The caller resolves them, because
+        only it knows the full set of components the session will end up
+        holding: `_instances_of` reads the components built so far, so "the
+        sole instance" could be sole only because its sibling is not built
+        yet.
+
+        The prerequisites are written into the instance `__dict__` before
+        `__init__` runs, so a constructor can use them, an `nn.Module`
+        subclass needs no `nn.Module.__init__` to have run first, and a
+        prerequisite module is not registered as a submodule of its consumer.
+        """
+        component = component_class.__new__(component_class)
+        component.__dict__[Component.DEPENDENCIES_ATTR] = {
+            asked: self.components[target]
+            for asked, target in (dependencies or {}).items()
+        }
+        component.__init__(*args, **kwargs)
         self._stamp_identity(component, instance_name)
         return component
 
@@ -502,13 +512,18 @@ class SessionComponents:
         return resolved_name, component_class
 
     def _register_component_instance(self, component: Component) -> None:
-        component_type = _component_type(component)
-        if component_type is Step:
-            self.add_step(component, overwrite=True)
-        elif component_type is Hook:
-            self.register_hook(component, overwrite=True)
-        else:
-            self.register_resource(component, overwrite=True)
+        """Register a component `_construct` built, keeping its injection.
+
+        `_construct` already injected prerequisites resolved against every
+        component the activation will hold; injecting again here would
+        resolve against only those built so far.
+        """
+        self._add_component(
+            component,
+            _component_type(component),
+            overwrite=True,
+            inject=False,
+        )
 
     def register_from_config(
             self,
@@ -599,6 +614,12 @@ class SessionComponents:
 
             visiting.append(resolved_name)
             try:
+                # Kept as each dependency is resolved and handed to
+                # _construct, so the instance injected is the very one this
+                # call decided to activate. Resolving again inside _construct
+                # would read the components built so far, where a sibling
+                # that is merely not built yet looks like it does not exist.
+                resource_dependencies: dict[str, str] = {}
                 for dependency_name, dependency_type in self._dependency_specs(
                         component_class,
                 ):
@@ -616,15 +637,24 @@ class SessionComponents:
                         resolved_name=dependency_target,
                     )
                     activate(dependency_target)
+                    if dependency_type is Resource:
+                        resource_dependencies[dependency_name] = (
+                            dependency_target
+                        )
 
                 if resolved_name in component_configs:
                     component = self._construct(
                         component_class,
                         resolved_name,
                         component_configs[resolved_name],
+                        dependencies=resource_dependencies,
                     )
                 elif component_class.__init__ is Component.__init__:
-                    component = self._construct(component_class, resolved_name)
+                    component = self._construct(
+                        component_class,
+                        resolved_name,
+                        dependencies=resource_dependencies,
+                    )
                 else:
                     raise RuntimeError(
                         f"Component '{resolved_name}' is required but defines "
@@ -910,31 +940,71 @@ class SessionComponents:
         return keep
 
     def register_resource(self, component: Resource, overwrite=False) -> str:
-        self._validate_component(
-            component,
-            Resource,
-            overwrite=overwrite
-        )
-        self.components[component.name] = component
-        return component.name
+        return self._add_component(component, Resource, overwrite=overwrite)
 
     def register_hook(self, component: Hook, overwrite=False) -> str:
-        self._validate_component(
-            component,
-            Hook,
-            overwrite=overwrite,
-        )
+        return self._add_component(component, Hook, overwrite=overwrite)
+
+    def add_step(self, component: Step, overwrite=False) -> str:
+        return self._add_component(component, Step, overwrite=overwrite)
+
+    def _add_component(
+            self,
+            component: Component,
+            base_type: type[Component],
+            *,
+            overwrite: bool,
+            inject: bool = True,
+    ) -> str:
+        self._validate_component(component, base_type, overwrite=overwrite)
+        if inject:
+            self._inject_dependencies(component)
+            self._repoint_consumers(component)
         self.components[component.name] = component
         return component.name
 
-    def add_step(self, component: Step, overwrite=False) -> str:
-        self._validate_component(
-            component,
-            Step,
-            overwrite=overwrite,
-        )
-        self.components[component.name] = component
-        return component.name
+    def _repoint_consumers(self, replacement: Component) -> None:
+        """Hand consumers of a replaced instance the one now registered.
+
+        A consumer is wired to an instance *name*, which is unique within a
+        session, so whichever component is registered under that name is the
+        one it gets. Without this, replacing a component -- unregistering it
+        and registering a copy, or overwriting it -- would leave consumers
+        built earlier holding the instance that was taken out.
+
+        Only what `get_dependency` hands out from here on is affected. A
+        reference a consumer already stored for itself, typically in
+        `__init__`, stays where the consumer put it.
+        """
+        for consumer in self.components.values():
+            injected = consumer.__dict__.get(Component.DEPENDENCIES_ATTR)
+            if not injected:
+                continue
+            for asked, held in injected.items():
+                if (
+                        held is not replacement
+                        and getattr(held, "name", None) == replacement.name
+                ):
+                    injected[asked] = replacement
+
+    def _inject_dependencies(self, component: Component) -> None:
+        """Give a component built outside the session its prerequisites.
+
+        A component reaches the session this way when it was constructed by
+        hand, or rebuilt by unpickling it on its own -- a `Stateful`
+        component replays `__init__` from its constructor arguments, which
+        leaves nothing injected. Whatever it carries is replaced rather than
+        kept: references from another session would point at components this
+        one does not hold.
+
+        Available from `setup` onwards. A component that needs a prerequisite
+        in `__init__` must still be activated by the session.
+        """
+        component.__dict__[Component.DEPENDENCIES_ATTR] = {
+            name: self.get_resource(name, consumer=component.name)
+            for name, dependency_type in self._dependency_specs(type(component))
+            if dependency_type is Resource
+        }
 
     def _validate_component(
             self,

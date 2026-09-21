@@ -335,7 +335,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
 
     @override
     def pre_session(self, session: Session):
-        ddp_model: nn.Module = session.get_resource("ddp")
+        ddp_model: nn.Module = self.get_dependency("ddp")
         optimizer_class = _resolve_class(
             optim,
             self._optimizer_spec["name"],

@@ -74,7 +74,9 @@ class TrainedModel(Resource):
             )
 
         try:
-            model = source_session.get_resource("model")
+            # A foreign session: this session's wiring says nothing
+            # about it, so the lookup is deliberately session-wide.
+            model = source_session._components.get_resource("model")
         except KeyError as error:
             raise ValueError(
                 "Training checkpoint does not contain a resolvable 'model' resource"

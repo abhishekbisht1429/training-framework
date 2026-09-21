@@ -12,12 +12,11 @@ from torch import nn
 
 from tests.test_utils import make_config
 from training_framework.components import (
+    Component,
     ComponentDependencyError,
-    ComponentView,
     component_registry,
     ModuleResource,
     Resource,
-    constructing_component,
     requires_resource,
     resource,
 )
@@ -27,22 +26,17 @@ from training_framework.session import AnalysisSession, TrainingSession
 from training_framework.session.components import SessionComponents
 
 
-class _StubView(ComponentView):
-    """A view over a fixed set of resources, for components under test."""
+def _construct_with(component_class, config=None, **dependencies):
+    """Build a component with prerequisites injected, as a session would.
 
-    session_type = "training"
-
-    def __init__(self, resources=None):
-        self._resources = dict(resources or {})
-
-    def resolve_name(self, name):
-        return name
-
-    def has_resource(self, name):
-        return name in self._resources
-
-    def get_resource(self, name):
-        return self._resources[name]
+    Mirrors `SessionComponents._construct`: the prerequisites go into the
+    instance `__dict__` before `__init__` runs, so a component under test can
+    be built without standing up a whole session.
+    """
+    component = component_class.__new__(component_class)
+    component.__dict__[Component.DEPENDENCIES_ATTR] = dict(dependencies)
+    component.__init__(config)
+    return component
 
 
 class PicklableEncoder(ModuleResource):
@@ -186,7 +180,7 @@ def test_constructing_a_dependent_component_by_hand_is_rejected():
         Handmade({})
 
 
-def test_a_stub_view_is_enough_to_construct_a_component_under_test():
+def test_injected_prerequisites_are_enough_to_construct_a_component():
     _declare_encoder_and_model()
 
     @requires_resource("mr_encoder")
@@ -197,8 +191,7 @@ def test_a_stub_view_is_enough_to_construct_a_component_under_test():
             self.mr_encoder = self.get_dependency("mr_encoder")
 
     encoder = PicklableEncoder({})
-    with constructing_component(_StubView({"mr_encoder": encoder})):
-        stubbed = Stubbed({})
+    stubbed = _construct_with(Stubbed, {}, mr_encoder=encoder)
 
     assert stubbed.mr_encoder is encoder
 
@@ -346,8 +339,9 @@ def test_a_privately_owned_component_with_prerequisites_is_rejected():
     _, model_class = _declare_encoder_and_model()
 
     # mr_model declares a prerequisite, so only the session can wire it.
-    with constructing_component(_StubView({"mr_encoder": PicklableEncoder({})})):
-        dependent = model_class({})
+    dependent = _construct_with(
+        model_class, {}, mr_encoder=PicklableEncoder({}),
+    )
 
     @resource("mr_dependent_owner")
     class Owner(ModuleResource):

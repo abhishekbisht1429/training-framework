@@ -9,6 +9,7 @@ import time
 import pytest
 import torch
 
+from training_framework.components import Step, requires_resource, step
 from training_framework.session import TrainingSession
 
 
@@ -308,3 +309,43 @@ def test_data_manager_stops_worker_processes_during_teardown(tmp_path):
         time.sleep(0.05)
 
     assert not _process_exists(worker_pid)
+
+
+def test_data_manager_builds_over_the_dataset_instance_it_is_wired_to(tmp_path):
+    """The reported failure, through a built-in.
+
+    Two dataset instances, a session-wide binding to the small one, and
+    data_manager wired to the large one. A data_manager that looked its
+    dataset up session-wide built its DataLoader over the small one while the
+    execution graph claimed the large one -- a run that trains, and is wrong.
+    """
+    _register_integration_components()
+    drawn = []
+
+    @requires_resource("data_manager")
+    @step("dm_wiring_probe")
+    class Probe(Step):
+        def run(self, session) -> None:
+            batch = next(self.get_dependency("data_manager").data_iter)
+            drawn.extend(batch[:, 0].tolist())
+
+    config = _data_manager_config(tmp_path, batch_size=2)
+    config["session_config"]["max_iterations"] = 4
+    del config["integration_worker_dataset"]
+    config["integration_worker_dataset#small"] = {"dataset_size": 4}
+    config["integration_worker_dataset#large"] = {"dataset_size": 8}
+    config["component_bindings"] = {
+        "ddp": "integration_data_context",
+        "dataset": "integration_worker_dataset#small",
+        "data_manager": {"dataset": "integration_worker_dataset#large"},
+    }
+    config["dm_wiring_probe"] = {}
+    session = TrainingSession(config)
+    session.unregister_hook("logger")
+    session.unregister_hook("checkpointer")
+
+    with session:
+        assert list(session) == [1, 2, 3, 4]
+
+    # One full pass over eight samples, not two passes over four.
+    assert sorted(drawn) == list(range(8))

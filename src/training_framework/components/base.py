@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from training_framework.components.naming import parse_instance_name
@@ -33,63 +31,6 @@ class ComponentMeta(CaptureInitMeta):
 
 class ComponentDependencyError(RuntimeError):
     """A component could not be wired to its prerequisite components."""
-
-
-class ComponentView(ABC):
-    """Narrow, session-free view of the components constructed so far.
-
-    Bound while a component is being constructed. It deliberately exposes
-    only component lookup: there is no session, no device, and no iteration
-    context during construction.
-    """
-
-    @property
-    @abstractmethod
-    def session_type(self) -> str:
-        """Return the session type the components belong to."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def resolve_name(self, name: str) -> str:
-        """Return the implementation name a role name is bound to."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def has_resource(self, name: str) -> bool:
-        """Return whether a resource is active under ``name``."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_resource(self, name: str) -> "Resource":
-        """Return the active resource registered or bound to ``name``."""
-        raise NotImplementedError
-
-
-_COMPONENT_VIEW: ContextVar["ComponentView | None"] = ContextVar(
-    "training_framework_component_view",
-    default=None,
-)
-
-
-@contextmanager
-def constructing_component(view: "ComponentView | None"):
-    """Bind the dependency view visible to a component being constructed.
-
-    Components are constructed prerequisite-first, so by the time a
-    constructor runs every component it declared already exists. The view is
-    bound rather than passed so that ``_init_args`` stays plain configuration
-    and the config-free activation policy keeps working.
-    """
-    token = _COMPONENT_VIEW.set(view)
-    try:
-        yield
-    finally:
-        _COMPONENT_VIEW.reset(token)
-
-
-def active_component_view() -> "ComponentView | None":
-    """Return the view bound for the component currently being constructed."""
-    return _COMPONENT_VIEW.get()
 
 
 class Component(ABC, metaclass=ComponentMeta):
@@ -180,29 +121,71 @@ class Component(ABC, metaclass=ComponentMeta):
             self.__dict__["_linked_components_map"] = linked
         return linked
 
-    def get_dependency(self, name: str) -> "Resource":
-        """Return a prerequisite resource. Valid only during construction.
+    DEPENDENCIES_ATTR = "_injected_dependencies"
+    """Instance ``__dict__`` key holding the injected prerequisites."""
 
-        Components are constructed prerequisite-first, so a component may ask
-        for anything it declared via ``@requires_resource``. There is no
-        session yet: no device, no iteration context, and no
-        ``@requires_context`` access. Work needing those belongs in
-        :meth:`Resource.setup`.
+    @property
+    def _dependencies(self) -> dict[str, "Resource"]:
+        """Return the prerequisites the session injected, by declared name.
+
+        Written into the instance ``__dict__`` by
+        ``SessionComponents._construct`` *before* ``__init__`` runs, so a
+        constructor may use them and an ``nn.Module`` subclass needs no
+        ``nn.Module.__init__`` to have run first. Writing through
+        ``__dict__`` also bypasses ``nn.Module.__setattr__``, so a
+        prerequisite module is not registered as a submodule of its consumer.
+        """
+        injected = self.__dict__.get(self.DEPENDENCIES_ATTR)
+        return {} if injected is None else injected
+
+    def __getstate__(self) -> Any:
+        """Leave injected prerequisites out of a component's own pickle.
+
+        They belong to the session that injected them. A component pickled on
+        its own -- rather than as part of a session, which rebuilds its
+        components through construction -- would otherwise carry copies of
+        other components, and registering it into a session replaces them
+        anyway.
+
+        Cooperative, so `Stateful`'s reconstruction envelope, which follows
+        `Component` in the MRO of every stateful component, still decides
+        what a stateful component pickles.
+        """
+        state = super().__getstate__()
+        if isinstance(state, dict) and self.DEPENDENCIES_ATTR in state:
+            state = dict(state)
+            del state[self.DEPENDENCIES_ATTR]
+        return state
+
+    def get_dependency(self, name: str) -> "Resource":
+        """Return a prerequisite resource declared with ``@requires_resource``.
+
+        Valid at any point in a component's life. Prerequisites are resolved
+        for *this* consumer -- honouring its own ``component_bindings`` wiring
+        -- and injected before ``__init__`` runs, so construction, ``setup``
+        and a running step all see the same instance.
 
         What is handed out is recorded, so the framework knows this component
         was wired to another one wherever the caller puts the reference --
         an attribute, a container module, or nowhere at all.
         """
-        view = active_component_view()
-        if view is None:
+        injected = self.__dict__.get(self.DEPENDENCIES_ATTR)
+        if injected is None:
             raise ComponentDependencyError(
-                f"{self._component_name()} requested resource '{name}' while "
-                "no component view is bound. A component that declares "
+                f"{self._component_name()} requested resource '{name}' but "
+                "was given no prerequisites. A component that declares "
                 "dependencies must be activated by the session -- through "
                 "configuration or Session.activate_component() -- rather than "
                 "constructed directly."
             )
-        component = view.get_resource(name)
+        if name not in injected:
+            declared = ", ".join(sorted(injected)) or "nothing"
+            raise ComponentDependencyError(
+                f"{self._component_name()} requested resource '{name}' but "
+                f"does not declare it. Add @requires_resource('{name}') so it "
+                f"is constructed first. Declared: {declared}."
+            )
+        component = injected[name]
         self._linked_components[name] = component
         return component
 
@@ -221,11 +204,8 @@ class Component(ABC, metaclass=ComponentMeta):
         }
 
     def has_dependency(self, name: str) -> bool:
-        """Return whether a declared prerequisite is active."""
-        view = active_component_view()
-        if view is None:
-            return False
-        return view.has_resource(name)
+        """Return whether a declared prerequisite was injected."""
+        return name in self._dependencies
 
     @classmethod
     @abstractmethod

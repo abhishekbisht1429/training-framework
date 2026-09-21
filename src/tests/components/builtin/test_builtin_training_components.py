@@ -18,6 +18,7 @@ from training_framework.components import (
     step,
 )
 from training_framework.session import TrainingSession
+from tests.test_utils import inject_dependencies
 
 
 class FakeDistributedDataParallel(nn.Module):
@@ -492,7 +493,8 @@ def test_pickled_optimizer_state_matches_uninterrupted_training(
 def _optimizer_test_session(model, *, max_iterations, iteration_context=None):
     ddp = SimpleNamespace(wrapped_model=model)
     return SimpleNamespace(
-        get_resource=lambda name: ddp,
+        # Injects the ddp stub into the hook, as a real session would.
+        serve=lambda hook: inject_dependencies(hook, ddp=ddp),
         session_config=SimpleNamespace(max_iterations=max_iterations),
         iteration_context=(iteration_context or {}),
     )
@@ -507,6 +509,7 @@ def test_optimizer_can_be_configured_without_a_scheduler():
         },
     })
     session = _optimizer_test_session(model, max_iterations=1)
+    session.serve(hook)
     initial_weight = model.weight.detach().clone()
 
     hook.pre_session(session)
@@ -540,6 +543,7 @@ def test_optimizer_current_lrs_tracks_scheduler_while_active():
         },
     })
     session = _optimizer_test_session(model, max_iterations=2)
+    session.serve(hook)
     assert hook.current_lrs is None
 
     hook.pre_session(session)
@@ -578,6 +582,7 @@ def test_scheduler_pipeline_resolves_runtime_stage_lengths():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
+    session.serve(hook)
     hook.pre_session(session)
 
     for _ in range(5):
@@ -610,6 +615,7 @@ def test_metric_scheduler_reads_the_configured_iteration_value():
         },
     })
     session = _optimizer_test_session(model, max_iterations=2)
+    session.serve(hook)
     hook.pre_session(session)
 
     for metric in (1.0, 2.0):
@@ -636,6 +642,7 @@ def test_metric_scheduler_reports_a_missing_iteration_value():
         },
     })
     session = _optimizer_test_session(model, max_iterations=1)
+    session.serve(hook)
     hook.pre_session(session)
     session.iteration_context["loss"] = (
         model(torch.ones(1, 1)).square().sum()
@@ -658,6 +665,7 @@ def test_scheduler_milestones_are_bounded_by_the_session():
         },
     })
     session = _optimizer_test_session(model, max_iterations=2)
+    session.serve(hook)
 
     with pytest.raises(ValueError, match="less than"):
         hook.pre_session(session)
@@ -716,6 +724,7 @@ def test_optimizer_extension_rebase_scales_base_lr_by_current_multiplier():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
+    session.serve(hook)
     hook.pre_session(session)
     hook.pre_iteration_callback(session)
     session.iteration_context["loss"] = model(torch.ones(1, 1)).square().sum()
@@ -769,6 +778,7 @@ def test_optimizer_extension_lr_rebase_does_not_leak_into_a_later_scheduler_stag
     }
     hook = OptimizerHook(config)
     session = _optimizer_test_session(model, max_iterations=8)
+    session.serve(hook)
     hook.pre_session(session)
     for _ in range(2):
         hook.pre_iteration_callback(session)
@@ -813,6 +823,7 @@ def test_optimizer_extension_allows_scheduler_replacement_and_resets_progress():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
+    session.serve(hook)
     hook.pre_session(session)
     for _ in range(3):
         hook.pre_iteration_callback(session)
@@ -881,6 +892,7 @@ def test_optimizer_extension_lr_override_survives_scheduler_replacement():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
+    session.serve(hook)
     hook.pre_session(session)
     hook.post_session(session)
 
@@ -931,6 +943,7 @@ def test_optimizer_extension_clean_restart_uses_optimizer_default_lr():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
+    session.serve(hook)
     hook.pre_session(session)
     for _ in range(3):
         hook.pre_iteration_callback(session)
@@ -971,6 +984,7 @@ def test_optimizer_extension_can_add_or_remove_a_scheduler():
         "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
     })
     session = _optimizer_test_session(model, max_iterations=5)
+    session.serve(hook)
     hook.pre_session(session)
     hook.pre_iteration_callback(session)
     session.iteration_context["loss"] = model(torch.ones(1, 1)).square().sum()

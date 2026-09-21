@@ -164,10 +164,10 @@ def _stop_requested(
         stop_sync_poll_interval: float = _STOP_SYNC_POLL_INTERVAL,
 ) -> bool:
     local_stop_requested = stop_event.is_set()
-    if not session.has_resource("ddp"):
+    if not session._components.has_resource("ddp"):
         return local_stop_requested
 
-    ddp_resource = session.get_resource("ddp")
+    ddp_resource = session._components.get_resource("ddp")
     control_device = (
         session.device
         if ddp_resource.backend == "nccl"

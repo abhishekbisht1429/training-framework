@@ -145,8 +145,8 @@ class DataManager(StatefulResource):
 
     @override
     def setup(self, session: Session):
-        ddp = session.get_resource("ddp")
-        dataset = session.get_resource("dataset")
+        ddp = self.get_dependency("ddp")
+        dataset = self.get_dependency("dataset")
         dataset_size = len(dataset)
         world_size = ddp.world_size
         self._validate_setup(dataset_size, world_size)
@@ -268,7 +268,7 @@ class AnalysisDataManager(Resource):
 
     @override
     def setup(self, session: Session):
-        dataset = session.get_resource("dataset")
+        dataset = self.get_dependency("dataset")
         if len(dataset) <= 0:
             raise ValueError("DataManager requires a non-empty dataset")
         collate_fn = getattr(dataset, "collate_fn", torch.stack)

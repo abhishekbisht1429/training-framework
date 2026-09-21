@@ -20,6 +20,7 @@ from training_framework.components.builtin import (
 from training_framework.components.builtin import observability
 from training_framework.session import TrainingSession
 from training_framework.session.io import ConfigDumper
+from tests.test_utils import inject_dependencies
 
 
 class _PickleRoundTripModel(nn.Module, StatefulResource):
@@ -297,6 +298,9 @@ def test_pickled_layer_inspector_captures_matched_layer_forward_pass(tmp_path):
         iteration_context={},
     )
 
+    # An unpickled component carries no prerequisites; joining a session is
+    # what gives it them.
+    inject_dependencies(restored, trained_model=trained_model)
     restored.setup(inspection_session)
     assert restored.matched_layer_names == ("",)
 

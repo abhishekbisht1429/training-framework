@@ -84,3 +84,17 @@ def make_config(tmp_path, max_iterations=2, seed=123):
             "components_package": "training_framework.components.builtin",
         }
     }
+
+
+def inject_dependencies(component, **dependencies):
+    """Give a hand-built component the prerequisites a session would inject.
+
+    Mirrors what `SessionComponents` does when a component built outside it
+    is registered: the prerequisites go into the instance `__dict__`, where
+    `Component.get_dependency` finds them. Lets a test drive one lifecycle
+    method with a fake session and stub prerequisites.
+    """
+    from training_framework.components import Component
+
+    component.__dict__[Component.DEPENDENCIES_ATTR] = dict(dependencies)
+    return component

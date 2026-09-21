@@ -103,9 +103,9 @@ def test_ddp_stop_wait_keeps_worker_heartbeat_active(
 ):
     heartbeat_stages = []
 
-    class Session:
-        device = None
-
+    class Components:
+        # The engine asks the session's components rather than the public,
+        # deprecated Session.get_resource: it is the framework asking.
         @staticmethod
         def has_resource(name):
             return name == "ddp"
@@ -114,6 +114,10 @@ def test_ddp_stop_wait_keeps_worker_heartbeat_active(
         def get_resource(name):
             assert name == "ddp"
             return SimpleNamespace(backend="gloo")
+
+    class Session:
+        device = None
+        _components = Components
 
         @staticmethod
         def send_heartbeat(stage):

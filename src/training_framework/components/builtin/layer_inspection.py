@@ -179,7 +179,7 @@ class LayerInspector(Resource):
         return any(pattern.search(name) for pattern in self._name_patterns)
 
     def setup(self, session: "Session") -> None:
-        model = session.get_resource("trained_model").model
+        model = self.get_dependency("trained_model").model
         matched = {
             name: module
             for name, module in model.named_modules()

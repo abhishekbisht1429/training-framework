@@ -15,6 +15,7 @@ from training_framework.components import (
 )
 from training_framework.components.builtin import LayerInspector
 from training_framework.session import AnalysisSession, TrainingSession
+from tests.test_utils import inject_dependencies
 
 
 class _AttentionBlock(nn.Module):
@@ -82,15 +83,16 @@ class _FakeTrainedModel:
 
 class _FakeSession:
     """Minimal stand-in for Session, enough for LayerInspector's own
-    lifecycle: `get_resource("trained_model")` and `iteration_context`."""
+    lifecycle: `iteration_context`, plus the `trained_model` it serves to
+    the inspector through `serve`."""
 
     def __init__(self, model):
         self._trained_model = _FakeTrainedModel(model)
         self._shared_state: dict = {}
 
-    def get_resource(self, name):
-        assert name == "trained_model"
-        return self._trained_model
+    def serve(self, inspector):
+        """Inject this session's trained model, as a real session would."""
+        return inject_dependencies(inspector, trained_model=self._trained_model)
 
     @property
     def iteration_context(self):
@@ -197,6 +199,7 @@ def test_layer_inspector_selects_union_of_name_and_type_matches_without_duplicat
         ],
     })
     session = _FakeSession(model)
+    session.serve(inspector)
 
     inspector.setup(session)
     try:
@@ -212,6 +215,7 @@ def test_layer_inspector_exposes_selected_layers_for_weight_inspection():
         "name_patterns": [r"^attention$", r"^projection$"],
     })
     session = _FakeSession(model)
+    session.serve(inspector)
     assert dict(inspector.layers) == {}
 
     inspector.setup(session)
@@ -238,6 +242,7 @@ def test_layer_inspector_raises_when_no_layer_matches():
     model = _InspectionModel({})
     inspector = LayerInspector({"name_patterns": [r"^no_such_layer$"]})
     session = _FakeSession(model)
+    session.serve(inspector)
 
     with pytest.raises(ValueError, match="matched no layers"):
         inspector.setup(session)
@@ -250,6 +255,7 @@ def test_last_capture_returns_latest_call_none_or_rejects_unknown_layer():
         "name_patterns": [r"^attention$", r"^projection$"],
     })
     session = _FakeSession(model)
+    session.serve(inspector)
     inspector.setup(session)
     try:
         assert inspector.last_capture("attention") is None
@@ -271,6 +277,7 @@ def test_layer_inspector_captures_input_args_kwargs_and_output_per_forward_pass(
     model = _InspectionModel({})
     inspector = LayerInspector({"name_patterns": [r"^attention$"]})
     session = _FakeSession(model)
+    session.serve(inspector)
     inspector.setup(session)
     try:
         mask = torch.tensor(0.5)
@@ -293,6 +300,7 @@ def test_layer_inspector_accumulates_multiple_forward_passes_within_one_iteratio
     model = _InspectionModel({})
     inspector = LayerInspector({"name_patterns": [r"^attention$"]})
     session = _FakeSession(model)
+    session.serve(inspector)
     inspector.setup(session)
     try:
         model(torch.tensor(1.0))
@@ -309,6 +317,7 @@ def test_layer_inspector_removes_hooks_on_teardown():
     model = _InspectionModel({})
     inspector = LayerInspector({"name_patterns": [r"^attention$"]})
     session = _FakeSession(model)
+    session.serve(inspector)
     inspector.setup(session)
 
     inspector.teardown(session)
@@ -324,6 +333,7 @@ def test_layer_inspector_rolls_back_partial_hook_registration_on_setup_failure(
         "name_patterns": [r"^attention$", r"^projection$"],
     })
     session = _FakeSession(model)
+    session.serve(inspector)
 
     def failing_register(self, *args, **kwargs):
         raise RuntimeError("registration failed")
