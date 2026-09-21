@@ -510,7 +510,9 @@ class ComponentBindings:
         return self._session_type
 
     def __bool__(self) -> bool:
-        return bool(self._bindings)
+        # Per-consumer wiring is wiring too: a session wired only that way
+        # still has bindings to show.
+        return bool(self._bindings) or bool(self._instance_bindings)
 
     def __setstate__(self, state) -> None:
         legacy_bindings = state.pop("_aliases", None)

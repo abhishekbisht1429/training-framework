@@ -132,7 +132,10 @@ evaluator: {}
 `evaluator` is built with `data_manager#validation`; every other consumer of
 `data_manager` resolves on its own. A target that names an instance must be
 configured: wiring to `data_manager#valdation` is an error naming the
-configured instances, never a fresh instance and never a sibling. The wiring lives here rather than inside
+configured instances, never a fresh instance and never a sibling. The
+execution graph lists this wiring under `COMPONENT BINDINGS` as
+`evaluator: data_manager -> data_manager#validation`, and each `requires:`
+annotation names the instance that component is actually given. The wiring lives here rather than inside
 `evaluator`'s own configuration because a component's configuration is passed
 to its constructor unchanged, and because the session has to know how things
 are wired before anything is constructed. The flat

@@ -388,6 +388,14 @@ def render_execution_graph(
         key=lambda component: order[component.id],
     )
 
+    # Annotations resolve each dependency for the component that declared it,
+    # to the instance it is actually given -- the same way the sort does --
+    # so per-consumer wiring is shown as wired.
+    nodes_by_name = {
+        component.name: component
+        for component in [*ordered_resources, *ordered_hooks, *ordered_steps]
+    }
+
     session_hooks = [
         component
         for component in ordered_hooks
@@ -412,6 +420,12 @@ def render_execution_graph(
             for role_name, implementation_name
             in binding_resolver.bindings.items()
         )
+        lines.extend(
+            f"  {consumer}: {role_name} -> {target}"
+            for consumer, wiring
+            in binding_resolver.instance_bindings.items()
+            for role_name, target in wiring.items()
+        )
     lines.extend([
         "",
         "START",
@@ -424,6 +438,7 @@ def render_execution_graph(
         [(component, "setup") for component in ordered_resources]
         + [(component, "pre_session") for component in session_hooks],
         binding_resolver,
+        nodes_by_name,
     )
 
     lines.extend([
@@ -440,6 +455,7 @@ def render_execution_graph(
             for component in iteration_hooks
         ],
         binding_resolver,
+        nodes_by_name,
     )
 
     lines.extend([
@@ -451,6 +467,7 @@ def render_execution_graph(
         "  |   |   ",
         [(component, "run") for component in ordered_steps],
         binding_resolver,
+        nodes_by_name,
     )
 
     lines.extend([
@@ -465,6 +482,7 @@ def render_execution_graph(
             for component in reversed(iteration_hooks)
         ],
         binding_resolver,
+        nodes_by_name,
     )
 
     lines.extend([
@@ -477,6 +495,7 @@ def render_execution_graph(
         [(component, "post_session") for component in reversed(session_hooks)]
         + [(component, "teardown") for component in reversed(ordered_resources)],
         binding_resolver,
+        nodes_by_name,
     )
     lines.extend([
         "  |",
@@ -485,17 +504,27 @@ def render_execution_graph(
     return "\n".join(lines)
 
 
-def _append_execution_calls(lines, prefix, calls, binding_resolver) -> None:
+def _append_execution_calls(
+        lines,
+        prefix,
+        calls,
+        binding_resolver,
+        nodes_by_name,
+) -> None:
     if not calls:
         lines.append(f"{prefix}(none)")
         return
 
     for index, (component, method_name) in enumerate(calls, start=1):
         annotations = []
-        requirements = _component_requirements(component, binding_resolver)
+        requirements = _component_requirements(
+            component, binding_resolver, nodes_by_name,
+        )
         if requirements:
             annotations.append(f"requires: {', '.join(requirements)}")
-        wrapped_hooks = _component_wrapped_hooks(component, binding_resolver)
+        wrapped_hooks = _component_wrapped_hooks(
+            component, binding_resolver, nodes_by_name,
+        )
         if wrapped_hooks:
             annotations.append(f"wraps: {', '.join(wrapped_hooks)}")
         if method_name in {
@@ -512,26 +541,52 @@ def _append_execution_calls(lines, prefix, calls, binding_resolver) -> None:
         )
 
 
-def _component_requirements(component, binding_resolver) -> list[str]:
-    return (
-        [
-            f"Resource.{binding_resolver.resolve(name)}"
-            for name in getattr(component, "required_resources", ())
-        ]
-        + [
-            f"Hook.{binding_resolver.resolve(name)}"
-            for name in getattr(component, "required_hooks", ())
-        ]
-        + [
-            f"Step.{binding_resolver.resolve(name)}"
-            for name in getattr(component, "required_steps", ())
-        ]
+def _dependency_display_name(binding_resolver, nodes_by_name, consumer, name):
+    """Name the instance `consumer` is given for `name`, as the sort decides."""
+    resolved_name, node = _resolve_to_node(
+        binding_resolver,
+        nodes_by_name,
+        consumer,
+        name,
     )
+    return resolved_name if node is None else node.name
 
 
-def _component_wrapped_hooks(component, binding_resolver) -> list[str]:
+def _component_requirements(
+        component,
+        binding_resolver,
+        nodes_by_name,
+) -> list[str]:
     return [
-        f"Hook.{binding_resolver.resolve(name)}"
+        f"{category}."
+        + _dependency_display_name(
+            binding_resolver,
+            nodes_by_name,
+            component,
+            name,
+        )
+        for attribute, category in (
+            ("required_resources", "Resource"),
+            ("required_hooks", "Hook"),
+            ("required_steps", "Step"),
+        )
+        for name in getattr(component, attribute, ())
+    ]
+
+
+def _component_wrapped_hooks(
+        component,
+        binding_resolver,
+        nodes_by_name,
+) -> list[str]:
+    return [
+        "Hook."
+        + _dependency_display_name(
+            binding_resolver,
+            nodes_by_name,
+            component,
+            name,
+        )
         for name in getattr(component, "wrapped_hooks", ())
     ]
 

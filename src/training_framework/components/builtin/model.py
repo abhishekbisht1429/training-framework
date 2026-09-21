@@ -4,7 +4,11 @@ import os
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
-from training_framework.components import Resource, resource
+from training_framework.components import (
+    ComponentDependencyError,
+    Resource,
+    resource,
+)
 from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.util import requires_context
 
@@ -77,7 +81,9 @@ class TrainedModel(Resource):
             # A foreign session: this session's wiring says nothing
             # about it, so the lookup is deliberately session-wide.
             model = source_session._components.get_resource("model")
-        except KeyError as error:
+        except (KeyError, ComponentDependencyError) as error:
+            # Missing, or several instances with nothing to choose between
+            # them: either way the checkpoint names no single model.
             raise ValueError(
                 "Training checkpoint does not contain a resolvable 'model' resource"
             ) from error
