@@ -47,14 +47,6 @@ class _PickleRoundTripModel(nn.Module, StatefulResource):
             self.weight.copy_(state["weight"])
 
 
-class _StubAnalysisSession(SimpleNamespace):
-    """Enough of Session for LayerInspector's own lifecycle to run against."""
-
-    def get_resource(self, name):
-        assert name == "trained_model"
-        return self.trained_model
-
-
 def _session_config(tmp_path):
     return {
         "rng_seed": 17,
@@ -293,10 +285,8 @@ def test_pickled_layer_inspector_captures_matched_layer_forward_pass(tmp_path):
     restored = pickle.loads(pickle.dumps(LayerInspector({
         "name_patterns": [r"^$"],  # the root module itself
     })))
-    inspection_session = _StubAnalysisSession(
-        trained_model=trained_model,
-        iteration_context={},
-    )
+    # Enough of Session for LayerInspector's own lifecycle to run against.
+    inspection_session = SimpleNamespace(iteration_context={})
 
     # An unpickled component carries no prerequisites; joining a session is
     # what gives it them.
