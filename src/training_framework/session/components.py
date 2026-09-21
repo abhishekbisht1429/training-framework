@@ -13,6 +13,7 @@ from training_framework.components import (
     Stateful,
     Step,
 )
+from training_framework.components.base import _DEPENDENCIES_KEYWORD
 from training_framework.components.config import (
     reject_legacy_components_entry,
     reserved_config_names,
@@ -292,17 +293,24 @@ class SessionComponents:
         sole instance" could be sole only because its sibling is not built
         yet.
 
-        The prerequisites are written into the instance `__dict__` before
-        `__init__` runs, so a constructor can use them, an `nn.Module`
-        subclass needs no `nn.Module.__init__` to have run first, and a
-        prerequisite module is not registered as a submodule of its consumer.
+        Construction goes through the class call, so a custom `__new__` and
+        the metaclass `__call__` behave as they would anywhere else;
+        `ComponentMeta.__call__` writes the prerequisites into the instance
+        `__dict__` before `__init__` runs, so a constructor can use them, an
+        `nn.Module` subclass needs no `nn.Module.__init__` to have run first,
+        and a prerequisite module is not registered as a submodule of its
+        consumer.
         """
-        component = component_class.__new__(component_class)
-        component.__dict__[Component.DEPENDENCIES_ATTR] = {
-            asked: self.components[target]
-            for asked, target in (dependencies or {}).items()
-        }
-        component.__init__(*args, **kwargs)
+        component = component_class(
+            *args,
+            **{
+                _DEPENDENCIES_KEYWORD: {
+                    asked: self.components[target]
+                    for asked, target in (dependencies or {}).items()
+                },
+            },
+            **kwargs,
+        )
         self._stamp_identity(component, instance_name)
         return component
 

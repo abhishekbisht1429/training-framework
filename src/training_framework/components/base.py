@@ -9,8 +9,36 @@ if TYPE_CHECKING:
     from training_framework.session.base import Session
 
 
+_DEPENDENCIES_ATTR = "_injected_dependencies"
+"""Instance ``__dict__`` key holding a component's injected prerequisites."""
+
+_DEPENDENCIES_KEYWORD = "__training_framework_dependencies__"
+"""Private keyword carrying prerequisites into a component's construction."""
+
+
 class ComponentMeta(CaptureInitMeta):
     """Apply component lifecycle behavior to class-local overrides."""
+
+    def __call__(cls, *args, **kwargs):
+        """Construct a component, handing it its prerequisites first.
+
+        The session passes them under a private keyword. They are written into
+        the instance after ``__new__`` and before ``__init__`` -- so a
+        constructor can use them -- and otherwise construction is what
+        ``type.__call__`` does: ``__new__`` receives the arguments, and
+        ``__init__`` runs only when ``__new__`` returned an instance of the
+        class. A metaclass that overrides ``__call__`` and defers to ``super()``
+        passes the keyword through untouched. ``__init__`` never sees it, so
+        the captured constructor arguments stay plain configuration.
+        """
+        if _DEPENDENCIES_KEYWORD not in kwargs:
+            return super().__call__(*args, **kwargs)
+        dependencies = kwargs.pop(_DEPENDENCIES_KEYWORD)
+        instance = cls.__new__(cls, *args, **kwargs)
+        if isinstance(instance, cls):
+            instance.__dict__[_DEPENDENCIES_ATTR] = dependencies
+            type(instance).__init__(instance, *args, **kwargs)
+        return instance
 
     def __new__(mcls, name, bases, namespace):
         cls = super().__new__(mcls, name, bases, namespace)
@@ -137,7 +165,7 @@ class Component(ABC, metaclass=ComponentMeta):
             self.__dict__["_linked_components_map"] = linked
         return linked
 
-    DEPENDENCIES_ATTR = "_injected_dependencies"
+    DEPENDENCIES_ATTR = _DEPENDENCIES_ATTR
     """Instance ``__dict__`` key holding the injected prerequisites."""
 
     @property
