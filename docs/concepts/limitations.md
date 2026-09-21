@@ -62,7 +62,7 @@ The engine builds the session before spawning workers, so a model's weights are 
 
 ### A component that uses a dependency in its constructor cannot be constructed by hand
 
-The session hands a component its prerequisites. One built by hand and registered with `register_resource()`, `register_hook()` or `add_step()` receives them on registration, so it can use them from `setup` onwards -- but not in its own `__init__`, which has already run. A component whose constructor calls `get_dependency` must be activated by the session, through configuration or `session.activate_component(name, config)`. Replacing a registered component hands its consumers the new instance on their next `get_dependency` call; a reference a consumer already stored for itself is not updated.
+The session hands a component its prerequisites. One built by hand and registered with `register_resource()`, `register_hook()` or `add_step()` receives them on registration, so it can use them from `setup` onwards -- but not in its own `__init__`, which has already run. A component whose constructor calls `get_dependency` must be activated by the session, through configuration or `session.activate_component(name, config)`. A registered component cannot be removed or replaced once a consumer has been handed it -- in its constructor, in `setup`, or later -- because a reference the consumer stored for itself cannot be updated. Replace it before anything takes it, or build a new session.
 
 ### An ambiguous dependency is an error, not a choice
 

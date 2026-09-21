@@ -194,6 +194,14 @@ class Component(ABC, metaclass=ComponentMeta):
                 "configuration or Session.activate_component() -- rather than "
                 "constructed directly."
             )
+        if name not in injected and name in getattr(
+                type(self), "required_resources", (),
+        ):
+            raise ComponentDependencyError(
+                f"{self._component_name()} requested resource '{name}', which "
+                "it declares but which is no longer in its session: it was "
+                "removed and nothing has been registered in its place."
+            )
         if name not in injected:
             declared = ", ".join(sorted(injected)) or "nothing"
             raise ComponentDependencyError(

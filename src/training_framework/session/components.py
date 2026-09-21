@@ -972,6 +972,9 @@ class SessionComponents:
             inject: bool = True,
     ) -> str:
         self._validate_component(component, base_type, overwrite=overwrite)
+        existing = self.components.get(component.name)
+        if existing is not None and existing is not component:
+            self._refuse_if_held(existing, "replace")
         if inject:
             self._check_instance_limits(
                 set(self.components) | {component.name},
@@ -981,28 +984,67 @@ class SessionComponents:
         self.components[component.name] = component
         return component.name
 
-    def _repoint_consumers(self, replacement: Component) -> None:
-        """Hand consumers of a replaced instance the one now registered.
+    def _holders_of(self, instance: Component) -> list[tuple[str, str]]:
+        """Return `(consumer, asked name)` for every consumer that has been
+        handed `instance` -- in `__init__`, `setup` or later."""
+        return sorted(
+            (consumer.name, asked)
+            for consumer in self.components.values()
+            if consumer is not instance
+            for asked, held in consumer._linked_components.items()
+            if held is instance
+        )
 
-        A consumer is wired to an instance *name*, which is unique within a
-        session, so whichever component is registered under that name is the
-        one it gets. Without this, replacing a component -- unregistering it
-        and registering a copy, or overwriting it -- would leave consumers
-        built earlier holding the instance that was taken out.
+    def _refuse_if_held(self, instance: Component, action: str) -> None:
+        """Refuse to take out an instance a consumer already holds.
 
-        Only what `get_dependency` hands out from here on is affected. A
-        reference a consumer already stored for itself, typically in
-        `__init__`, stays where the consumer put it.
+        A consumer may have kept the reference wherever it liked -- an
+        attribute, a container module -- and nothing can reach it there. Taking
+        the instance out would leave that consumer using a component the
+        session no longer sets up, tears down or checkpoints, and, after a
+        replacement, holding one instance while `get_dependency` returns
+        another.
         """
+        holders = self._holders_of(instance)
+        if holders:
+            held_by = ", ".join(
+                f"'{consumer}' (as '{asked}')" for consumer, asked in holders
+            )
+            raise ValueError(
+                f"Cannot {action} '{instance.name}': it has already been "
+                f"handed to {held_by}. Replace or remove a component before "
+                "anything takes it, or rebuild the session."
+            )
+
+    def _repoint_consumers(self, replacement: Component) -> None:
+        """Give consumers wired to `replacement`'s name the new instance.
+
+        Only reached when none of them has been handed the instance being
+        replaced (see `_refuse_if_held`), so there is no saved reference that
+        could disagree with what `get_dependency` returns from here on. This
+        also restores a prerequisite dropped by an earlier removal.
+        """
+        active = set(self.components) | {replacement.name}
         for consumer in self.components.values():
-            injected = consumer.__dict__.get(Component.DEPENDENCIES_ATTR)
-            if not injected:
+            if consumer is replacement:
                 continue
-            for asked, held in injected.items():
-                if (
-                        held is not replacement
-                        and getattr(held, "name", None) == replacement.name
-                ):
+            injected = consumer.__dict__.get(Component.DEPENDENCIES_ATTR)
+            if injected is None:
+                continue
+            for asked, dependency_type in self._dependency_specs(
+                    type(consumer),
+            ):
+                if dependency_type is not Resource:
+                    continue
+                try:
+                    target = self.resolve_dependency(
+                        asked,
+                        consumer=consumer.name,
+                        active=active,
+                    )
+                except ComponentDependencyError:
+                    continue
+                if target == replacement.name:
                     injected[asked] = replacement
 
     def _inject_dependencies(self, component: Component) -> None:
@@ -1098,7 +1140,20 @@ class SessionComponents:
             raise ValueError(
                 f"{kind} '{name}' not registered with current session!"
             )
+        self._refuse_if_held(component, "remove")
         del self.components[registered_name]
+        # Nobody holds it, so dropping it from the consumers' prerequisites is
+        # all it takes for get_dependency to stop handing out an object the
+        # session no longer owns. A later registration under the name puts
+        # it back.
+        for consumer in self.components.values():
+            injected = consumer.__dict__.get(Component.DEPENDENCIES_ATTR)
+            if not injected:
+                continue
+            for asked in [
+                asked for asked, held in injected.items() if held is component
+            ]:
+                del injected[asked]
 
     def get_resource(self, name: str, *, consumer: str | None = None) -> Resource:
         registered_name = self.resolve_dependency(name, consumer=consumer)

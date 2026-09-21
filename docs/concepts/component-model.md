@@ -108,8 +108,11 @@ construct yourself and hand to `session.register_resource()` /
 registered, so they are available from `setup` onwards. Only a component that
 calls `get_dependency` in its own `__init__` must be built by the session;
 constructing one by hand raises `ComponentDependencyError` pointing at
-`activate_component`. Registering a component under a name that consumers are
-already wired to -- replacing it -- hands them the new one.
+`activate_component`. A component can be replaced or removed only until some
+consumer has been handed it: after that the consumer may be holding the
+reference anywhere, so taking it out would leave that consumer with an object
+the session no longer runs. The error names the consumer. Before that point,
+registering a replacement gives consumers the new instance.
 
 ### There is no session-wide lookup
 
