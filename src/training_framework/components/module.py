@@ -169,6 +169,12 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
     def _check_linked_components(self, state: Mapping[str, Any]) -> None:
         """Reject state captured by a differently wired instance.
 
+        Compared with what this instance was *given*, not with what it has
+        asked for so far: `set_state` runs before `setup`, so a component that
+        takes its prerequisite in `setup` has asked for nothing yet, while its
+        wiring is already fixed by construction. Every recorded link must be a
+        prerequisite this instance was given, resolving to the same instance.
+
         Version 2 records `asked name -> instance name`. A state written
         before instances were named holds the registered name there, which is
         the instance name of a component with no instance suffix, so it still
@@ -177,15 +183,21 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
         values alone.
         """
         stored = dict(state.get("linked", {}))
-        current = self.linked_components
+        given = {
+            asked: getattr(component, "name", type(component).__name__)
+            for asked, component in self._dependencies.items()
+        }
         if state.get("version", 1) < 2:
-            matches = sorted(stored.values()) == sorted(current.values())
+            matches = set(stored.values()) <= set(given.values())
         else:
-            matches = stored == current
+            matches = all(
+                given.get(asked) == instance
+                for asked, instance in stored.items()
+            )
         if not matches:
             raise ValueError(
                 f"{self._component_name()} was checkpointed with linked "
-                f"components {stored} but is now linked to {current}"
+                f"components {stored} but is now wired to {given}"
             )
 
     def set_state(self, state: Mapping[str, Any] | None) -> None:

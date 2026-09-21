@@ -1227,10 +1227,11 @@ class SessionComponents:
         )
 
     def _any_component_attaches_components(self) -> bool:
-        # Instance level: what a component was actually handed is only known
-        # once it has been constructed. Every caller runs after construction.
+        # What a component was given, not what it has asked for yet: this
+        # decides restore order before `setup` has run, and a component may
+        # take its prerequisite in `setup` -- or in `set_state` itself.
         return any(
-            component._linked_components
+            component._dependencies
             for component in self.components.values()
         )
 

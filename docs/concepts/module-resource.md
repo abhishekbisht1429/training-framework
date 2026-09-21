@@ -91,11 +91,11 @@ the value is the registered name of the implementation that filled it.
 
 The map does three jobs: it says which tensors belong to someone else, it tells
 the ownership walk which subtrees to skip, and it is saved in the checkpoint
-under `linked`, alongside `version: 2`. `set_state` compares the saved map
-against the current one and refuses state captured from a differently wired
-instance -- a component whose constructor asks for different prerequisites than
-it did when the checkpoint was written, or state moved between instances by
-hand. A `version: 1` state is keyed by the attribute a child was attached
+under `linked`, alongside `version: 2`. `set_state` checks every saved link
+against the prerequisites this instance was *given* -- not the ones it has
+asked for so far, since `set_state` runs before `setup` and a component may
+take its prerequisite there -- and refuses state captured from a differently
+wired instance, such as state moved between instances by hand. A `version: 1` state is keyed by the attribute a child was attached
 under, which no longer exists, so it is compared on the implementation names
 alone. It is not a
 configuration guard: a restore rebuilds components from the checkpoint's own
