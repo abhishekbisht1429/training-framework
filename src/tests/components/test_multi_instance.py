@@ -81,18 +81,6 @@ def test_every_instance_may_be_suffixed(tmp_path):
     assert session._components.components["multi_dep#b"].tag == "b"
 
 
-def test_instances_are_separate_nodes_in_the_graph(tmp_path):
-    declare_dependency()
-    config = make_config(tmp_path / "graph-nodes")
-    config["multi_dep#a"] = {"tag": "a"}
-    config["multi_dep#b"] = {"tag": "b"}
-
-    order = TrainingSession(config)._components._component_order()
-
-    assert "Resource.multi_dep#a" in order
-    assert "Resource.multi_dep#b" in order
-
-
 def test_each_instance_keeps_its_own_state(tmp_path):
     declare_dependency()
     config = make_config(tmp_path / "separate-state")
@@ -162,6 +150,7 @@ def test_an_undecidable_dependency_is_rejected(tmp_path):
 
     message = str(error.value)
     assert "multi_dep#a" in message and "multi_dep#b" in message
+    assert "component_bindings" in message
 
 
 def test_ambiguity_is_reported_whatever_the_configuration_order(tmp_path):
@@ -191,7 +180,9 @@ def test_a_consumer_may_name_the_instance_it_wants(tmp_path):
 
     session = TrainingSession(config)
 
-    assert session._components.components["multi_consumer"].dependency.tag == "b"
+    consumer = session._components.components["multi_consumer"]
+    assert consumer.dependency.tag == "b"
+    assert consumer.linked_components == {"multi_dep": "multi_dep#b"}
 
 
 # -- components that must stay unique -------------------------------------

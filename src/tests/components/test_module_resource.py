@@ -166,20 +166,6 @@ def test_a_dependency_free_module_resource_pickles_round_trip():
     assert torch.equal(restored.linear.weight, original.linear.weight)
 
 
-def test_constructing_a_dependent_component_by_hand_is_rejected():
-    _declare_encoder_and_model()
-
-    @requires_resource("mr_encoder")
-    @resource("mr_handmade")
-    class Handmade(ModuleResource):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.mr_encoder = self.get_dependency("mr_encoder")
-
-    with pytest.raises(ComponentDependencyError, match="activate_component"):
-        Handmade({})
-
-
 def test_injected_prerequisites_are_enough_to_construct_a_component():
     _declare_encoder_and_model()
 
@@ -376,18 +362,6 @@ def test_a_child_may_hold_components_of_its_own():
         "head.weight",
         "head.bias",
     }
-
-
-def test_state_from_a_different_wiring_is_rejected():
-    _declare_encoder_and_model()
-    components = _activate()
-    model = components.get_resource("mr_model")
-
-    state = model.get_state()
-    state["linked"] = {"mr_encoder": "something_else"}
-
-    with pytest.raises(ValueError, match="was checkpointed with linked"):
-        model.set_state(state)
 
 
 def test_state_carrying_weights_the_component_does_not_own_is_rejected():

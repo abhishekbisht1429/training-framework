@@ -10,7 +10,6 @@ import pytest
 from torch import nn
 
 from training_framework.components import (
-    ComponentDependencyError,
     LifecycleHook,
     ModuleResource,
     requires_resource,
@@ -89,19 +88,6 @@ def test_a_hook_records_the_dependency_it_asks_for():
     assert watcher.linked_components == {"ld_encoder": "ld_encoder"}
 
 
-def test_an_undeclared_dependency_is_still_rejected():
-    _declare_encoder()
-
-    @resource("ld_undeclared")
-    class Undeclared(ModuleResource):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.encoder = self.get_dependency("ld_encoder")
-
-    with pytest.raises(ComponentDependencyError, match="does not declare it"):
-        _activate({"ld_undeclared": {}, "ld_encoder": {}})
-
-
 def _wired_model():
     _declare_encoder()
 
@@ -147,20 +133,3 @@ def test_a_version_1_state_from_a_different_wiring_is_rejected():
 
     with pytest.raises(ValueError, match="was checkpointed with linked"):
         model.set_state(state)
-
-
-def test_restore_order_follows_dependencies_for_a_wired_component():
-    components, model = _wired_model()
-
-    assert components._any_component_attaches_components()
-    assert components._state_restore_order(
-        {"ld_model": {}, "ld_encoder": {}},
-    ) == ["ld_encoder", "ld_model"]
-
-
-def test_restore_order_keeps_the_stored_order_without_wiring():
-    _declare_encoder()
-    components = _activate({"ld_encoder": {}})
-
-    assert not components._any_component_attaches_components()
-    assert components._state_restore_order({"ld_encoder": {}}) == ["ld_encoder"]

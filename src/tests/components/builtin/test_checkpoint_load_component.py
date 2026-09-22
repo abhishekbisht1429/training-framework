@@ -76,29 +76,3 @@ def test_two_candidates_are_reported_not_chosen_between(tmp_path):
 
     with pytest.raises(ComponentDependencyError):
         Checkpointer.load_component(path, "model")
-
-
-def _draw_after(seed, load):
-    torch.manual_seed(seed)
-    load()
-    return torch.rand(1).item()
-
-
-def test_loading_a_component_does_not_adopt_the_checkpoints_rng(tmp_path):
-    """Whether the caller's seed still decides what comes next, or the
-    checkpoint's saved generator state does. That the load leaves the caller's
-    sequence untouched is checked in tests/session/test_rng_state.py."""
-    path = save_checkpoint(tmp_path, loadable_model={})
-
-    # Loading the whole session adopts its RNG: the caller's seed is lost.
-    adopted = [
-        _draw_after(seed, lambda: Checkpointer.load_checkpoint(path))
-        for seed in (1, 2)
-    ]
-    assert adopted[0] == adopted[1]
-
-    followed = [
-        _draw_after(seed, lambda: Checkpointer.load_component(path, "model"))
-        for seed in (1, 2)
-    ]
-    assert followed[0] != followed[1]

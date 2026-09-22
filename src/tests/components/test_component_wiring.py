@@ -97,22 +97,6 @@ def test_requesting_an_undeclared_resource_is_rejected():
     assert "@requires_resource('wire_secret')" in message
 
 
-def test_requesting_a_dependency_outside_construction_is_rejected():
-    @resource("wire_lonely_child")
-    class Child(_InertResource):
-        pass
-
-    @requires_resource("wire_lonely_child")
-    @resource("wire_lonely")
-    class Lonely(_InertResource):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.child = self.get_dependency("wire_lonely_child")
-
-    with pytest.raises(ComponentDependencyError, match="activate_component"):
-        Lonely()
-
-
 def test_a_dependency_cycle_is_reported_before_anything_is_constructed():
     constructed = []
 

@@ -365,6 +365,7 @@ def test_configurator_returns_mapping_components_only():
     configurator = Configurator.__new__(Configurator)
     configurator._session_configs = [{
         "session_config": {"max_iterations": 1},
+        "component_bindings": {"role": "configured_component"},
         "empty_component": {},
         "configured_component": {"value": 11},
     }]

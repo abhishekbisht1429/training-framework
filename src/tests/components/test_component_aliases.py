@@ -5,7 +5,6 @@ import pickle
 import pytest
 
 from tests.test_utils import COMPONENTS_PACKAGE, has_resource_named, register_test_components, resource_named
-from training_framework.engine import Configurator
 from training_framework.engine import load_session_for_worker
 from training_framework.components import (
     ComponentAliases,
@@ -349,21 +348,6 @@ def test_bound_dependency_must_resolve_to_the_required_category(tmp_path):
             "actual_hook": {},
             "consumer": {},
         })
-
-
-def test_configurator_excludes_special_entries_from_component_configs():
-    configurator = Configurator.__new__(Configurator)
-    configurator._session_configs = [{
-        "session_config": {"max_iterations": 1},
-        "component_bindings": {"role": "target"},
-        "no_config": {},
-        "target": {"value": 3},
-    }]
-
-    assert configurator.get_all_component_configs(0) == {
-        "no_config": {},
-        "target": {"value": 3},
-    }
 
 
 def test_deprecated_alias_config_uses_actual_component_name(tmp_path):

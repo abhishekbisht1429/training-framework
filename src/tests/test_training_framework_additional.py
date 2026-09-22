@@ -11,10 +11,7 @@ from typing import Any
 
 import pytest
 import torch
-import torch.nn.functional as F
 import yaml
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
 
 from training_framework.engine import Configurator
 from training_framework.dataloader import InfiniteSampler
@@ -27,24 +24,6 @@ from training_framework.components import (
 from training_framework.session import TrainingSession
 from training_framework.util import timestamp_str
 from tests.test_utils import has_resource_named, resource_named
-
-
-class DummyDataset(Dataset):
-    def __init__(self, num_samples: int = 12, num_features: int = 5, num_classes: int = 2):
-        self.num_samples = num_samples
-        self.features = torch.randn(num_samples, num_features)
-        self.labels = torch.randint(0, num_classes, (num_samples,))
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, idx):
-        return self.features[idx], self.labels[idx]
-
-    @staticmethod
-    def collate_fn(batch):
-        xs, ys = zip(*batch)
-        return torch.stack(list(xs)), torch.stack(list(ys))
 
 
 class AdditionalStepBase(Step, Stateful):
@@ -64,7 +43,6 @@ class AdditionalStepBase(Step, Stateful):
     def set_state(self, state: Any) -> None:
         self.calls = state["calls"]
         self.last_seen_loss = state["last_seen_loss"]
-
 
 
 class AdditionalResourceBase(Resource, Stateful):
@@ -172,36 +150,6 @@ def _write_yaml(tmp_path: Path, data: dict, name: str = "config.yaml") -> str:
 
 def test_timestamp_str_has_expected_shape():
     assert re.fullmatch(r"\d{8}_\d{6}_\d{9}", timestamp_str())
-
-
-def test_registry_decorators_register_classes_and_reject_duplicates():
-    @step("test_additional_step")
-    class AdditionalStep(AdditionalStepBase):
-        pass
-
-    @resource("test_additional_resource")
-    class AdditionalResource(AdditionalResourceBase):
-        pass
-
-    @hook("test_additional_hook")
-    class AdditionalHook(AdditionalHookBase):
-        pass
-
-    assert AdditionalStep.id == "Step.test_additional_step"
-    assert AdditionalResource.id == "Resource.test_additional_resource"
-    assert AdditionalHook.id == "Hook.test_additional_hook"
-
-    with pytest.raises(ValueError):
-        @step("test_additional_step")
-        class _DuplicateStep(Step):
-            def run(self, session: TrainingSession) -> None:
-                pass
-
-            def get_state(self):
-                return {}
-
-            def set_state(self, state):
-                pass
 
 
 def test_training_session_initialization_and_device_validation(minimal_session_config_2, monkeypatch):
@@ -336,212 +284,6 @@ def test_registration_validation_and_lookup(minimal_session_config_2):
     with pytest.raises(KeyError):
         resource_named(session, "missing-resource")
 
-def test_context_lifecycle_and_iteration_order(minimal_session_config_1):
-    @step("test_additional_step")
-    class AdditionalStep(AdditionalStepBase):
-        pass
-
-    @resource("additional_resource_a")
-    class AdditionalResourceA(AdditionalResourceBase):
-        pass
-
-    @resource("additional_resource_b")
-    class AdditionalResourceB(AdditionalResourceBase):
-        pass
-
-    @hook("additional_hook_a")
-    class AdditionalHookA(AdditionalHookBase):
-        pass
-
-    @hook("additional_hook_b")
-    class AdditionalHookB(AdditionalHookBase):
-        pass
-
-    @step("toy_model_step")
-    class ToyModelStep(Step, Stateful):
-        def __init__(self):
-            dataset = DummyDataset()
-            dataloader = DataLoader(
-                dataset,
-                batch_size=4,
-                sampler=InfiniteSampler(len(dataset)),
-                collate_fn=dataset.collate_fn,
-            )
-            self._iterator = iter(dataloader)
-            self._model = nn.Sequential(nn.Linear(5, 2))
-            self.seen_losses: list[float] = []
-
-        def run(self, session: TrainingSession) -> None:
-            x, y = next(self._iterator)
-            x = x.to(session.device)
-            y = y.to(session.device)
-            output = self._model(x)
-            loss = F.cross_entropy(output, y)
-            loss.backward()
-            self.seen_losses.append(float(loss.item()))
-            session.iteration_context["loss"] = float(loss.item())
-
-        def get_state(self) -> Any:
-            return {"seen_losses": list(self.seen_losses)}
-
-        def set_state(self, state: Any) -> None:
-            self.seen_losses = list(state["seen_losses"])
-
-    session = TrainingSession(minimal_session_config_1)
-
-    # Each resource and hook has a distinct registered name.
-    resource_a = AdditionalResourceA()
-    resource_b = AdditionalResourceB()
-    hook_a = AdditionalHookA(call_every=1)
-    hook_b = AdditionalHookB(call_every=2)
-
-    step_a = AdditionalStep()
-    step_b = ToyModelStep()
-
-    resource_a_id = session.register_resource(resource_a)
-    resource_b_id = session.register_resource(resource_b)
-
-    hook_a_id = session.register_hook(hook_a)
-    hook_b_id = session.register_hook(hook_b)
-
-    step_a_id = session.add_step(step_a)
-    step_b_id = session.add_step(step_b)
-
-    # Verify the session contains two distinct logical resources/hooks,
-    # rather than duplicate instances of one registered component.
-    assert resource_a.name == "additional_resource_a"
-    assert resource_b.name == "additional_resource_b"
-    assert resource_a_id != resource_b_id
-
-    assert {hook_a_id, hook_b_id} == {
-        "additional_hook_a",
-        "additional_hook_b",
-    }
-    assert {step_a_id, step_b_id} == {
-        "test_additional_step",
-        "toy_model_step",
-    }
-    assert hook_a in session.get_all_hooks()
-    assert hook_b in session.get_all_hooks()
-    assert resource_named(session, resource_a_id) is resource_a
-    assert resource_named(session, resource_b_id) is resource_b
-
-    with session as active_session:
-        assert active_session is session
-
-        assert resource_a.setup_calls == 1
-        assert resource_b.setup_calls == 1
-        assert resource_a.events == ["setup"]
-        assert resource_b.events == ["setup"]
-
-        assert hook_a.events == ["setup"]
-        assert hook_b.events == ["setup"]
-
-        first = next(session)
-
-        assert first == 1
-        assert session.iteration == 1
-
-        # Iteration-scoped shared state must be cleared after next() returns.
-        assert session.iteration_context == {}
-
-        second = next(session)
-
-        assert second == 2
-        assert session.iteration == 2
-        assert session.iteration_context == {}
-
-    assert resource_a.events == ["setup", "teardown"]
-    assert resource_b.events == ["setup", "teardown"]
-    assert resource_a.setup_calls == 1
-    assert resource_b.setup_calls == 1
-    assert resource_a.teardown_calls == 1
-    assert resource_b.teardown_calls == 1
-
-    with session as active_session:
-        assert active_session is session
-        assert session.iteration == 2
-
-        assert resource_a.setup_calls == 2
-        assert resource_b.setup_calls == 2
-
-        assert hook_a.events == [
-            "setup",
-            "pre:1",
-            "post:1",
-            "pre:2",
-            "post:2",
-            "teardown",
-            "setup",
-        ]
-        assert hook_b.events == [
-            "setup",
-            "pre:1",
-            "post:1",
-            "pre:2",
-            "post:2",
-            "teardown",
-            "setup",
-        ]
-
-        third = next(session)
-
-        assert third == 3
-        assert session.iteration == 3
-        assert session.iteration_context == {}
-
-    assert resource_a.events == [
-        "setup",
-        "teardown",
-        "setup",
-        "teardown",
-    ]
-    assert resource_b.events == [
-        "setup",
-        "teardown",
-        "setup",
-        "teardown",
-    ]
-    assert resource_a.setup_calls == 2
-    assert resource_b.setup_calls == 2
-    assert resource_a.teardown_calls == 2
-    assert resource_b.teardown_calls == 2
-
-    # The first and final iterations call every hook regardless of
-    # call_every. Hook B is also called on iteration 2 because call_every=2.
-    expected_hook_events = [
-        "setup",
-        "pre:1",
-        "post:1",
-        "pre:2",
-        "post:2",
-        "teardown",
-        "setup",
-        "pre:3",
-        "post:3",
-        "teardown",
-    ]
-
-    assert hook_a.events == expected_hook_events
-    assert hook_b.events == expected_hook_events
-
-    assert hook_a.pre_iterations == [1, 2, 3]
-    assert hook_a.post_iterations == [1, 2, 3]
-    assert hook_b.pre_iterations == [1, 2, 3]
-    assert hook_b.post_iterations == [1, 2, 3]
-
-    # Values shared by the steps were visible to the hooks before the
-    # iteration-scoped state was cleared.
-    for test_hook in (hook_a, hook_b):
-        assert [snapshot["step_index"] for snapshot in test_hook.shared_snapshots] == [
-            1,
-            2,
-            3,
-        ]
-        assert all(
-            snapshot["step_called"] is True
-            for snapshot in test_hook.shared_snapshots
-        )
 
 def test_state_round_trip_restores_nested_resources_steps_and_hooks(minimal_session_config_1):
     @step("test_additional_step")

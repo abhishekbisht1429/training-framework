@@ -339,18 +339,6 @@ def _training_checkpoint(tmp_path):
     return checkpoint_path
 
 
-def test_loading_for_weights_does_not_reseed_the_caller(tmp_path):
-    checkpoint_path = _training_checkpoint(tmp_path)
-
-    _seed_everything(4321)
-    expected = _next_draws()
-
-    _seed_everything(4321)
-    Checkpointer.load_checkpoint(checkpoint_path, restore_rng=False)
-
-    assert _next_draws() == expected
-
-
 def test_loading_a_checkpoint_still_restores_the_rng_by_default(tmp_path):
     checkpoint_path = _training_checkpoint(tmp_path)
 

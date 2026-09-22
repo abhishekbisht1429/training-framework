@@ -57,48 +57,6 @@ def add_instance(components, component_class, name):
 # -- the resolution rules -------------------------------------------------
 
 
-def test_the_only_instance_answers_an_unqualified_name():
-    components, Dependency, _ = make_components()
-    add_instance(components, Dependency, "wire_dep")
-
-    assert components.resolve_dependency("wire_dep") == "wire_dep"
-
-
-def test_several_instances_without_wiring_are_an_error():
-    components, Dependency, _ = make_components()
-    add_instance(components, Dependency, "wire_dep#a")
-    add_instance(components, Dependency, "wire_dep#b")
-
-    with pytest.raises(ComponentDependencyError) as error:
-        components.resolve_dependency("wire_dep")
-
-    message = str(error.value)
-    assert "wire_dep#a" in message and "wire_dep#b" in message
-    assert "component_bindings" in message
-
-
-def test_an_exact_match_wins_over_other_instances():
-    components, Dependency, _ = make_components()
-    add_instance(components, Dependency, "wire_dep")
-    add_instance(components, Dependency, "wire_dep#b")
-
-    # Adding an instance must never quietly rewire what already worked.
-    assert components.resolve_dependency("wire_dep") == "wire_dep"
-
-
-def test_a_consumer_can_name_the_instance_it_wants():
-    components, Dependency, _ = make_components(
-        {"wire_consumer": {"wire_dep": "wire_dep#b"}},
-    )
-    add_instance(components, Dependency, "wire_dep#a")
-    add_instance(components, Dependency, "wire_dep#b")
-
-    assert components.resolve_dependency(
-        "wire_dep",
-        consumer="wire_consumer",
-    ) == "wire_dep#b"
-
-
 def test_wiring_applies_only_to_the_consumer_that_declared_it():
     components, Dependency, _ = make_components(
         {"wire_consumer": {"wire_dep": "wire_dep#b"}},
@@ -121,15 +79,6 @@ def test_a_name_with_nothing_behind_it_is_left_to_the_caller():
 # -- lookups that apply the rules -----------------------------------------
 
 
-def test_getting_an_ambiguous_resource_is_an_error():
-    components, Dependency, _ = make_components()
-    add_instance(components, Dependency, "wire_dep#a")
-    add_instance(components, Dependency, "wire_dep#b")
-
-    with pytest.raises(ComponentDependencyError):
-        components.get_resource("wire_dep")
-
-
 def test_an_ambiguous_resource_still_counts_as_present():
     components, Dependency, _ = make_components()
     add_instance(components, Dependency, "wire_dep#a")
@@ -138,21 +87,6 @@ def test_an_ambiguous_resource_still_counts_as_present():
     # The question is whether such a resource exists, and it does; which one
     # is meant is decided by asking for it.
     assert components.has_resource("wire_dep")
-
-
-def test_a_component_is_constructed_with_the_instance_it_was_wired_to():
-    components, Dependency, Consumer = make_components(
-        {"wire_consumer": {"wire_dep": "wire_dep#b"}},
-    )
-    first = add_instance(components, Dependency, "wire_dep#a")
-    second = add_instance(components, Dependency, "wire_dep#b")
-
-    components.activate_component("wire_consumer", {})
-    consumer = components.components["wire_consumer"]
-
-    assert consumer.dependency is second
-    assert consumer.dependency is not first
-    assert consumer.linked_components == {"wire_dep": "wire_dep#b"}
 
 
 # -- binding validation ----------------------------------------------------
