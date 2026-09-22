@@ -9,6 +9,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from training_framework.components import LifecycleHook, Resource, Stateful, Step
+
 
 COMPONENTS_PACKAGE = "tests.test_components"
 
@@ -189,3 +191,96 @@ def has_resource_named(session, name) -> bool:
     except KeyError:
         return False
     return True
+
+
+# -- test doubles recording their lifecycle and state -----------------------
+
+
+class AdditionalStepBase(Step, Stateful):
+    def __init__(self):
+        self.calls = 0
+        self.last_seen_loss = None
+
+    def run(self, session: TrainingSession) -> None:
+        self.calls += 1
+        session.iteration_context["step_called"] = True
+        session.iteration_context["step_index"] = self.calls
+        self.last_seen_loss = self.calls * 1.0
+
+    def get_state(self) -> Any:
+        return {"calls": self.calls, "last_seen_loss": self.last_seen_loss}
+
+    def set_state(self, state: Any) -> None:
+        self.calls = state["calls"]
+        self.last_seen_loss = state["last_seen_loss"]
+
+
+class AdditionalResourceBase(Resource, Stateful):
+    def __init__(self):
+        self.setup_calls = 0
+        self.teardown_calls = 0
+        self.events: list[str] = []
+        self.session_dirs: list[str] = []
+
+    def setup(self, session: TrainingSession):
+        self.setup_calls += 1
+        self.events.append("setup")
+        self.session_dirs.append(session.session_config.session_dir)
+
+    def teardown(self, session):
+        self.teardown_calls += 1
+        self.events.append("teardown")
+
+    def get_state(self) -> Any:
+        return {
+            "setup_calls": self.setup_calls,
+            "teardown_calls": self.teardown_calls,
+            "events": list(self.events),
+            "session_dirs": list(self.session_dirs),
+        }
+
+    def set_state(self, state: Any) -> None:
+        self.setup_calls = state["setup_calls"]
+        self.teardown_calls = state["teardown_calls"]
+        self.events = list(state["events"])
+        self.session_dirs = list(state["session_dirs"])
+
+
+class AdditionalHookBase(LifecycleHook, Stateful):
+    def __init__(self, call_every: int = 1):
+        self.call_every = call_every
+        self.events: list[str] = []
+        self.pre_iterations: list[int] = []
+        self.post_iterations: list[int] = []
+        self.shared_snapshots: list[dict[str, Any]] = []
+
+    def pre_session(self, session: TrainingSession):
+        self.events.append("setup")
+
+    def post_session(self, session):
+        self.events.append("teardown")
+
+    def pre_iteration_callback(self, session: TrainingSession) -> None:
+        self.events.append(f"pre:{session.iteration}")
+        self.pre_iterations.append(session.iteration)
+
+    def post_iteration_callback(self, session: TrainingSession) -> None:
+        self.events.append(f"post:{session.iteration}")
+        self.post_iterations.append(session.iteration)
+        self.shared_snapshots.append(dict(session.iteration_context))
+
+    def get_state(self) -> Any:
+        return {
+            "call_every": self.call_every,
+            "events": list(self.events),
+            "pre_iterations": list(self.pre_iterations),
+            "post_iterations": list(self.post_iterations),
+            "shared_snapshots": [dict(item) for item in self.shared_snapshots],
+        }
+
+    def set_state(self, state: Any) -> None:
+        self.call_every = state["call_every"]
+        self.events = list(state["events"])
+        self.pre_iterations = list(state["pre_iterations"])
+        self.post_iterations = list(state["post_iterations"])
+        self.shared_snapshots = [dict(item) for item in state["shared_snapshots"]]

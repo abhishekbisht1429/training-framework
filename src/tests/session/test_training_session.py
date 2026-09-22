@@ -1,13 +1,29 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
+import torch
 
 from training_framework.components import (
+    LifecycleHook,
     Resource,
+    Step,
+    hook,
     resource,
+    step,
 )
 from training_framework.session import TrainingSession
-from tests.test_utils import has_resource_named, read_events, register_test_components, session_config
+from tests.test_utils import (
+    AdditionalHookBase,
+    AdditionalResourceBase,
+    AdditionalStepBase,
+    has_resource_named,
+    read_events,
+    register_test_components,
+    resource_named,
+    session_config,
+)
 
 
 def _component(session: TrainingSession, name: str):
@@ -135,3 +151,114 @@ def test_execution_graph_is_printed_only_for_ddp_rank_zero(
         "TRAINING SESSION EXECUTION GRAPH" in capsys.readouterr().out
     )
     assert graph_was_printed is should_print_graph
+
+
+def test_training_session_initialization_and_device_validation(minimal_session_config_2, monkeypatch):
+    session = TrainingSession(minimal_session_config_2)
+
+    assert session.session_config.rng_seed == minimal_session_config_2["session_config"]["rng_seed"]
+    assert session.session_config.max_iterations == minimal_session_config_2["session_config"]["max_iterations"]
+    assert session.session_config.session_dir.startswith(minimal_session_config_2["session_config"]["sessions_dir"])
+    assert session.device.type == "cpu"
+    assert session.iteration == 0
+
+    bad_device = deepcopy(minimal_session_config_2)
+    bad_device["session_config"]["device"] = "tpu"
+
+    assert TrainingSession(bad_device).device == torch.device("cpu")
+
+    unavailable_cuda = deepcopy(minimal_session_config_2)
+    unavailable_cuda["session_config"]["device"] = "cuda:0"
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    assert TrainingSession(unavailable_cuda).device == torch.device("cpu")
+
+
+def test_registration_validation_and_lookup(minimal_session_config_2):
+    @step("test_additional_step")
+    class AdditionalStep(AdditionalStepBase):
+        pass
+
+    @resource("test_additional_resource")
+    class AdditionalResource(AdditionalResourceBase):
+        pass
+
+    @hook("test_additional_hook")
+    class AdditionalHook(AdditionalHookBase):
+        pass
+
+    session = TrainingSession(minimal_session_config_2)
+
+    with pytest.raises(TypeError):
+        session.add_step(object())
+
+    with pytest.raises(TypeError):
+        session.register_hook(object())
+
+    with pytest.raises(TypeError):
+        session.register_resource(object())
+
+    class UnregisteredStep(Step):
+        def run(self, session: TrainingSession) -> None:
+            pass
+
+        def get_state(self):
+            return {}
+
+        def set_state(self, state):
+            pass
+
+    class UnregisteredHook(LifecycleHook):
+        def __init__(self):
+            self.call_every = 1
+
+        def pre_session(self, session: TrainingSession):
+            pass
+
+        def post_session(self, session):
+            pass
+
+        def pre_iteration_callback(self, session: TrainingSession) -> None:
+            pass
+
+        def post_iteration_callback(self, session: TrainingSession) -> None:
+            pass
+
+    class UnregisteredResource(Resource):
+        def setup(self, session: TrainingSession):
+            pass
+
+        def teardown(self, session):
+            pass
+
+        def get_state(self):
+            return {}
+
+        def set_state(self, state):
+            pass
+
+    with pytest.raises(ValueError, match="not registered as a component"):
+        session.add_step(UnregisteredStep())
+
+    with pytest.raises(ValueError, match="not registered as a component"):
+        session.register_hook(UnregisteredHook())
+
+    with pytest.raises(ValueError, match="not registered as a component"):
+        session.register_resource(UnregisteredResource())
+
+    step_obj = AdditionalStep()
+    hook_obj = AdditionalHook(call_every=1)
+    resource_obj = AdditionalResource()
+
+    step_id = session.add_step(step_obj)
+    hook_id = session.register_hook(hook_obj)
+    resource_id = session.register_resource(resource_obj)
+
+    assert step_id == "test_additional_step"
+    assert hook_id == "test_additional_hook"
+    assert resource_id == "test_additional_resource"
+    assert step_obj in session.get_all_steps()
+    assert hook_obj in session.get_all_hooks()
+    assert resource_named(session, resource_id) is resource_obj
+    with pytest.raises(KeyError):
+        resource_named(session, "missing-resource")

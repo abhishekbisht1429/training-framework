@@ -7,12 +7,13 @@ from typing import Any
 import pytest
 import torch
 
-from training_framework.engine import Configurator, load_session_for_worker
-from training_framework.engine.topology import (
+from training_framework.engine import (
+    Configurator,
     LaunchTopology,
-    pin_process_device,
+    load_session_for_worker,
     resolve_launch_topology,
 )
+from training_framework.engine.topology import pin_process_device
 from training_framework.session import TrainingSession
 from tests.test_utils import (
     COMPONENTS_PACKAGE,

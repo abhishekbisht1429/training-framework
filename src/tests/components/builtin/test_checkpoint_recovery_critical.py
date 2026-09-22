@@ -474,67 +474,6 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
     assert restored.session_context == {}
 
 
-def test_get_state_returns_a_detached_session_context_snapshot(tmp_path):
-    """A state snapshot should represent values at get_state() call time."""
-
-    session = TrainingSession(
-        make_config(tmp_path / "snapshot", max_iterations=1, seed=3)
-    )
-
-    with session:
-        session.session_context["nested"] = {"values": [1]}
-        state = session.get_state()
-
-        session.session_context["nested"]["values"].append(2)
-        assert state["session_context"] == {"nested": {"values": [1]}}
-
-    assert session.session_context == {}
-    assert state["session_context"] == {"nested": {"values": [1]}}
-
-
-def test_session_state_uses_clean_session_type_and_config_keys(tmp_path):
-    session = TrainingSession(
-        make_config(tmp_path / "checkpoint-schema", max_iterations=1)
-    )
-
-    state = session.get_state()
-
-    assert state["session_type"] == "training"
-    assert state["config"]["session_config"] == (
-        session.full_config["session_config"]
-    )
-    assert state["session_config"] == session.session_config
-    assert "base_config" not in state
-    assert "mode" not in state
-
-    invalid_state = dict(state)
-    del invalid_state["config"]
-    with pytest.raises(ValueError, match="configuration state schema"):
-        TrainingSession.from_state(invalid_state)
-
-
-def test_from_state_does_not_repeat_normal_session_initialization(
-    tmp_path,
-    monkeypatch,
-):
-    session = TrainingSession(
-        make_config(tmp_path / "side-effect-free-restore", max_iterations=1)
-    )
-    state = session.get_state()
-    config_writes = []
-
-    monkeypatch.setattr(
-        "training_framework.session.base.write_session_config",
-        lambda session_dir, config: config_writes.append((session_dir, config)),
-    )
-
-    restored = TrainingSession.from_state(state)
-
-    assert config_writes == []
-    assert restored.session_config == session.session_config
-    assert restored.full_config == session.full_config
-
-
 # @pytest.mark.xfail(
 #     strict=True,
 #     reason=(

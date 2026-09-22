@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import itertools
 import sys
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from training_framework.dataloader import (
     SAMPLER_STATE_VERSION,
     DistributedInfiniteSampler,
+    InfiniteSampler,
     consumed_in_epoch,
 )
 from training_framework.session import TrainingSession
@@ -333,3 +335,16 @@ def test_a_data_manager_resumes_on_a_smaller_world(
     # The single rank now takes the whole global batch, and the epoch
     # position carries on from where two ranks left it.
     assert restored.get_state()["sampler_state"]["consumed_in_epoch"] == 8
+
+
+def test_infinite_sampler_yields_permutations_forever():
+    sampler = InfiniteSampler(5)
+    iterator = iter(sampler)
+
+    first_round = list(itertools.islice(iterator, 5))
+    second_round = list(itertools.islice(iterator, 5))
+
+    assert sorted(first_round) == [0, 1, 2, 3, 4]
+    assert sorted(second_round) == [0, 1, 2, 3, 4]
+    assert len(set(first_round)) == 5
+    assert len(set(second_round)) == 5

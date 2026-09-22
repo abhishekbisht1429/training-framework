@@ -48,3 +48,29 @@ def reset_registries():
 
     _SESSION_TYPE_REGISTRY.clear()
     _SESSION_TYPE_REGISTRY.update(_DEFAULT_SESSION_TYPES)
+
+
+@pytest.fixture
+def minimal_session_config_1(tmp_path):
+    return {
+        "session_config": {
+            "max_iterations": 3,
+            "sessions_dir": str(tmp_path / "sessions"),
+            "device": "cpu",
+            "rng_seed": 7,
+            "components_package": "training_framework.components.builtin",
+        }
+    }
+
+
+@pytest.fixture
+def minimal_session_config_2(tmp_path):
+    return {
+        "session_config": {
+            "max_iterations": 2,
+            "sessions_dir": str(tmp_path / "sessions"),
+            "device": "cpu",
+            "rng_seed": 11,
+            "components_package": "training_framework.components.builtin",
+        }
+    }

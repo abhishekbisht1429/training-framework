@@ -1,3 +1,5 @@
+import pytest
+
 from training_framework.components import SessionHook, hook
 from training_framework.session import TrainingSession
 import pickle
@@ -101,3 +103,25 @@ def test_session_context_is_saved_restored_and_cleared(tmp_path):
 
     # After the session ends, the original session context must be cleared.
     assert session.session_context == {}
+
+
+def test_requires_context_for_shared_state_and_iteration(minimal_session_config_2):
+    session = TrainingSession(minimal_session_config_2)
+
+    with pytest.raises(
+            RuntimeError,
+            match="This instance of TrainingSession is not initialized yet!",
+    ):
+        session.iteration_context["x"] = 1
+
+    with pytest.raises(
+            RuntimeError,
+            match="This instance of TrainingSession is not initialized yet!",
+    ):
+        session.iteration_context["x"]
+
+    with pytest.raises(
+            RuntimeError,
+            match="This instance of TrainingSession is not initialized yet!",
+    ):
+        next(session)
