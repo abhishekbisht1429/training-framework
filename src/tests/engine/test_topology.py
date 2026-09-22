@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import sys
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 
@@ -268,6 +269,18 @@ def test_a_configured_master_port_that_is_taken_is_refused():
             host_rendezvous(resolve_launch_topology(
                 _ddp_config(master_port=port),
             ))
+
+
+@pytest.mark.parametrize("from_checkpoint", [False, True])
+def test_an_address_this_machine_lacks_is_reported_at_once(from_checkpoint):
+    # 192.0.2.0/24 is reserved for documentation and never assigned.
+    config = _ddp_config(master_addr="192.0.2.1")
+
+    with pytest.raises(RuntimeError, match="not an address of this machine"):
+        host_rendezvous(resolve_launch_topology(
+            config,
+            from_checkpoint=from_checkpoint,
+        ))
 
 
 def _launch_config(tmp_path, **ddp_overrides: Any) -> dict[str, Any]:
@@ -544,3 +557,33 @@ def test_extending_with_only_a_topology_override_is_allowed(monkeypatch):
 
     assert configurator.topology_overrides == {"world_size": "4"}
     assert configurator.extension_overrides == ()
+
+
+def test_an_error_inside_the_engine_is_not_masked(tmp_path):
+    with pytest.raises(ValueError, match="original body error"):
+        with _launcher(_launch_config(tmp_path)):
+            # No worker has started; leaving must not trip over that.
+            raise ValueError("original body error")
+
+
+def test_a_failed_entry_releases_the_ports_it_held(tmp_path):
+    first = _launch_config(tmp_path / "first")
+    second = deepcopy(first)
+    second["ddp"]["master_port"] = _bindable_port()
+    second["session_config"]["sessions_dir"] = str(tmp_path / "second")
+    second["not_a_registered_component"] = {}
+    engine = TrainingEngine(SimpleNamespace(
+        mode="new",
+        session_configs=[first, second],
+        process_timeout_on_join=10,
+        heartbeat_timeout=30,
+        topology_overrides=None,
+        debug=True,
+    ))
+
+    with pytest.raises(ValueError, match="not_a_registered_component"):
+        with engine:
+            pass
+
+    # The first session's port was bound before the second one failed.
+    assert _can_bind(first["ddp"]["master_port"])

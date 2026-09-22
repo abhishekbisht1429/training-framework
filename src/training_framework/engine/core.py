@@ -100,19 +100,27 @@ class TrainingEngine:
         )
         world_size = 1 if topology is None else topology.world_size
         self._check_rank_component_plan(session, world_size)
+        hosted = None
         if topology is not None:
             hosted = host_rendezvous(topology)
-            self._rendezvous.append(hosted)
             topology = hosted.topology
 
-        self._session_process_wrappers = [
-            SessionProcessWrapper(
-                session=session,
-                rank=rank,
-                **self._wrapper_kwargs(topology),
-            )
-            for rank in range(world_size)
-        ]
+        try:
+            wrappers = [
+                SessionProcessWrapper(
+                    session=session,
+                    rank=rank,
+                    **self._wrapper_kwargs(topology),
+                )
+                for rank in range(world_size)
+            ]
+        except BaseException:
+            if hosted is not None:
+                hosted.close()
+            raise
+        if hosted is not None:
+            self._rendezvous.append(hosted)
+        self._session_process_wrappers = wrappers
 
     @staticmethod
     def _check_rank_component_plan(session, world_size: int) -> None:
@@ -263,15 +271,15 @@ class TrainingEngine:
             wrappers: list[SessionProcessWrapper] | None = None,
             timeout: float = 5.0,
     ) -> None:
-        selected = (
-            wrappers
-            if wrappers is not None
-            else [
-                wrapper
-                for wrapper in self._session_process_wrappers
-                if wrapper.started
-            ]
-        )
+        # A worker that was never started has nothing to join, and trying
+        # would raise over whatever error brought us here.
+        selected = [
+            wrapper
+            for wrapper in (
+                self._session_process_wrappers if wrappers is None else wrappers
+            )
+            if wrapper.started
+        ]
         join_or_terminate(selected, timeout)
 
     def _close_resources(self) -> None:
@@ -281,12 +289,27 @@ class TrainingEngine:
                 process.close()
         # Only after every worker has joined: a worker still in its process
         # group may yet need the store.
+        self._release_rendezvous()
+
+    def _release_rendezvous(self) -> None:
         for hosted in self._rendezvous:
             hosted.close()
         self._rendezvous = []
 
     @context_entry
     def __enter__(self):
+        try:
+            self._register_configured_sessions()
+        except BaseException:
+            # `__exit__` never runs when entry fails, so undo it here: ports
+            # held for sessions registered before the failure would
+            # otherwise stay bound.
+            self._release_rendezvous()
+            self._session_process_wrappers = []
+            raise
+        return self
+
+    def _register_configured_sessions(self) -> None:
         if self._configurator.mode == "new":
             for definition in self._configurator.session_configs:
                 config, session_type, session_kwargs = (
@@ -322,8 +345,6 @@ class TrainingEngine:
             self.load_session(self._configurator.checkpoint_path)
         else:
             raise RuntimeError("Invalid operation!")
-
-        return self
 
     def _process_ready_waitables(self, waitables, ready_waitables):
         return process_ready_waitables(waitables, ready_waitables)

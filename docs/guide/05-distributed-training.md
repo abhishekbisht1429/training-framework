@@ -78,6 +78,8 @@ any worker starts. A port you configured, by file, environment or override,
 is an error: you asked for that port. A port that came from a checkpoint
 belonged to the machine that wrote it, so it is replaced with a free one and
 a warning.
+`master_addr` has to be an address of the machine running the engine, since
+every rank runs there; any other address is reported at launch too.
 
 `--resume-session` accepts these three overrides and rejects any other, which
 belongs to `--extend-session`.

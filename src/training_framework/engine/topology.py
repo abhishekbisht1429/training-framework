@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import os
+import socket
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -234,14 +236,43 @@ class HostedRendezvous:
         self.close()
 
 
-def _start_store(topology: LaunchTopology, port: int):
-    return dist.TCPStore(
-        topology.master_addr,
+def _listen(address: str, port: int) -> socket.socket:
+    """Bind and listen on `address:port`, or raise the `OSError` saying why."""
+    family, kind, proto, _, sockaddr = socket.getaddrinfo(
+        address,
         port,
-        topology.world_size,
-        is_master=True,
-        wait_for_workers=False,
-        timeout=RENDEZVOUS_TIMEOUT,
+        type=socket.SOCK_STREAM,
+    )[0]
+    sock = socket.socket(family, kind, proto)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(sockaddr)
+        sock.listen(socket.SOMAXCONN)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+def _bind_failure(topology: LaunchTopology, port: int, error: OSError) -> str:
+    address = topology.master_addr
+    if isinstance(error, socket.gaierror):
+        return f"ddp.master_addr={address} could not be resolved: {error}."
+    if error.errno == errno.EADDRINUSE:
+        return (
+            f"ddp.master_port={port} is already in use on {address}. Choose "
+            "another port, or leave ddp.master_port out and the launcher "
+            "picks a free one."
+        )
+    if error.errno == errno.EADDRNOTAVAIL:
+        return (
+            f"ddp.master_addr={address} is not an address of this machine. "
+            "The engine runs every rank here, so the rendezvous has to be on "
+            "a local address such as 127.0.0.1."
+        )
+    return (
+        f"Could not open the rendezvous on {address}:{port}: "
+        f"{error.strerror or error}."
     )
 
 
@@ -249,32 +280,51 @@ def host_rendezvous(topology: LaunchTopology) -> HostedRendezvous:
     """Bind this launch's rendezvous port and hold it for the workers.
 
     With no port configured, the operating system picks a free one. A
-    configured port that is taken is an error, reported now rather than by
-    rank 0 once the other ranks are already waiting -- except a port that
-    came from a checkpoint, which belonged to the machine that wrote it and
-    is replaced with a warning.
+    configured port that cannot be bound is an error, reported now rather
+    than by rank 0 once the other ranks are already waiting -- except a port
+    that came from a checkpoint and is merely in use: it belonged to the
+    machine that wrote the checkpoint, so it is replaced with a warning.
     """
     requested = 0 if topology.master_port is None else int(topology.master_port)
+    # The socket is bound here, not by `TCPStore`, so the reason a bind fails
+    # is known (a store asked for an address this machine lacks waits out
+    # its whole timeout instead of failing).
     try:
-        store = _start_store(topology, requested)
-    except dist.DistNetworkError as error:
-        if requested == 0:
-            raise
-        if not topology.master_port_from_checkpoint:
+        sock = _listen(topology.master_addr, requested)
+    except OSError as error:
+        if not (
+                error.errno == errno.EADDRINUSE
+                and topology.master_port_from_checkpoint
+        ):
             raise RuntimeError(
-                f"ddp.master_port={requested} is already in use on "
-                f"{topology.master_addr}. Choose another port, or leave "
-                "ddp.master_port out and the launcher picks a free one."
+                _bind_failure(topology, requested, error),
             ) from error
-        store = _start_store(topology, 0)
+        sock = _listen(topology.master_addr, 0)
         warnings.warn(
             f"ddp.master_port={requested} from the checkpoint is already in "
-            f"use; rendezvous will use port {store.port} instead.",
+            f"use; rendezvous will use port {sock.getsockname()[1]} instead.",
             stacklevel=2,
         )
+
+    port = sock.getsockname()[1]
+    try:
+        store = dist.TCPStore(
+            topology.master_addr,
+            port,
+            topology.world_size,
+            is_master=True,
+            wait_for_workers=False,
+            timeout=RENDEZVOUS_TIMEOUT,
+            master_listen_fd=sock.fileno(),
+        )
+    except BaseException:
+        sock.close()
+        raise
+    # The store owns the descriptor now and closes it when released.
+    sock.detach()
     return HostedRendezvous(
         store,
-        replace(topology, master_port=str(store.port), store_hosted=True),
+        replace(topology, master_port=str(port), store_hosted=True),
     )
 
 
