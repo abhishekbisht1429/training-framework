@@ -6,7 +6,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from training_framework.components import ModuleResource, Resource, resource
-from training_framework.components.config_schema import parse_component_config
+from training_framework.components import parse_component_config
 
 
 @dataclass(frozen=True)

@@ -7,15 +7,18 @@ from typing import Any
 import pytest
 import torch
 
-from training_framework.engine import Configurator
+from training_framework.engine import Configurator, load_session_for_worker
 from training_framework.engine.topology import (
     LaunchTopology,
     pin_process_device,
     resolve_launch_topology,
 )
-from training_framework.engine.worker import prepare_worker_state
 from training_framework.session import TrainingSession
-from tests.test_utils import COMPONENTS_PACKAGE, register_test_components
+from tests.test_utils import (
+    COMPONENTS_PACKAGE,
+    register_test_components,
+    resource_named,
+)
 
 
 def _cuda(monkeypatch, device_count: int) -> None:
@@ -272,14 +275,14 @@ def test_the_launch_topology_replaces_the_stored_one(tmp_path):
         devices_per_node=0,
     )
 
-    prepared = prepare_worker_state(state, 2, topology)
+    ddp = resource_named(
+        load_session_for_worker(state, 2, launch_topology=topology),
+        "ddp",
+    )
 
-    init_args = _ddp_init_args(prepared)
-    assert init_args["kwargs"]["rank"] == 2
-    assert init_args["kwargs"]["local_rank"] == 2
-    assert init_args["args"][0]["world_size"] == 4
-    assert init_args["args"][0]["master_addr"] == "10.0.0.1"
-    assert init_args["args"][0]["master_port"] == "29777"
+    assert (ddp.rank, ddp.local_rank, ddp.world_size) == (2, 2, 4)
+    assert ddp.config["master_addr"] == "10.0.0.1"
+    assert ddp.config["master_port"] == "29777"
 
 
 def test_the_session_config_agrees_with_the_constructor_arguments(tmp_path):
@@ -293,14 +296,11 @@ def test_the_session_config_agrees_with_the_constructor_arguments(tmp_path):
         devices_per_node=0,
     )
 
-    prepared = prepare_worker_state(state, 0, topology)
+    session = load_session_for_worker(state, 0, launch_topology=topology)
 
-    assert prepared["config"]["ddp"]["world_size"] == 4
-    assert prepared["config"]["ddp"]["master_port"] == "29777"
-    assert (
-        prepared["config"]["ddp"]["parallel_components"]
-        == ["model"]
-    )
+    assert session.full_config["ddp"]["world_size"] == 4
+    assert session.full_config["ddp"]["master_port"] == "29777"
+    assert session.full_config["ddp"]["parallel_components"] == ["model"]
 
 
 def test_the_original_state_is_left_alone(tmp_path):
@@ -313,7 +313,7 @@ def test_the_original_state_is_left_alone(tmp_path):
         devices_per_node=0,
     )
 
-    prepare_worker_state(state, 1, topology)
+    load_session_for_worker(state, 1, launch_topology=topology)
 
     assert _ddp_init_args(state)["args"][0]["world_size"] == 8
     assert state["config"]["ddp"]["world_size"] == 8
@@ -322,12 +322,10 @@ def test_the_original_state_is_left_alone(tmp_path):
 def test_without_a_topology_only_the_rank_is_settled(tmp_path):
     state = _ddp_session_state(tmp_path, world_size=2)
 
-    prepared = prepare_worker_state(state, 1)
+    ddp = resource_named(load_session_for_worker(state, 1), "ddp")
 
-    init_args = _ddp_init_args(prepared)
-    assert init_args["kwargs"]["rank"] == 1
-    assert "local_rank" not in init_args["kwargs"]
-    assert init_args["args"][0]["world_size"] == 2
+    # With no topology to place it, the rank is also its local device index.
+    assert (ddp.rank, ddp.local_rank, ddp.world_size) == (1, 1, 2)
 
 
 # ---------------------------------------------------------------------------

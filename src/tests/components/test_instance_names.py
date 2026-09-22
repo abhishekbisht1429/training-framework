@@ -24,10 +24,6 @@ from training_framework.components import (
     step,
     wraps,
 )
-from training_framework.components.naming import (
-    INSTANCE_SEPARATOR,
-    validate_component_name,
-)
 
 
 def make_resource_class(class_name: str) -> type[Resource]:
@@ -42,10 +38,6 @@ def make_resource_class(class_name: str) -> type[Resource]:
         (Resource,),
         {"setup": setup, "teardown": teardown},
     )
-
-
-def test_separator_is_the_reserved_character():
-    assert INSTANCE_SEPARATOR == "#"
 
 
 def test_registering_a_resource_with_the_separator_is_rejected():
@@ -109,7 +101,6 @@ def test_the_rejection_explains_why_the_character_is_reserved():
 def test_a_non_string_name_keeps_its_own_error():
     # The separator check has nothing to say about a wrong type, so the
     # caller's own reporting must be left intact.
-    validate_component_name(None)
     with pytest.raises(TypeError):
         ComponentBindings({"model": 2})
 

@@ -245,7 +245,7 @@ def test_a_singleton_component_may_still_be_configured_once(tmp_path):
 
 
 def test_the_ddp_resource_is_a_singleton():
-    from training_framework.components.builtin.distributed import DDPResource
+    from training_framework.components.builtin import DDPResource
 
     # init_process_group is process-wide, and the engine, worker and session
     # all fetch "ddp" expecting exactly one.

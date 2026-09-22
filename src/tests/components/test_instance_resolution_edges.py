@@ -26,7 +26,7 @@ from training_framework.components import (
     requires_resource,
     resource,
 )
-from training_framework.components.builtin.distributed import DDPResource
+from training_framework.components.builtin import DDPResource
 from training_framework.session import TrainingSession
 
 

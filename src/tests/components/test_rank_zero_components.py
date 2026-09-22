@@ -26,7 +26,7 @@ from training_framework.components import (
     step,
 )
 from tests.test_utils import build_session
-from training_framework.session.config import TRAINING_SESSION_TYPE
+from training_framework.session import TRAINING_SESSION_TYPE
 
 
 def make_resource(name: str, *, requires: str | None = None) -> type[Resource]:

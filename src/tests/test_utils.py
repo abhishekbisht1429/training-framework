@@ -117,6 +117,19 @@ def build_session(
     return AnalysisSession(config)
 
 
+def configurator_for(tmp_path, monkeypatch, *sessions):
+    """Return a `Configurator` reading `sessions` from a config file, the way
+    the command line hands it one."""
+    import yaml
+
+    from training_framework.engine import Configurator
+
+    path = tmp_path / "configurator.yaml"
+    path.write_text(yaml.safe_dump({"sessions": list(sessions)}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["train", "--config", str(path)])
+    return Configurator()
+
+
 def inject_dependencies(component, **dependencies):
     """Give a hand-built component the prerequisites a session would inject.
 

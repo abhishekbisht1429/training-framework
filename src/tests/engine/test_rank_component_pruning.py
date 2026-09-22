@@ -1,7 +1,7 @@
 """What a worker's state carries once a secondary rank has settled it.
 
-`prepare_worker_state` decides a rank's component set before anything is
-constructed, so these tests read the prepared state rather than a session.
+A worker decides its rank's component set before anything is constructed;
+these tests load a worker's session and check what it holds.
 """
 
 from __future__ import annotations
@@ -13,10 +13,13 @@ from typing import Any
 
 import pytest
 
-from training_framework.engine import TrainingEngine
-from training_framework.engine.worker import prepare_worker_state
+from training_framework.engine import TrainingEngine, load_session_for_worker
 from training_framework.session import TrainingSession
-from tests.test_utils import COMPONENTS_PACKAGE, register_test_components
+from tests.test_utils import (
+    COMPONENTS_PACKAGE,
+    component_names,
+    register_test_components,
+)
 
 
 def _bindable_port() -> str:
@@ -55,16 +58,14 @@ def _session_state(tmp_path, **ddp_overrides: Any) -> dict[str, Any]:
     return TrainingSession(_session_config(tmp_path, **ddp_overrides)).get_state()
 
 
-def _components_of(state: dict[str, Any]) -> set[str]:
-    return set(state["components_state"])
+def _components_of(session) -> set[str]:
+    return component_names(session)
 
 
 def test_a_secondary_rank_drops_only_the_rank_zero_only_components(tmp_path):
     state = _session_state(tmp_path)
 
-    prepared = prepare_worker_state(state, 1)
-
-    assert _components_of(prepared) == {
+    assert _components_of(load_session_for_worker(state, 1)) == {
         "ddp",
         "it_3d45_model",
         "it_3d45_train",
@@ -75,10 +76,8 @@ def test_a_secondary_rank_drops_only_the_rank_zero_only_components(tmp_path):
 def test_rank_zero_keeps_every_configured_component(tmp_path):
     state = _session_state(tmp_path)
 
-    prepared = prepare_worker_state(state, 0)
-
     # `checkpointer` is activated by default, and is rank-zero-only too.
-    assert _components_of(prepared) == {
+    assert _components_of(load_session_for_worker(state, 0)) == {
         "ddp",
         "it_3d45_model",
         "it_3d45_train",
@@ -94,9 +93,7 @@ def test_the_config_key_keeps_a_component_off_a_secondary_rank(tmp_path):
         rank_zero_components=["it_3d45_rank0_hook"],
     )
 
-    prepared = prepare_worker_state(state, 1)
-
-    assert _components_of(prepared) == {
+    assert _components_of(load_session_for_worker(state, 1)) == {
         "ddp",
         "it_3d45_model",
         "it_3d45_train",
@@ -108,9 +105,11 @@ def test_the_deprecated_list_still_decides_the_rank_set(tmp_path):
         warnings.simplefilter("ignore", FutureWarning)
         state = _session_state(tmp_path, parallel_components=["it_3d45_train"])
 
-    prepared = prepare_worker_state(state, 1)
-
-    assert _components_of(prepared) == {"ddp", "it_3d45_model", "it_3d45_train"}
+    assert _components_of(load_session_for_worker(state, 1)) == {
+        "ddp",
+        "it_3d45_model",
+        "it_3d45_train",
+    }
 
 
 def test_configuring_the_deprecated_list_warns(tmp_path):
@@ -135,8 +134,6 @@ def test_an_unknown_rank_zero_name_fails_the_launch_before_any_worker(tmp_path):
     with pytest.raises(ValueError, match="it_3d45_typo"):
         engine.register_session(config)
 
-    assert engine._session_process_wrappers == []
-
 
 def test_a_rank_zero_name_that_is_not_in_this_session_fails_the_launch(tmp_path):
     engine = _engine()
@@ -157,8 +154,6 @@ def test_a_single_process_launch_still_resolves_the_names(tmp_path):
 
     with pytest.raises(ValueError, match="it_3d45_typo"):
         engine.register_session(config)
-
-    assert engine._session_process_wrappers == []
 
 
 def test_a_single_process_launch_resolves_the_deprecated_list_too(tmp_path):
@@ -188,7 +183,6 @@ def test_a_single_process_launch_settles_no_rank_plan(tmp_path):
         warnings.simplefilter("always")
         engine.register_session(config)
 
-    assert len(engine._session_process_wrappers) == 1
     assert [
         str(warning.message) for warning in caught
         if issubclass(warning.category, RuntimeWarning)

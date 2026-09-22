@@ -18,7 +18,7 @@ from torch import nn
 
 from tests.test_utils import make_config
 from training_framework.components import Resource, requires_resource, resource
-from training_framework.components.builtin.model import TrainedModel
+from training_framework.components.builtin import TrainedModel
 from training_framework.session import TrainingSession
 
 

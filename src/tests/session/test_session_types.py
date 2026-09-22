@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from training_framework.components import Step, step
-from training_framework.components.registry import component_registry
+from training_framework.components import component_registry
 from training_framework.engine import TrainingEngine
 from training_framework.session import (
     Session,

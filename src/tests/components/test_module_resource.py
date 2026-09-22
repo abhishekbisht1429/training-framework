@@ -19,8 +19,8 @@ from training_framework.components import (
     requires_resource,
     resource,
 )
-from training_framework.components.builtin.checkpointing import Checkpointer
-from training_framework.engine.worker import load_session_for_worker
+from training_framework.components.builtin import Checkpointer
+from training_framework.engine import load_session_for_worker
 from training_framework.session import AnalysisSession, TrainingSession
 
 

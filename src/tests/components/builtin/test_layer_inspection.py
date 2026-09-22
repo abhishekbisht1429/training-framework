@@ -204,7 +204,9 @@ def test_layer_inspector_selects_union_of_name_and_type_matches_without_duplicat
     inspector.setup(session)
     try:
         assert inspector.matched_layer_names == ("attention",)
-        assert len(model.attention._forward_hooks) == 1
+        # Matched twice, hooked once: one forward pass, one capture.
+        model(torch.tensor(1.0))
+        assert len(inspector.captures["attention"]) == 1
     finally:
         inspector.teardown(session)
 
@@ -319,10 +321,15 @@ def test_layer_inspector_removes_hooks_on_teardown():
     session = _FakeSession(model)
     session.serve(inspector)
     inspector.setup(session)
-
     inspector.teardown(session)
 
-    assert len(model.attention._forward_hooks) == 0
+    # A hook left behind would capture alongside the fresh one.
+    inspector.setup(session)
+    try:
+        model(torch.tensor(1.0))
+        assert len(inspector.captures["attention"]) == 1
+    finally:
+        inspector.teardown(session)
 
 
 def test_layer_inspector_rolls_back_partial_hook_registration_on_setup_failure(
@@ -343,8 +350,16 @@ def test_layer_inspector_rolls_back_partial_hook_registration_on_setup_failure(
     with pytest.raises(RuntimeError, match="registration failed"):
         inspector.setup(session)
 
-    assert len(model.attention._forward_hooks) == 0
     assert dict(inspector.layers) == {}
+    # The hook registered before the failure is gone: a working setup now
+    # captures each forward pass once.
+    monkeypatch.undo()
+    inspector.setup(session)
+    try:
+        model(torch.tensor(1.0))
+        assert len(inspector.captures["attention"]) == 1
+    finally:
+        inspector.teardown(session)
 
 
 # -- per-iteration clearing, driven through a real AnalysisSession -----

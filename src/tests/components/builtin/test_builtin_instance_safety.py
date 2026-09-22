@@ -5,7 +5,8 @@ sibling once it can be configured twice. The single-instance path must not
 move, though, or every existing session would write somewhere new.
 """
 
-import pytest
+from pathlib import Path
+
 
 from tests.test_utils import component_named, make_config
 from training_framework.components import Resource, resource
@@ -41,41 +42,43 @@ def test_a_component_built_outside_a_session_has_no_suffix():
     assert Loose().instance_suffix is None
 
 
+def checkpoints_written(session, directory):
+    """Run `session` for its iterations and list what `directory` received."""
+    with session:
+        list(session)
+    path = Path(directory)
+    if not path.is_absolute():
+        path = Path(session.session_config.session_dir) / path
+    return sorted(entry.name for entry in path.iterdir()) if path.is_dir() else []
+
+
 def test_the_only_checkpointer_keeps_the_plain_directory(tmp_path):
-    session = TrainingSession(make_config(tmp_path / "plain-dir"))
-    checkpointer = component_named(session, "checkpointer")
+    session = TrainingSession(make_config(tmp_path / "plain-dir", max_iterations=1))
 
-    checkpointer.pre_session(session)
-
-    assert checkpointer._checkpoints_dir.endswith("/checkpoints")
+    assert checkpoints_written(session, "checkpoints")
 
 
 def test_a_second_checkpointer_writes_to_its_own_directory(tmp_path):
-    config = make_config(tmp_path / "own-dir")
+    config = make_config(tmp_path / "own-dir", max_iterations=1)
     config["checkpointer"] = {"checkpoint_every": 2}
     config["checkpointer#nightly"] = {"checkpoint_every": 10}
     session = TrainingSession(config)
 
-    plain = component_named(session, "checkpointer")
-    nightly = component_named(session, "checkpointer#nightly")
-    plain.pre_session(session)
-    nightly.pre_session(session)
+    with session:
+        list(session)
 
-    assert plain._checkpoints_dir.endswith("/checkpoints")
-    assert nightly._checkpoints_dir.endswith(
-        "/checkpoints_nightly"
-    )
+    session_dir = Path(session.session_config.session_dir)
+    assert len(list((session_dir / "checkpoints").iterdir())) == 1
+    assert len(list((session_dir / "checkpoints_nightly").iterdir())) == 1
 
 
 def test_an_explicit_checkpoints_dir_still_wins(tmp_path):
-    config = make_config(tmp_path / "explicit-dir")
+    config = make_config(tmp_path / "explicit-dir", max_iterations=1)
     config["checkpointer#nightly"] = {
         "checkpoint_every": 10,
         "checkpoints_dir": str(tmp_path / "somewhere-else"),
     }
     session = TrainingSession(config)
 
-    checkpointer = component_named(session, "checkpointer#nightly")
-    checkpointer.pre_session(session)
-
-    assert checkpointer._checkpoints_dir == str(tmp_path / "somewhere-else")
+    assert checkpoints_written(session, tmp_path / "somewhere-else")
+    assert not (Path(session.session_config.session_dir) / "checkpoints_nightly").exists()

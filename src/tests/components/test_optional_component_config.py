@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from training_framework.engine import Configurator
 from training_framework.engine import load_session_for_worker
 from training_framework.components import (
     Hook,
@@ -19,7 +18,7 @@ from training_framework.components import (
     wraps,
 )
 from training_framework.session import TrainingSession
-from tests.test_utils import has_resource_named, resource_named
+from tests.test_utils import configurator_for, has_resource_named, resource_named
 
 
 def _session_config(tmp_path):
@@ -361,14 +360,13 @@ def test_required_custom_constructor_uses_supplied_mapping(tmp_path):
     assert resource_named(session, "configured_dependency").value == 11
 
 
-def test_configurator_returns_mapping_components_only():
-    configurator = Configurator.__new__(Configurator)
-    configurator._session_configs = [{
+def test_configurator_returns_mapping_components_only(tmp_path, monkeypatch):
+    configurator = configurator_for(tmp_path, monkeypatch, {
         "session_config": {"max_iterations": 1},
         "component_bindings": {"role": "configured_component"},
         "empty_component": {},
         "configured_component": {"value": 11},
-    }]
+    })
 
     assert configurator.get_component_config(0, "empty_component") == {}
     assert configurator.get_component_config(0, "configured_component") == {
@@ -382,12 +380,11 @@ def test_configurator_returns_mapping_components_only():
         configurator.get_component_config(0, "inactive_component")
 
 
-def test_configurator_rejects_legacy_components_entry():
-    configurator = Configurator.__new__(Configurator)
-    configurator._session_configs = [{
+def test_configurator_rejects_legacy_components_entry(tmp_path, monkeypatch):
+    configurator = configurator_for(tmp_path, monkeypatch, {
         "session_config": {"max_iterations": 1},
         "components": ["legacy_component"],
-    }]
+    })
 
     with pytest.raises(ValueError, match="no longer supported"):
         configurator.get_session_definition(0)

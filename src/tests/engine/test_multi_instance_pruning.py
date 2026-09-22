@@ -1,6 +1,6 @@
 """What a secondary rank builds when a component is configured twice.
 
-`prepare_worker_state` settles a rank's component set before anything is
+A worker settles its rank's component set before anything is
 constructed, from the state and the configured bindings alone. With more than
 one instance of a component that set has to be decided per instance: pruning
 by component would take both or neither, and a consumer wired to one of them
@@ -20,9 +20,14 @@ from training_framework.components import (
     requires_resource,
     resource,
 )
-from training_framework.engine.worker import prepare_worker_state
+from training_framework.engine import load_session_for_worker
 from training_framework.session import TrainingSession
-from tests.test_utils import COMPONENTS_PACKAGE, register_test_components
+from tests.test_utils import (
+    COMPONENTS_PACKAGE,
+    component_named,
+    component_names,
+    register_test_components,
+)
 
 
 def _bindable_port() -> str:
@@ -89,8 +94,8 @@ def _rank_one_components(config) -> set[str]:
     with warnings.catch_warnings():
         # Pruning warnings are the subject of their own tests.
         warnings.simplefilter("ignore")
-        prepared = prepare_worker_state(state, 1)
-    return set(prepared["components_state"])
+        session = load_session_for_worker(state, 1)
+    return component_names(session)
 
 
 def test_a_rank_zero_only_instance_is_pruned_on_its_own(tmp_path):
@@ -149,7 +154,7 @@ def test_naming_an_instance_that_is_not_configured_is_reported(tmp_path):
     state = TrainingSession(config).get_state()
 
     with pytest.raises(RuntimeError, match="not configured in this session"):
-        prepare_worker_state(state, 1)
+        load_session_for_worker(state, 1)
 
 
 def test_rank_zero_pruning_leaves_rank_zero_state_alone(tmp_path):
@@ -161,9 +166,9 @@ def test_rank_zero_pruning_leaves_rank_zero_state_alone(tmp_path):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        prepare_worker_state(state, 1)
+        load_session_for_worker(state, 1)
 
-    # Preparing a worker must not mutate the state rank 0 still holds.
+    # Loading a worker must not mutate the state rank 0 still holds.
     assert {"mi_dep#a", "mi_dep#b"} <= set(state["components_state"])
 
 
@@ -179,6 +184,8 @@ def test_an_extension_override_reaches_one_instance(tmp_path):
 
     session.apply_extension_overrides(("logger#2.log_every=9",))
 
-    components = session._components
-    assert components.config_for_extension("logger#2") == {"log_every": 9}
-    assert components.config_for_extension("logger") == {"log_every": 1}
+    assert session.full_config["logger#2"] == {"log_every": 9}
+    assert session.full_config["logger"] == {"log_every": 1}
+    # The running instances pick it up too, each from its own entry.
+    assert component_named(session, "logger#2").call_every == 9
+    assert component_named(session, "logger").call_every == 1

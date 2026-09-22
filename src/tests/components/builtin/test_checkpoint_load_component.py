@@ -13,7 +13,7 @@ from torch import nn
 
 from tests.test_utils import make_config
 from training_framework.components import ComponentDependencyError, Resource, resource
-from training_framework.components.builtin.checkpointing import Checkpointer
+from training_framework.components.builtin import Checkpointer
 from training_framework.session import TrainingSession
 
 

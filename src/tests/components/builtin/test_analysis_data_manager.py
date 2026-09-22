@@ -17,7 +17,7 @@ from training_framework.components.builtin import (
     AnalysisDataManager,
     DataManager,
 )
-from training_framework.components.registry import component_registry
+from training_framework.components import component_registry
 from training_framework.session import AnalysisSession, Session, TrainingSession
 from tests.test_utils import resource_named
 

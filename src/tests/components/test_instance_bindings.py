@@ -5,6 +5,8 @@ Which instance satisfies a dependency is tested through configured sessions in
 accepts and how it resolves.
 """
 
+import re
+
 import pytest
 
 from training_framework.components import (
@@ -59,11 +61,22 @@ def test_a_binding_target_naming_an_unregistered_component_is_rejected():
         ComponentBindings({"wire_role": "not_a_component#b"})
 
 
-def test_a_binding_target_with_a_malformed_suffix_is_rejected():
+@pytest.mark.parametrize(
+    ("target", "match"),
+    (
+        ("wire_dep#", "invalid instance suffix ''"),
+        ("wire_dep#a.b", "invalid instance suffix 'a.b'"),
+        ("#2", "no component name before '#'"),
+    ),
+)
+def test_a_binding_target_with_a_malformed_instance_name_is_rejected(
+        target,
+        match,
+):
     declare_components()
 
-    with pytest.raises(ValueError, match="invalid instance suffix"):
-        ComponentBindings({"wire_role": "wire_dep#"})
+    with pytest.raises(ValueError, match=re.escape(match)):
+        ComponentBindings({"wire_role": target})
 
 
 def test_per_consumer_wiring_is_validated():
