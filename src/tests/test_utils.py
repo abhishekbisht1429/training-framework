@@ -86,6 +86,37 @@ def make_config(tmp_path, max_iterations=2, seed=123):
     }
 
 
+def build_session(
+        tmp_path,
+        components=None,
+        *,
+        session_type="training",
+        bindings=None,
+):
+    """Build a session holding `components`, the way configuration does.
+
+    `components` maps top-level config keys to their mappings. An analysis
+    session needs a `trained_model` mapping to construct at all. Unless the
+    caller configures or binds one, it gets an empty placeholder file:
+    construction only checks that the file exists, and the checkpoint is not
+    read until `setup`.
+    """
+    from training_framework.session import AnalysisSession, TrainingSession
+
+    config = make_config(tmp_path)
+    config["session_config"]["show_execution_graph"] = False
+    if bindings is not None:
+        config["component_bindings"] = bindings
+    config.update(components or {})
+    if session_type == "training":
+        return TrainingSession(config)
+    if "trained_model" not in config and "trained_model" not in (bindings or {}):
+        placeholder = tmp_path / "placeholder-checkpoint.pt"
+        placeholder.touch()
+        config["trained_model"] = {"model_checkpoint_path": str(placeholder)}
+    return AnalysisSession(config)
+
+
 def inject_dependencies(component, **dependencies):
     """Give a hand-built component the prerequisites a session would inject.
 

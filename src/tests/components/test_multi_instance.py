@@ -186,6 +186,25 @@ def test_a_consumer_may_name_the_instance_it_wants(tmp_path):
     assert consumer.linked_components == {"multi_dep": "multi_dep#b"}
 
 
+
+def test_wiring_applies_only_to_the_consumer_that_declared_it(tmp_path):
+    declare_dependency()
+    declare_consumer()
+    declare_consumer(name="multi_other")
+    config = make_config(tmp_path / "wired-one")
+    config["component_bindings"] = {
+        "multi_consumer": {"multi_dep": "multi_dep#b"},
+    }
+    config["multi_dep#a"] = {"tag": "a"}
+    config["multi_dep#b"] = {"tag": "b"}
+    config["multi_consumer"] = {}
+    config["multi_other"] = {}
+
+    # multi_other declared no wiring of its own, so for it the two instances
+    # are still undecidable.
+    with pytest.raises(ComponentDependencyError, match="multi_other"):
+        TrainingSession(config)
+
 # -- components that must stay unique -------------------------------------
 
 

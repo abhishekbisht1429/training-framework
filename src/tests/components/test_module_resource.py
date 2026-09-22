@@ -10,9 +10,8 @@ import pytest
 import torch
 from torch import nn
 
-from tests.test_utils import make_config, resource_named
+from tests.test_utils import build_session, make_config, resource_named
 from training_framework.components import (
-    Component,
     ComponentDependencyError,
     component_registry,
     ModuleResource,
@@ -23,20 +22,6 @@ from training_framework.components import (
 from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.engine.worker import load_session_for_worker
 from training_framework.session import AnalysisSession, TrainingSession
-from training_framework.session.components import SessionComponents
-
-
-def _construct_with(component_class, config=None, **dependencies):
-    """Build a component with prerequisites injected, as a session would.
-
-    Mirrors `SessionComponents._construct`: the prerequisites go into the
-    instance `__dict__` before `__init__` runs, so a component under test can
-    be built without standing up a whole session.
-    """
-    component = component_class.__new__(component_class)
-    component.__dict__[Component.DEPENDENCIES_ATTR] = dict(dependencies)
-    component.__init__(config)
-    return component
 
 
 class PicklableEncoder(ModuleResource):
@@ -74,28 +59,26 @@ def _declare_encoder_and_model():
     return Encoder, Model
 
 
-def _activate(config=None):
-    components = SessionComponents()
-    components.register_from_config(config or {"mr_model": {}, "mr_encoder": {}})
-    return components
+def _session(tmp_path, config=None):
+    return build_session(tmp_path, config or {"mr_model": {}, "mr_encoder": {}})
 
 
-def test_a_child_is_the_same_object_as_the_registered_resource():
+def test_a_child_is_the_same_object_as_the_registered_resource(tmp_path):
     _declare_encoder_and_model()
-    components = _activate()
+    session = _session(tmp_path)
 
-    model = components.get_resource("mr_model")
-    encoder = components.get_resource("mr_encoder")
+    model = resource_named(session, "mr_model")
+    encoder = resource_named(session, "mr_encoder")
 
     assert model.mr_encoder is encoder
     assert model.linked_components == {"mr_encoder": "mr_encoder"}
 
 
-def test_a_child_contributes_its_parameters_exactly_once():
+def test_a_child_contributes_its_parameters_exactly_once(tmp_path):
     _declare_encoder_and_model()
-    components = _activate()
-    model = components.get_resource("mr_model")
-    encoder = components.get_resource("mr_encoder")
+    session = _session(tmp_path)
+    model = resource_named(session, "mr_model")
+    encoder = resource_named(session, "mr_encoder")
 
     parameters = list(model.parameters())
 
@@ -104,7 +87,7 @@ def test_a_child_contributes_its_parameters_exactly_once():
         assert sum(parameter is other for other in parameters) == 1
 
 
-def test_a_child_attached_twice_still_contributes_its_parameters_once():
+def test_a_child_attached_twice_still_contributes_its_parameters_once(tmp_path):
     _declare_encoder_and_model()
 
     @requires_resource("mr_encoder")
@@ -116,18 +99,18 @@ def test_a_child_attached_twice_still_contributes_its_parameters_once():
             self.first = encoder
             self.second = encoder
 
-    components = _activate({"mr_twice": {}, "mr_encoder": {}})
-    twice = components.get_resource("mr_twice")
+    session = _session(tmp_path, {"mr_twice": {}, "mr_encoder": {}})
+    twice = resource_named(session, "mr_twice")
 
     assert twice.first is twice.second
     assert len(list(twice.parameters())) == 2
 
 
-def test_each_component_captures_only_the_weights_it_owns():
+def test_each_component_captures_only_the_weights_it_owns(tmp_path):
     _declare_encoder_and_model()
-    components = _activate()
-    model = components.get_resource("mr_model")
-    encoder = components.get_resource("mr_encoder")
+    session = _session(tmp_path)
+    model = resource_named(session, "mr_model")
+    encoder = resource_named(session, "mr_encoder")
 
     model_state = model.get_state()
     encoder_state = encoder.get_state()
@@ -138,10 +121,10 @@ def test_each_component_captures_only_the_weights_it_owns():
     assert encoder_state["linked"] == {}
 
 
-def test_set_state_loads_in_place_and_keeps_parameter_identity():
+def test_set_state_loads_in_place_and_keeps_parameter_identity(tmp_path):
     _declare_encoder_and_model()
-    components = _activate()
-    encoder = components.get_resource("mr_encoder")
+    session = _session(tmp_path)
+    encoder = resource_named(session, "mr_encoder")
 
     with torch.no_grad():
         encoder.linear.weight.fill_(0.5)
@@ -166,23 +149,7 @@ def test_a_dependency_free_module_resource_pickles_round_trip():
     assert torch.equal(restored.linear.weight, original.linear.weight)
 
 
-def test_injected_prerequisites_are_enough_to_construct_a_component():
-    _declare_encoder_and_model()
-
-    @requires_resource("mr_encoder")
-    @resource("mr_stubbed")
-    class Stubbed(ModuleResource):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.mr_encoder = self.get_dependency("mr_encoder")
-
-    encoder = PicklableEncoder({})
-    stubbed = _construct_with(Stubbed, {}, mr_encoder=encoder)
-
-    assert stubbed.mr_encoder is encoder
-
-
-def test_a_non_module_prerequisite_contributes_no_tensors():
+def test_a_non_module_prerequisite_contributes_no_tensors(tmp_path):
     @resource("mr_plain")
     class Plain(Resource):
         def setup(self, session):
@@ -199,17 +166,17 @@ def test_a_non_module_prerequisite_contributes_no_tensors():
             self.plain = self.get_dependency("mr_plain")
             self.own = nn.Linear(2, 2)
 
-    components = _activate({"mr_needs_module": {}, "mr_plain": {}})
-    needs_module = components.get_resource("mr_needs_module")
+    session = _session(tmp_path, {"mr_needs_module": {}, "mr_plain": {}})
+    needs_module = resource_named(session, "mr_needs_module")
 
-    assert needs_module.plain is components.get_resource("mr_plain")
+    assert needs_module.plain is resource_named(session, "mr_plain")
     assert needs_module.linked_components == {"mr_plain": "mr_plain"}
     assert set(needs_module.get_state()["state_dict"]) == {
         "own.weight", "own.bias",
     }
 
 
-def test_a_prerequisite_may_be_held_inside_a_container_module():
+def test_a_prerequisite_may_be_held_inside_a_container_module(tmp_path):
     _declare_encoder_and_model()
 
     @requires_resource("mr_encoder")
@@ -222,17 +189,17 @@ def test_a_prerequisite_may_be_held_inside_a_container_module():
             self.wrapper = nn.Sequential(self.get_dependency("mr_encoder"))
             self.gate = nn.Linear(4, 4)
 
-    components = _activate({"mr_nested": {}, "mr_encoder": {}})
-    nested = components.get_resource("mr_nested")
+    session = _session(tmp_path, {"mr_nested": {}, "mr_encoder": {}})
+    nested = resource_named(session, "mr_nested")
 
-    assert nested.wrapper[0] is components.get_resource("mr_encoder")
+    assert nested.wrapper[0] is resource_named(session, "mr_encoder")
     assert set(nested.get_state()["state_dict"]) == {"gate.weight", "gate.bias"}
     assert nested.get_state()["linked"] == {"mr_encoder": "mr_encoder"}
     # The encoder's weights are checkpointed once, by the encoder.
-    components.get_state()
+    session.get_state()
 
 
-def test_two_components_capturing_the_same_tensor_is_rejected():
+def test_two_components_capturing_the_same_tensor_is_rejected(tmp_path):
     shared = nn.Linear(4, 4)
 
     @resource("mr_first_owner")
@@ -248,16 +215,16 @@ def test_two_components_capturing_the_same_tensor_is_rejected():
             super().__init__(config)
             self.wrapper = nn.Sequential(shared)
 
-    components = _activate({"mr_first_owner": {}, "mr_second_owner": {}})
+    session = _session(tmp_path, {"mr_first_owner": {}, "mr_second_owner": {}})
 
     with pytest.raises(
         ComponentDependencyError,
         match="are the same tensor, so it would be checkpointed twice",
     ):
-        components.get_state()
+        session.get_state()
 
 
-def test_a_component_may_be_owned_privately_as_an_ordinary_module():
+def test_a_component_may_be_owned_privately_as_an_ordinary_module(tmp_path):
     _declare_encoder_and_model()
     encoder_class = component_registry()["mr_encoder"]
 
@@ -268,8 +235,8 @@ def test_a_component_may_be_owned_privately_as_an_ordinary_module():
             self.private = encoder_class({})
             self.stack = nn.Sequential(encoder_class({}))
 
-    components = _activate({"mr_private_owner": {}})
-    owner = components.get_resource("mr_private_owner")
+    session = _session(tmp_path, {"mr_private_owner": {}})
+    owner = resource_named(session, "mr_private_owner")
 
     # Nobody else holds these, so the owner checkpoints them itself.
     assert set(owner.get_state()["state_dict"]) == {
@@ -277,7 +244,7 @@ def test_a_component_may_be_owned_privately_as_an_ordinary_module():
         "stack.0.linear.weight", "stack.0.linear.bias",
     }
     assert owner.get_state()["linked"] == {}
-    components.get_state()
+    session.get_state()
 
 
 def test_a_privately_owned_component_survives_a_state_round_trip(tmp_path):
@@ -302,7 +269,7 @@ def test_a_privately_owned_component_survives_a_state_round_trip(tmp_path):
     assert torch.equal(weight, torch.full((4, 4), 0.5))
 
 
-def test_a_privately_owned_component_the_session_drives_is_rejected():
+def test_a_privately_owned_component_the_session_drives_is_rejected(tmp_path):
     @resource("mr_lifecycle")
     class WithLifecycle(ModuleResource):
         def setup(self, session):
@@ -314,20 +281,18 @@ def test_a_privately_owned_component_the_session_drives_is_rejected():
             super().__init__(config)
             self.private = WithLifecycle({})
 
-    components = _activate({"mr_lifecycle_owner": {}})
-    owner = components.get_resource("mr_lifecycle_owner")
+    session = _session(tmp_path, {"mr_lifecycle_owner": {}})
+    owner = resource_named(session, "mr_lifecycle_owner")
 
     with pytest.raises(ComponentDependencyError, match="driven by the session"):
         owner.get_state()
 
 
-def test_a_privately_owned_component_with_prerequisites_is_rejected():
-    _, model_class = _declare_encoder_and_model()
+def test_a_privately_owned_component_with_prerequisites_is_rejected(tmp_path):
+    _declare_encoder_and_model()
 
     # mr_model declares a prerequisite, so only the session can wire it.
-    dependent = _construct_with(
-        model_class, {}, mr_encoder=PicklableEncoder({}),
-    )
+    dependent = resource_named(_session(tmp_path), "mr_model")
 
     @resource("mr_dependent_owner")
     class Owner(ModuleResource):
@@ -339,7 +304,7 @@ def test_a_privately_owned_component_with_prerequisites_is_rejected():
         Owner({}).get_state()
 
 
-def test_a_child_may_hold_components_of_its_own():
+def test_a_child_may_hold_components_of_its_own(tmp_path):
     _declare_encoder_and_model()
 
     @requires_resource("mr_model")
@@ -350,25 +315,25 @@ def test_a_child_may_hold_components_of_its_own():
             self.mr_model = self.get_dependency("mr_model")
             self.gate = nn.Linear(2, 2)
 
-    components = _activate(
+    session = _session(tmp_path, 
         {"mr_outer": {}, "mr_model": {}, "mr_encoder": {}},
     )
-    outer = components.get_resource("mr_outer")
+    outer = resource_named(session, "mr_outer")
 
     # mr_model legitimately holds mr_encoder; only mr_model's own weights are
     # excluded here, and mr_encoder's are excluded by mr_model.
     assert set(outer.get_state()["state_dict"]) == {"gate.weight", "gate.bias"}
-    assert set(components.get_resource("mr_model").get_state()["state_dict"]) == {
+    assert set(resource_named(session, "mr_model").get_state()["state_dict"]) == {
         "head.weight",
         "head.bias",
     }
 
 
-def test_state_carrying_weights_the_component_does_not_own_is_rejected():
+def test_state_carrying_weights_the_component_does_not_own_is_rejected(tmp_path):
     _declare_encoder_and_model()
-    components = _activate()
-    model = components.get_resource("mr_model")
-    encoder = components.get_resource("mr_encoder")
+    session = _session(tmp_path)
+    model = resource_named(session, "mr_model")
+    encoder = resource_named(session, "mr_encoder")
 
     state = model.get_state()
     state["state_dict"]["mr_encoder.linear.weight"] = encoder.linear.weight.clone()
@@ -377,10 +342,10 @@ def test_state_carrying_weights_the_component_does_not_own_is_rejected():
         model.set_state(state)
 
 
-def test_state_missing_an_owned_key_is_rejected():
+def test_state_missing_an_owned_key_is_rejected(tmp_path):
     _declare_encoder_and_model()
-    components = _activate()
-    model = components.get_resource("mr_model")
+    session = _session(tmp_path)
+    model = resource_named(session, "mr_model")
 
     state = model.get_state()
     del state["state_dict"]["head.bias"]
@@ -389,10 +354,10 @@ def test_state_missing_an_owned_key_is_rejected():
         model.set_state(state)
 
 
-def test_state_with_a_mismatched_shape_names_the_component():
+def test_state_with_a_mismatched_shape_names_the_component(tmp_path):
     _declare_encoder_and_model()
-    components = _activate()
-    encoder = components.get_resource("mr_encoder")
+    session = _session(tmp_path)
+    encoder = resource_named(session, "mr_encoder")
 
     state = encoder.get_state()
     state["state_dict"]["linear.weight"] = torch.zeros(3, 3)

@@ -9,6 +9,7 @@ clears the global registries before each test.
 import pytest
 from torch import nn
 
+from tests.test_utils import build_session, component_named, resource_named
 from training_framework.components import (
     LifecycleHook,
     ModuleResource,
@@ -16,13 +17,6 @@ from training_framework.components import (
     hook,
     resource,
 )
-from training_framework.session.components import SessionComponents
-
-
-def _activate(config):
-    components = SessionComponents()
-    components.register_from_config(config)
-    return components
 
 
 def _declare_encoder():
@@ -35,7 +29,7 @@ def _declare_encoder():
     return Encoder
 
 
-def test_a_dependency_is_recorded_wherever_the_caller_puts_it():
+def test_a_dependency_is_recorded_wherever_the_caller_puts_it(tmp_path):
     _declare_encoder()
 
     @requires_resource("ld_encoder")
@@ -47,17 +41,17 @@ def test_a_dependency_is_recorded_wherever_the_caller_puts_it():
             encoder = self.get_dependency("ld_encoder")
             self.head = nn.Linear(encoder.linear.out_features, 2)
 
-    components = _activate({"ld_discards": {}, "ld_encoder": {}})
-    discards = components.get_resource("ld_discards")
+    session = build_session(tmp_path, {"ld_discards": {}, "ld_encoder": {}})
+    discards = resource_named(session, "ld_discards")
 
     assert discards.linked_components == {"ld_encoder": "ld_encoder"}
     assert set(discards.get_state()["state_dict"]) == {
         "head.weight", "head.bias",
     }
-    components.get_state()
+    session.get_state()
 
 
-def test_a_hook_records_the_dependency_it_asks_for():
+def test_a_hook_records_the_dependency_it_asks_for(tmp_path):
     _declare_encoder()
 
     @requires_resource("ld_encoder")
@@ -81,14 +75,14 @@ def test_a_hook_records_the_dependency_it_asks_for():
         def post_iteration_callback(self, session):
             pass
 
-    components = _activate({"ld_hook": {}, "ld_encoder": {}})
-    watcher = components.hooks["ld_hook"]
+    session = build_session(tmp_path, {"ld_hook": {}, "ld_encoder": {}})
+    watcher = component_named(session, "ld_hook")
 
-    assert watcher.encoder is components.get_resource("ld_encoder")
+    assert watcher.encoder is resource_named(session, "ld_encoder")
     assert watcher.linked_components == {"ld_encoder": "ld_encoder"}
 
 
-def _wired_model():
+def _wired_model(tmp_path):
     _declare_encoder()
 
     @requires_resource("ld_encoder")
@@ -99,12 +93,12 @@ def _wired_model():
             self.encoder = self.get_dependency("ld_encoder")
             self.head = nn.Linear(4, 2)
 
-    components = _activate({"ld_model": {}, "ld_encoder": {}})
-    return components, components.get_resource("ld_model")
+    session = build_session(tmp_path, {"ld_model": {}, "ld_encoder": {}})
+    return resource_named(session, "ld_model")
 
 
-def test_state_records_the_asked_name_and_the_implementation():
-    components, model = _wired_model()
+def test_state_records_the_asked_name_and_the_implementation(tmp_path):
+    model = _wired_model(tmp_path)
 
     state = model.get_state()
 
@@ -112,8 +106,8 @@ def test_state_records_the_asked_name_and_the_implementation():
     assert state["linked"] == {"ld_encoder": "ld_encoder"}
 
 
-def test_a_version_1_state_is_read_through_its_implementations():
-    components, model = _wired_model()
+def test_a_version_1_state_is_read_through_its_implementations(tmp_path):
+    model = _wired_model(tmp_path)
 
     state = model.get_state()
     # Version 1 keyed the map by the attribute the child was attached under,
@@ -124,8 +118,8 @@ def test_a_version_1_state_is_read_through_its_implementations():
     model.set_state(state)
 
 
-def test_a_version_1_state_from_a_different_wiring_is_rejected():
-    components, model = _wired_model()
+def test_a_version_1_state_from_a_different_wiring_is_rejected(tmp_path):
+    model = _wired_model(tmp_path)
 
     state = model.get_state()
     state["version"] = 1

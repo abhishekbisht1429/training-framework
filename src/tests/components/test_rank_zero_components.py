@@ -25,7 +25,7 @@ from training_framework.components import (
     resource,
     step,
 )
-from training_framework.session.components import SessionComponents
+from tests.test_utils import build_session
 from training_framework.session.config import TRAINING_SESSION_TYPE
 
 
@@ -76,11 +76,25 @@ def make_hook(name: str, *, requires: str | None = None) -> type[LifecycleHook]:
     return hook(name, session_type=TRAINING_SESSION_TYPE)(component)
 
 
-def components_for(*, model: str = "rz_model") -> SessionComponents:
-    """A component set that resolves the built-in `ddp` and its `model` role."""
-    return SessionComponents(
-        component_bindings={"model": model},
-        session_type=TRAINING_SESSION_TYPE,
+DDP_CONFIG = {
+    "world_size": 2,
+    "backend": "gloo",
+    "master_addr": "127.0.0.1",
+    "master_port": "29500",
+}
+
+
+def session_for(tmp_path, active, *, bindings=None):
+    """A session configuring `active`, with the built-in `ddp` bound to its
+    `model` role.
+
+    The session also holds the default logger and checkpointer. Both are
+    rank-zero-only by class, so no answer below includes them.
+    """
+    return build_session(
+        tmp_path,
+        {name: dict(DDP_CONFIG) if name == "ddp" else {} for name in active},
+        bindings={"model": "rz_model", **(bindings or {})},
     )
 
 
@@ -113,29 +127,28 @@ def test_the_built_in_reporting_components_are_rank_zero_only():
     assert not any(registry[name].rank_zero_only for name in parallel)
 
 
-def test_secondary_ranks_keep_everything_that_is_not_rank_zero_only():
+def test_secondary_ranks_keep_everything_that_is_not_rank_zero_only(tmp_path):
     make_resource("rz_model")
     make_step("rz_train", requires="ddp")
     rank_zero_only(make_hook("rz_report"))
     active = {"ddp", "rz_model", "rz_train", "rz_report"}
 
-    keep = components_for().rank_parallel_names(active_names=active)
+    keep = session_for(tmp_path, active).rank_parallel_names()
 
     assert keep == {"ddp", "rz_model", "rz_train"}
 
 
-def test_a_dependency_of_a_rank_zero_component_is_kept_unless_declared_too():
+def test_a_dependency_of_a_rank_zero_component_is_kept_unless_declared_too(tmp_path):
     """Nothing is dropped by inference, only by declaration."""
     make_resource("rz_model")
     make_resource("rz_reporting_sink")
     make_step("rz_train", requires="ddp")
     rank_zero_only(make_hook("rz_report", requires="rz_reporting_sink"))
     active = {"ddp", "rz_model", "rz_train", "rz_report", "rz_reporting_sink"}
-    components = components_for()
+    session = session_for(tmp_path, active)
 
-    kept = components.rank_parallel_names(active_names=active)
-    declared = components.rank_parallel_names(
-        active_names=active,
+    kept = session.rank_parallel_names()
+    declared = session.rank_parallel_names(
         rank_zero_components=["rz_reporting_sink"],
     )
 
@@ -143,19 +156,19 @@ def test_a_dependency_of_a_rank_zero_component_is_kept_unless_declared_too():
     assert declared == {"ddp", "rz_model", "rz_train"}
 
 
-def test_a_dependency_a_parallel_component_shares_is_kept():
+def test_a_dependency_a_parallel_component_shares_is_kept(tmp_path):
     make_resource("rz_model")
     make_resource("rz_shared")
     make_step("rz_train", requires="rz_shared")
     rank_zero_only(make_hook("rz_report", requires="rz_shared"))
     active = {"ddp", "rz_model", "rz_train", "rz_report", "rz_shared"}
 
-    keep = components_for().rank_parallel_names(active_names=active)
+    keep = session_for(tmp_path, active).rank_parallel_names()
 
     assert keep == {"ddp", "rz_model", "rz_train", "rz_shared"}
 
 
-def test_a_rank_zero_component_a_parallel_one_needs_is_kept_with_a_warning():
+def test_a_rank_zero_component_a_parallel_one_needs_is_kept_with_a_warning(tmp_path):
     """Correctness over pruning: a prerequisite has to exist on the rank."""
     make_resource("rz_model")
     rank_zero_only(make_resource("rz_report_sink"))
@@ -163,41 +176,37 @@ def test_a_rank_zero_component_a_parallel_one_needs_is_kept_with_a_warning():
     active = {"ddp", "rz_model", "rz_train", "rz_report_sink"}
 
     with pytest.warns(RuntimeWarning, match="rz_report_sink"):
-        keep = components_for().rank_parallel_names(active_names=active)
+        keep = session_for(tmp_path, active).rank_parallel_names()
 
     assert keep == {"ddp", "rz_model", "rz_train", "rz_report_sink"}
 
 
-def test_the_config_key_drops_a_component_that_is_not_marked():
+def test_the_config_key_drops_a_component_that_is_not_marked(tmp_path):
     make_resource("rz_model")
     make_step("rz_train", requires="ddp")
     make_hook("rz_report")
     active = {"ddp", "rz_model", "rz_train", "rz_report"}
 
-    keep = components_for().rank_parallel_names(
-        active_names=active,
-        rank_zero_components=["rz_report"],
+    keep = session_for(tmp_path, active).rank_parallel_names(rank_zero_components=["rz_report"],
     )
 
     assert keep == {"ddp", "rz_model", "rz_train"}
 
 
-def test_the_config_key_warns_when_it_excludes_a_component_using_ddp():
+def test_the_config_key_warns_when_it_excludes_a_component_using_ddp(tmp_path):
     """The escape hatch can recreate the hang the opt-in list invited."""
     make_resource("rz_model")
     make_hook("rz_report", requires="ddp")
     active = {"ddp", "rz_model", "rz_report"}
 
     with pytest.warns(RuntimeWarning, match="rz_report"):
-        keep = components_for().rank_parallel_names(
-            active_names=active,
-            rank_zero_components=["rz_report"],
+        keep = session_for(tmp_path, active).rank_parallel_names(rank_zero_components=["rz_report"],
         )
 
     assert keep == {"ddp", "rz_model"}
 
 
-def test_a_class_marked_component_using_ddp_is_not_questioned():
+def test_a_class_marked_component_using_ddp_is_not_questioned(tmp_path):
     """`timer` requires `optimizer`, which requires `ddp`, and is marked."""
     make_resource("rz_model")
     rank_zero_only(make_hook("rz_report", requires="ddp"))
@@ -205,91 +214,75 @@ def test_a_class_marked_component_using_ddp_is_not_questioned():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        keep = components_for().rank_parallel_names(active_names=active)
+        keep = session_for(tmp_path, active).rank_parallel_names()
 
     assert keep == {"ddp", "rz_model"}
     assert [str(warning.message) for warning in caught] == []
 
 
-def test_the_config_key_resolves_role_names_through_the_bindings():
+def test_the_config_key_resolves_role_names_through_the_bindings(tmp_path):
     make_resource("rz_model")
     make_hook("rz_report")
     active = {"ddp", "rz_model", "rz_report"}
-    components = SessionComponents(
-        component_bindings={"model": "rz_model", "reporter": "rz_report"},
-        session_type=TRAINING_SESSION_TYPE,
-    )
+    session = session_for(tmp_path, active, bindings={"reporter": "rz_report"})
 
-    keep = components.rank_parallel_names(
-        active_names=active,
+    keep = session.rank_parallel_names(
         rank_zero_components=["reporter"],
     )
 
     assert keep == {"ddp", "rz_model"}
 
 
-def test_the_config_key_rejects_a_component_this_session_does_not_configure():
+def test_the_config_key_rejects_a_component_this_session_does_not_configure(tmp_path):
     make_resource("rz_model")
     make_hook("rz_report")
     active = {"ddp", "rz_model"}
 
     with pytest.raises(RuntimeError, match="rank_zero_components"):
-        components_for().rank_parallel_names(
-            active_names=active,
-            rank_zero_components=["rz_report"],
+        session_for(tmp_path, active).rank_parallel_names(rank_zero_components=["rz_report"],
         )
 
 
-def test_the_ddp_resource_itself_is_never_dropped():
+def test_the_ddp_resource_itself_is_never_dropped(tmp_path):
     make_resource("rz_model")
     active = {"ddp", "rz_model"}
 
-    keep = components_for().rank_parallel_names(
-        active_names=active,
-        rank_zero_components=["ddp"],
+    keep = session_for(tmp_path, active).rank_parallel_names(rank_zero_components=["ddp"],
     )
 
     assert keep == {"ddp", "rz_model"}
 
 
-def test_parallel_components_still_decides_the_answer_when_given():
+def test_parallel_components_still_decides_the_answer_when_given(tmp_path):
     """The deprecated list keeps its exact opt-in meaning, empty included."""
     make_resource("rz_model")
     make_step("rz_train")
     make_hook("rz_report")
     active = {"ddp", "rz_model", "rz_train", "rz_report"}
-    components = components_for()
+    session = session_for(tmp_path, active)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        empty = components.rank_parallel_names(
-            active_names=active,
-            parallel_components=[],
-        )
-        listed = components.rank_parallel_names(
-            active_names=active,
-            parallel_components=["rz_train"],
-        )
+        empty = session.rank_parallel_names(parallel_components=[])
+        listed = session.rank_parallel_names(parallel_components=["rz_train"])
 
     assert empty == {"ddp", "rz_model"}
     assert listed == {"ddp", "rz_model", "rz_train"}
 
 
-def test_parallel_components_warns_when_it_prunes_a_component_using_ddp():
+def test_parallel_components_warns_when_it_prunes_a_component_using_ddp(tmp_path):
     make_resource("rz_model")
     make_step("rz_train", requires="ddp")
     active = {"ddp", "rz_model", "rz_train"}
 
     with pytest.warns(RuntimeWarning, match="rz_train"):
-        keep = components_for().rank_parallel_names(
-            active_names=active,
-            parallel_components=[],
+        keep = session_for(tmp_path, active).rank_parallel_names(parallel_components=[],
         )
 
     assert keep == {"ddp", "rz_model"}
 
 
-def test_parallel_components_is_silent_when_the_list_is_complete():
+def test_parallel_components_is_silent_when_the_list_is_complete(tmp_path):
     make_resource("rz_model")
     make_step("rz_train", requires="ddp")
     make_hook("rz_report")
@@ -297,9 +290,7 @@ def test_parallel_components_is_silent_when_the_list_is_complete():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        keep = components_for().rank_parallel_names(
-            active_names=active,
-            parallel_components=["rz_train"],
+        keep = session_for(tmp_path, active).rank_parallel_names(parallel_components=["rz_train"],
         )
 
     assert keep == {"ddp", "rz_model", "rz_train"}

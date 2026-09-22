@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
+from tests.test_utils import build_session
 from training_framework.components import (
     LifecycleHook,
     Resource,
@@ -13,11 +15,7 @@ from training_framework.components import (
     step,
     topological_sort_of_components,
 )
-from training_framework.components.diagnostics import explain_missing_component
-from training_framework.session.components import (
-    ComponentNotFoundError,
-    SessionComponents,
-)
+from training_framework.components.builtin import Checkpointer
 
 
 class _Resource(Resource):
@@ -59,13 +57,11 @@ def _consumer(dependency, *, session_type=None, name="diag_consumer"):
     )
 
 
-def _activate(config, *, session_type="training", bindings=None):
-    components = SessionComponents(
-        session_type=session_type,
-        component_bindings=bindings,
-    )
-    components.register_from_config(config)
-    return components
+def _checkpoint(tmp_path, *, session_type="training"):
+    """Save a session holding only the defaults, and return its path."""
+    path = tmp_path / "checkpoint.pt"
+    torch.save(build_session(tmp_path, session_type=session_type), path)
+    return path
 
 
 def _error(error_type, action):
@@ -74,11 +70,11 @@ def _error(error_type, action):
     return str(raised.value)
 
 
-def test_unknown_dependency_reports_all_registries_and_suggests_names():
+def test_unknown_dependency_reports_all_registries_and_suggests_names(tmp_path):
     resource("diag_tensorboard")(_new_class(_Resource, "DiagTensorboard"))
     _consumer("diag_tensorbord")
 
-    message = _error(RuntimeError, lambda: _activate({"diag_consumer": {}}))
+    message = _error(RuntimeError, lambda: build_session(tmp_path, {"diag_consumer": {}}))
 
     assert message.startswith("unmet prerequisite! Resource 'diag_tensorbord'")
     assert "Required by: Step 'diag_consumer' (DiagConsumer)" in message
@@ -90,7 +86,7 @@ def test_unknown_dependency_reports_all_registries_and_suggests_names():
     assert "Did you mean: 'diag_tensorboard'" in message
 
 
-def test_dependency_registered_only_for_another_session_type():
+def test_dependency_registered_only_for_another_session_type(tmp_path):
     resource("diag_trainer_only", session_type="training")(
         _new_class(_Resource, "DiagTrainerOnly")
     )
@@ -98,7 +94,7 @@ def test_dependency_registered_only_for_another_session_type():
 
     message = _error(
         RuntimeError,
-        lambda: _activate({"diag_consumer": {}}, session_type="analysis"),
+        lambda: build_session(tmp_path, {"diag_consumer": {}}, session_type="analysis"),
     )
 
     assert (
@@ -110,14 +106,14 @@ def test_dependency_registered_only_for_another_session_type():
     assert "@resource('diag_trainer_only')" in message
 
 
-def test_root_registered_only_for_another_session_type_names_its_category():
+def test_root_registered_only_for_another_session_type_names_its_category(tmp_path):
     hook("diag_training_hook", session_type="training")(
         _new_class(_Hook, "DiagTrainingHook")
     )
 
     message = _error(
         ValueError,
-        lambda: _activate({"diag_training_hook": {}}, session_type="analysis"),
+        lambda: build_session(tmp_path, {"diag_training_hook": {}}, session_type="analysis"),
     )
 
     assert message.startswith(
@@ -127,11 +123,11 @@ def test_root_registered_only_for_another_session_type_names_its_category():
     assert "@hook('diag_training_hook', session_type='analysis')" in message
 
 
-def test_dependency_registered_with_the_wrong_category():
+def test_dependency_registered_with_the_wrong_category(tmp_path):
     hook("diag_hook")(_new_class(_Hook, "DiagHook"))
     _consumer("diag_hook")
 
-    message = _error(RuntimeError, lambda: _activate({"diag_consumer": {}}))
+    message = _error(RuntimeError, lambda: build_session(tmp_path, {"diag_consumer": {}}))
 
     assert (
         "'diag_hook' is registered in the shared registry as a Hook "
@@ -139,7 +135,7 @@ def test_dependency_registered_with_the_wrong_category():
     ) in message
 
 
-def test_scoped_component_shadowing_a_shared_one_with_another_category():
+def test_scoped_component_shadowing_a_shared_one_with_another_category(tmp_path):
     resource("diag_shadowed")(_new_class(_Resource, "SharedResource"))
     hook("diag_shadowed", session_type="analysis")(
         _new_class(_Hook, "AnalysisHook")
@@ -148,7 +144,7 @@ def test_scoped_component_shadowing_a_shared_one_with_another_category():
 
     message = _error(
         RuntimeError,
-        lambda: _activate({"diag_consumer": {}}, session_type="analysis"),
+        lambda: build_session(tmp_path, {"diag_consumer": {}}, session_type="analysis"),
     )
 
     assert "registered in the 'analysis' registry as a Hook" in message
@@ -158,13 +154,13 @@ def test_scoped_component_shadowing_a_shared_one_with_another_category():
     ) in message
 
 
-def test_binding_is_named_when_the_bound_implementation_is_wrong():
+def test_binding_is_named_when_the_bound_implementation_is_wrong(tmp_path):
     hook("diag_bound_hook")(_new_class(_Hook, "DiagBoundHook"))
     _consumer("diag_role")
 
     message = _error(
         RuntimeError,
-        lambda: _activate(
+        lambda: build_session(tmp_path, 
             {"diag_consumer": {}},
             bindings={"diag_role": "diag_bound_hook"},
         ),
@@ -174,7 +170,7 @@ def test_binding_is_named_when_the_bound_implementation_is_wrong():
     assert "registered in the shared registry as a Hook" in message
 
 
-def test_binding_target_registered_only_for_another_session_type():
+def test_binding_target_registered_only_for_another_session_type(tmp_path):
     resource("diag_training_impl", session_type="training")(
         _new_class(_Resource, "DiagTrainingImpl")
     )
@@ -184,9 +180,10 @@ def test_binding_target_registered_only_for_another_session_type():
 
     message = _error(
         ValueError,
-        lambda: SessionComponents(
+        lambda: build_session(
+            tmp_path,
             session_type="analysis",
-            component_bindings={"diag_role_owner": "diag_training_impl"},
+            bindings={"diag_role_owner": "diag_training_impl"},
         ),
     )
 
@@ -197,13 +194,13 @@ def test_binding_target_registered_only_for_another_session_type():
     assert "registered only for session type(s) 'training' (as Resource)" in message
 
 
-def test_declared_role_without_implementation_keeps_role_message_and_adds_reason():
+def test_declared_role_without_implementation_keeps_role_message_and_adds_reason(tmp_path):
     role("diag_dataset", Resource, session_type="analysis")
     _consumer("diag_dataset", session_type="analysis")
 
     message = _error(
         RuntimeError,
-        lambda: _activate({"diag_consumer": {}}, session_type="analysis"),
+        lambda: build_session(tmp_path, {"diag_consumer": {}}, session_type="analysis"),
     )
 
     assert message.startswith("Role 'diag_dataset' (Resource)")
@@ -214,13 +211,13 @@ def test_declared_role_without_implementation_keeps_role_message_and_adds_reason
     assert message.count("Fix:") == 0
 
 
-def test_role_declared_only_for_another_session_type():
+def test_role_declared_only_for_another_session_type(tmp_path):
     role("diag_training_role", Resource, session_type="training")
     _consumer("diag_training_role", session_type="analysis")
 
     message = _error(
         RuntimeError,
-        lambda: _activate({"diag_consumer": {}}, session_type="analysis"),
+        lambda: build_session(tmp_path, {"diag_consumer": {}}, session_type="analysis"),
     )
 
     assert (
@@ -230,14 +227,13 @@ def test_role_declared_only_for_another_session_type():
     assert "component_bindings: {'diag_training_role'" in message
 
 
-def test_get_resource_registered_but_not_active():
+def test_loading_a_registered_but_inactive_component(tmp_path):
     resource("diag_inactive")(_new_class(_Resource, "DiagInactive"))
-    components = _activate({})
+    path = _checkpoint(tmp_path)
 
     with pytest.raises(KeyError) as raised:
-        components.get_resource("diag_inactive")
+        Checkpointer.load_component(path, "diag_inactive")
 
-    assert isinstance(raised.value, ComponentNotFoundError)
     message = str(raised.value)
     assert message.startswith("diag_inactive not found in resources!\n")
     assert (
@@ -247,13 +243,16 @@ def test_get_resource_registered_but_not_active():
     assert "Add a top-level 'diag_inactive' mapping" in message
 
 
-def test_get_resource_for_component_of_another_session_type():
+def test_loading_a_component_of_another_session_type(tmp_path):
     resource("diag_elsewhere", session_type="training")(
         _new_class(_Resource, "DiagElsewhere")
     )
-    components = _activate({}, session_type="analysis")
+    path = _checkpoint(tmp_path, session_type="analysis")
 
-    message = _error(KeyError, lambda: components.get_resource("diag_elsewhere"))
+    message = _error(
+        KeyError,
+        lambda: Checkpointer.load_component(path, "diag_elsewhere"),
+    )
 
     assert "registered only for session type(s) 'training'" in message
 
@@ -276,26 +275,14 @@ def test_execution_order_reports_registered_but_unconfigured_dependency():
     assert "not active in this session" in message
 
 
-def test_dependency_closure_reports_unconfigured_component():
+def test_a_rank_plan_naming_an_unconfigured_component_is_reported(tmp_path):
     resource("diag_closure")(_new_class(_Resource, "DiagClosure"))
-    components = _activate({})
+    session = build_session(tmp_path)
 
     message = _error(
         RuntimeError,
-        lambda: components.dependency_closure(["diag_closure"]),
+        lambda: session.rank_parallel_names(parallel_components=["diag_closure"]),
     )
 
     assert "is not configured in this session" in message
     assert "not active in this session" in message
-
-
-def test_explanation_is_empty_when_lookup_would_succeed():
-    resource("diag_present")(_new_class(_Resource, "DiagPresent"))
-
-    assert explain_missing_component(
-        "diag_present",
-        "diag_present",
-        expected_type=Resource,
-        session_type="training",
-        active_names={"diag_present"},
-    ) == ""

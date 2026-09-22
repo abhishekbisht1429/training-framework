@@ -6,7 +6,7 @@ registry fixture clears the global registries before each test.
 
 import pytest
 
-from tests.test_utils import make_config, resource_named
+from tests.test_utils import build_session, make_config, resource_named
 from training_framework.components import (
     ComponentDependencyError,
     Resource,
@@ -14,13 +14,6 @@ from training_framework.components import (
     resource,
 )
 from training_framework.session import TrainingSession
-from training_framework.session.components import SessionComponents
-
-
-def _activate(config, *, session_type="training"):
-    components = SessionComponents(session_type=session_type)
-    components.register_from_config(config)
-    return components
 
 
 class _InertResource(Resource):
@@ -33,7 +26,7 @@ class _InertResource(Resource):
         pass
 
 
-def test_components_are_constructed_prerequisite_first():
+def test_components_are_constructed_prerequisite_first(tmp_path):
     constructed = []
 
     @resource("wire_child")
@@ -50,14 +43,14 @@ def test_components_are_constructed_prerequisite_first():
             constructed.append("wire_parent")
             self.child = self.get_dependency("wire_child")
 
-    components = _activate({"wire_parent": {}, "wire_child": {}})
+    session = build_session(tmp_path, {"wire_parent": {}, "wire_child": {}})
 
     assert constructed == ["wire_child", "wire_parent"]
-    parent = components.get_resource("wire_parent")
-    assert parent.child is components.get_resource("wire_child")
+    parent = resource_named(session, "wire_parent")
+    assert parent.child is resource_named(session, "wire_child")
 
 
-def test_dependencies_resolve_through_bindings():
+def test_dependencies_resolve_through_bindings(tmp_path):
     @resource("wire_real_encoder")
     class Encoder(_InertResource):
         pass
@@ -69,16 +62,17 @@ def test_dependencies_resolve_through_bindings():
             super().__init__(config)
             self.encoder = self.get_dependency("wire_encoder")
 
-    components = SessionComponents(
-        component_bindings={"wire_encoder": "wire_real_encoder"},
+    session = build_session(
+        tmp_path,
+        {"wire_model": {}, "wire_real_encoder": {}},
+        bindings={"wire_encoder": "wire_real_encoder"},
     )
-    components.register_from_config({"wire_model": {}, "wire_real_encoder": {}})
 
-    model = components.get_resource("wire_model")
-    assert model.encoder is components.get_resource("wire_real_encoder")
+    model = resource_named(session, "wire_model")
+    assert model.encoder is resource_named(session, "wire_real_encoder")
 
 
-def test_requesting_an_undeclared_resource_is_rejected():
+def test_requesting_an_undeclared_resource_is_rejected(tmp_path):
     @resource("wire_secret")
     class Secret(_InertResource):
         pass
@@ -90,14 +84,16 @@ def test_requesting_an_undeclared_resource_is_rejected():
             self.get_dependency("wire_secret")
 
     with pytest.raises(ComponentDependencyError) as raised:
-        _activate({"wire_snooper": {}, "wire_secret": {}})
+        build_session(tmp_path, {"wire_snooper": {}, "wire_secret": {}})
 
     message = str(raised.value)
     assert "wire_snooper" in message
     assert "@requires_resource('wire_secret')" in message
 
 
-def test_a_dependency_cycle_is_reported_before_anything_is_constructed():
+def test_a_dependency_cycle_is_reported_before_anything_is_constructed(
+        tmp_path,
+):
     constructed = []
 
     @requires_resource("wire_cycle_b")
@@ -115,7 +111,7 @@ def test_a_dependency_cycle_is_reported_before_anything_is_constructed():
             constructed.append("b")
 
     with pytest.raises(RuntimeError, match="Cyclic dependency"):
-        _activate({"wire_cycle_a": {}, "wire_cycle_b": {}})
+        build_session(tmp_path, {"wire_cycle_a": {}, "wire_cycle_b": {}})
 
     assert constructed == []
 
@@ -153,34 +149,3 @@ def test_activating_a_component_after_setup_is_rejected(tmp_path):
     with session:
         with pytest.raises(RuntimeError, match="NEW phase"):
             session.activate_component("wire_frozen", {})
-
-
-def test_dependency_closure_can_be_resolved_before_construction():
-    @resource("wire_closure_child")
-    class Child(_InertResource):
-        pass
-
-    @requires_resource("wire_closure_child")
-    @resource("wire_closure_parent")
-    class Parent(_InertResource):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.child = self.get_dependency("wire_closure_child")
-
-    @resource("wire_closure_other")
-    class Other(_InertResource):
-        pass
-
-    components = SessionComponents()
-
-    closure = components.dependency_closure(
-        ["wire_closure_parent"],
-        active_names={
-            "wire_closure_parent",
-            "wire_closure_child",
-            "wire_closure_other",
-        },
-    )
-
-    assert closure == {"wire_closure_parent", "wire_closure_child"}
-    assert components.components == {}
