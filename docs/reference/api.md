@@ -41,7 +41,10 @@ under a different topology.
 
 `training_framework.engine` exports `LaunchTopology` and
 `resolve_launch_topology`, which settle a run's process topology from the
-command line, the environment and the configuration.
+command line, the environment and the configuration, and `host_rendezvous`,
+which binds the topology's rendezvous port (a free one when none is set) and
+holds it in a `HostedRendezvous` until `close()`; the engine calls it for
+every multi-process launch.
 
 `training_framework.components.naming` holds the instance-name syntax:
 `INSTANCE_SEPARATOR`, `parse_instance_name(name)` (returning the component

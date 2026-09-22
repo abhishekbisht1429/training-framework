@@ -9,7 +9,11 @@ from training_framework.engine.supervision import (
     monitor_processes,
     process_ready_waitables,
 )
-from training_framework.engine.topology import resolve_launch_topology
+from training_framework.engine.topology import (
+    HostedRendezvous,
+    host_rendezvous,
+    resolve_launch_topology,
+)
 from training_framework.engine.worker import SessionProcessWrapper
 from training_framework.engine.worker import (
     _STOP_SYNC_GRACE_PERIOD,
@@ -40,6 +44,8 @@ class TrainingEngine:
             _STOP_SYNC_POLL_INTERVAL,
         )
         self._session_process_wrappers: list[SessionProcessWrapper] = []
+        # One per multi-process launch, held until its workers have joined.
+        self._rendezvous: list[HostedRendezvous] = []
 
     @property
     def _topology_overrides(self):
@@ -94,6 +100,10 @@ class TrainingEngine:
         )
         world_size = 1 if topology is None else topology.world_size
         self._check_rank_component_plan(session, world_size)
+        if topology is not None:
+            hosted = host_rendezvous(topology)
+            self._rendezvous.append(hosted)
+            topology = hosted.topology
 
         self._session_process_wrappers = [
             SessionProcessWrapper(
@@ -170,7 +180,10 @@ class TrainingEngine:
             from_checkpoint=False,
         )
         world_size = 1 if topology is None else topology.world_size
+        hosted = None
         if topology is not None:
+            hosted = host_rendezvous(topology)
+            topology = hosted.topology
             # Keep the parent's session agreeing with the workers when the
             # launch resolved a different topology than the file states.
             config = dict(config)
@@ -179,23 +192,30 @@ class TrainingEngine:
                 **topology.config_overlay(),
             }
 
-        sessions = [
-            session_class(
-                deepcopy(dict(config)),
-                **deepcopy(dict(session_kwargs)),
-            )
-            for _ in range(world_size)
-        ]
-        self._check_rank_component_plan(sessions[0], world_size)
+        try:
+            sessions = [
+                session_class(
+                    deepcopy(dict(config)),
+                    **deepcopy(dict(session_kwargs)),
+                )
+                for _ in range(world_size)
+            ]
+            self._check_rank_component_plan(sessions[0], world_size)
 
-        wrappers = [
-            SessionProcessWrapper(
-                session=session,
-                rank=rank,
-                **self._wrapper_kwargs(topology),
-            )
-            for rank, session in enumerate(sessions)
-        ]
+            wrappers = [
+                SessionProcessWrapper(
+                    session=session,
+                    rank=rank,
+                    **self._wrapper_kwargs(topology),
+                )
+                for rank, session in enumerate(sessions)
+            ]
+        except BaseException:
+            if hosted is not None:
+                hosted.close()
+            raise
+        if hosted is not None:
+            self._rendezvous.append(hosted)
         self._session_process_wrappers.extend(wrappers)
 
     @staticmethod
@@ -259,6 +279,11 @@ class TrainingEngine:
             process = wrapper.process
             if wrapper.started and not process.is_alive():
                 process.close()
+        # Only after every worker has joined: a worker still in its process
+        # group may yet need the store.
+        for hosted in self._rendezvous:
+            hosted.close()
+        self._rendezvous = []
 
     @context_entry
     def __enter__(self):

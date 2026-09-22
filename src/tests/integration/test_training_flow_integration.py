@@ -4,7 +4,6 @@ import importlib
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -36,12 +35,6 @@ def _register_integration_components() -> None:
         importlib.import_module(_COMPONENTS_PACKAGE)
     else:
         importlib.reload(existing)
-
-
-def _available_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _wait_for_paths(paths, timeout: float = 30.0) -> None:
@@ -114,7 +107,6 @@ def _ddp_session_config(
                 "integration_results",
             ],
             "master_addr": "127.0.0.1",
-            "master_port": str(_available_local_port()),
         },
         "data_manager": {
             "batch_size": 2,

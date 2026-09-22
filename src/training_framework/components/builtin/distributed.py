@@ -3,6 +3,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, override
 
 import torch
@@ -16,6 +17,9 @@ from training_framework.components import (
     singleton,
 )
 from training_framework.util import requires_context
+
+#: How long a worker waits to reach the launcher's rendezvous store.
+RENDEZVOUS_TIMEOUT = timedelta(minutes=5)
 
 if TYPE_CHECKING:
     from training_framework.session import Session
@@ -104,6 +108,10 @@ class DDPResource(Resource):
         self._master_addr = config["master_addr"]
         self._master_port = config["master_port"]
         self._ddp_wrapped_model = None
+        # Set by the launcher's worker, never by configuration, and never
+        # saved; see `join_hosted_store`.
+        self._joins_hosted_store = False
+        self._store = None
 
     @property
     def backend(self):
@@ -144,6 +152,16 @@ class DDPResource(Resource):
     def config(self):
         return deepcopy(self._config)
 
+    def join_hosted_store(self) -> None:
+        """Meet the other ranks on the store the launcher is holding.
+
+        The engine binds the rendezvous port before it starts any worker and
+        keeps it bound, so no other process can take it in between. Without
+        this, `setup` has rank 0 bind the port itself, as a session driven by
+        hand needs.
+        """
+        self._joins_hosted_store = True
+
     @property
     @requires_context
     def wrapped_model(self):
@@ -166,12 +184,30 @@ class DDPResource(Resource):
             torch.cuda.set_device(self._local_rank)
             session.set_device(torch.device("cuda", self._local_rank))
 
-        torch.distributed.init_process_group(
-            backend=self._backend,
-            init_method=_tcp_init_method(self._master_addr, self._master_port),
-            rank=self._rank,
-            world_size=self._world_size,
-        )
+        if self._joins_hosted_store:
+            self._store = torch.distributed.TCPStore(
+                self._master_addr,
+                int(self._master_port),
+                self._world_size,
+                is_master=False,
+                timeout=RENDEZVOUS_TIMEOUT,
+            )
+            torch.distributed.init_process_group(
+                backend=self._backend,
+                store=self._store,
+                rank=self._rank,
+                world_size=self._world_size,
+            )
+        else:
+            torch.distributed.init_process_group(
+                backend=self._backend,
+                init_method=_tcp_init_method(
+                    self._master_addr,
+                    self._master_port,
+                ),
+                rank=self._rank,
+                world_size=self._world_size,
+            )
 
         try:
             model = self.get_dependency("model")
@@ -181,9 +217,11 @@ class DDPResource(Resource):
             self._ddp_wrapped_model = DDP(model, device_ids=device_ids)
         except Exception:
             torch.distributed.destroy_process_group()
+            self._store = None
             raise
 
     @override
     def teardown(self, session):
         self._ddp_wrapped_model = None
         torch.distributed.destroy_process_group()
+        self._store = None

@@ -37,10 +37,18 @@ sessions:
       checkpoint_every: 100
 ```
 
-`master_addr` and `master_port` are handed to the process group as a
-`tcp://` address; the resource never writes `MASTER_ADDR` or `MASTER_PORT`
-into the environment, so nothing it sets outlives the session. An IPv6
-`master_addr` is bracketed for you.
+`master_port` may be left out, and usually should be: the engine then asks
+the operating system for a free port. Either way, the engine binds the port
+itself before it starts any worker and holds it until every worker has
+finished; the ranks meet through that rendezvous. Nothing else on the machine
+can take the port between the moment it is chosen and the moment the ranks
+use it.
+
+A session driven by hand, outside the engine, has no launcher to hold the
+port: its DDP resource hands `master_addr` and `master_port` to the process
+group as a `tcp://` address, and rank 0 binds it. Either way the resource
+never writes `MASTER_ADDR` or `MASTER_PORT` into the environment, so nothing
+it sets outlives the session. An IPv6 `master_addr` is bracketed for you.
 
 ## The launch decides the topology
 
@@ -58,12 +66,18 @@ Each is taken from the first of these that provides it:
    ambient variable;
 3. the configuration, whether from the file or the checkpoint;
 4. a default: the visible CUDA device count when resuming, and a free local
-   port.
+   port, which the engine binds and holds for the run.
 
 A new session must still state its `world_size`. Asking for more ranks than
 there are visible CUDA devices is an error when the run is new, and a warning
 with a fallback to the device count when it is resumed — so a checkpoint
 written on eight GPUs resumes on four without being told to.
+
+A port that is already in use is reported when the run is launched, before
+any worker starts. A port you configured, by file, environment or override,
+is an error: you asked for that port. A port that came from a checkpoint
+belonged to the machine that wrote it, so it is replaced with a free one and
+a warning.
 
 `--resume-session` accepts these three overrides and rejects any other, which
 belongs to `--extend-session`.
@@ -151,7 +165,8 @@ During setup, the built-in DDP resource:
 
 - selects CUDA device `rank` for the NCCL backend;
 - updates `session.device` to that CUDA device;
-- initializes the process group at `tcp://<master_addr>:<master_port>`;
+- initializes the process group through the rendezvous the engine holds, or
+  at `tcp://<master_addr>:<master_port>` when the session is driven by hand;
 - retrieves the `model` resource, moving it to the rank-local CUDA device when
   using NCCL; and
 - wraps the model with `torch.nn.parallel.DistributedDataParallel`.

@@ -3,7 +3,9 @@
 from training_framework.engine.config import Configurator
 from training_framework.engine.core import TrainingEngine
 from training_framework.engine.topology import (
+    HostedRendezvous,
     LaunchTopology,
+    host_rendezvous,
     resolve_launch_topology,
 )
 from training_framework.engine.worker import (
@@ -14,9 +16,11 @@ from training_framework.engine.worker import (
 
 __all__ = [
     "Configurator",
+    "HostedRendezvous",
     "LaunchTopology",
     "SessionProcessWrapper",
     "TrainingEngine",
+    "host_rendezvous",
     "load_session_for_worker",
     "resolve_launch_topology",
     "session_process_worker",

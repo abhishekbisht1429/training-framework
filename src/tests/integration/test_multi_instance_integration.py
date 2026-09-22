@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import socket
 import sys
 from pathlib import Path
 
@@ -44,12 +43,6 @@ def _register_integration_components() -> None:
             importlib.reload(existing)
 
 
-def _available_local_port() -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return str(sock.getsockname()[1])
-
-
 def _session_config(tmp_path, output_dir):
     return {
         "session_config": {
@@ -70,7 +63,6 @@ def _session_config(tmp_path, output_dir):
             "world_size": 1,
             "backend": "gloo",
             "master_addr": "127.0.0.1",
-            "master_port": _available_local_port(),
         },
         "data_manager": {
             "batch_size": 1,

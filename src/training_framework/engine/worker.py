@@ -144,6 +144,14 @@ def load_session_for_worker(
     session = Session.from_state(
         prepare_worker_state(session_state, rank, launch_topology)
     )
+    if (
+            launch_topology is not None
+            and launch_topology.store_hosted
+            and session._components.has_resource("ddp")
+    ):
+        # Runtime only, never saved: a checkpoint of this session must not
+        # send a later, hand-driven session looking for a store that is gone.
+        session._components.get_resource("ddp").join_hosted_store()
 
     if (
             session_update_params is not None

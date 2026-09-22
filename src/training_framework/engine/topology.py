@@ -1,38 +1,23 @@
 from __future__ import annotations
 
 import os
-import socket
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
+import torch.distributed as dist
+
+from training_framework.components.builtin.distributed import (
+    RENDEZVOUS_TIMEOUT,
+)
 
 
 #: `ddp` configuration keys that describe the launch rather than the run.
 TOPOLOGY_KEYS = ("world_size", "master_addr", "master_port")
 
 _DEFAULT_MASTER_ADDR = "127.0.0.1"
-
-
-def available_local_port() -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((_DEFAULT_MASTER_ADDR, 0))
-        return str(sock.getsockname()[1])
-
-
-def _port_is_free(port: Any) -> bool:
-    try:
-        port_number = int(port)
-    except (TypeError, ValueError):
-        return False
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind((_DEFAULT_MASTER_ADDR, port_number))
-    except OSError:
-        return False
-    return True
 
 
 @dataclass(frozen=True)
@@ -49,8 +34,15 @@ class LaunchTopology:
     world_size: int
     backend: str
     master_addr: str
-    master_port: str
+    #: `None` until the launcher binds one: see `host_rendezvous`.
+    master_port: str | None
     devices_per_node: int
+    #: The port came from a checkpoint, which describes the machine that
+    #: wrote it, so a taken one may be replaced rather than refused.
+    master_port_from_checkpoint: bool = False
+    #: The launcher holds a rendezvous store on `master_addr:master_port`,
+    #: and the workers join it as clients.
+    store_hosted: bool = False
 
     @property
     def uses_cuda(self) -> bool:
@@ -205,29 +197,84 @@ def resolve_launch_topology(
         stored,
         stored_is_stale=from_checkpoint,
     )
-    if master_port is None:
-        master_port = available_local_port()
-    elif (
-            master_port_source == "config"
-            and from_checkpoint
-            and not _port_is_free(master_port)
-    ):
-        # The stored port belonged to the machine that wrote the checkpoint
-        # and is taken here. Say so rather than failing in the rendezvous.
-        replacement = available_local_port()
-        warnings.warn(
-            f"ddp.master_port={master_port} from the checkpoint is already "
-            f"in use; rendezvous will use port {replacement} instead.",
-            stacklevel=2,
-        )
-        master_port = replacement
-
+    # No port is chosen here. Choosing one and binding it later, in a
+    # worker, leaves a window in which anything on the machine can take it;
+    # `host_rendezvous` binds it and keeps it bound instead.
     return LaunchTopology(
         world_size=world_size,
         backend=backend,
         master_addr=str(master_addr),
-        master_port=str(master_port),
+        master_port=None if master_port is None else str(master_port),
         devices_per_node=devices_per_node,
+        master_port_from_checkpoint=(
+            master_port_source == "config" and from_checkpoint
+        ),
+    )
+
+
+class HostedRendezvous:
+    """A rendezvous store the launcher holds for one launch's workers.
+
+    The port is bound from the moment it is chosen until `close`, so no other
+    process can take it before the workers meet on it.
+    """
+
+    def __init__(self, store, topology: LaunchTopology):
+        self._store = store
+        self.topology = topology
+
+    def close(self) -> None:
+        """Release the port. Call once every worker has left the group."""
+        self._store = None
+
+    def __enter__(self) -> "HostedRendezvous":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+
+def _start_store(topology: LaunchTopology, port: int):
+    return dist.TCPStore(
+        topology.master_addr,
+        port,
+        topology.world_size,
+        is_master=True,
+        wait_for_workers=False,
+        timeout=RENDEZVOUS_TIMEOUT,
+    )
+
+
+def host_rendezvous(topology: LaunchTopology) -> HostedRendezvous:
+    """Bind this launch's rendezvous port and hold it for the workers.
+
+    With no port configured, the operating system picks a free one. A
+    configured port that is taken is an error, reported now rather than by
+    rank 0 once the other ranks are already waiting -- except a port that
+    came from a checkpoint, which belonged to the machine that wrote it and
+    is replaced with a warning.
+    """
+    requested = 0 if topology.master_port is None else int(topology.master_port)
+    try:
+        store = _start_store(topology, requested)
+    except dist.DistNetworkError as error:
+        if requested == 0:
+            raise
+        if not topology.master_port_from_checkpoint:
+            raise RuntimeError(
+                f"ddp.master_port={requested} is already in use on "
+                f"{topology.master_addr}. Choose another port, or leave "
+                "ddp.master_port out and the launcher picks a free one."
+            ) from error
+        store = _start_store(topology, 0)
+        warnings.warn(
+            f"ddp.master_port={requested} from the checkpoint is already in "
+            f"use; rendezvous will use port {store.port} instead.",
+            stacklevel=2,
+        )
+    return HostedRendezvous(
+        store,
+        replace(topology, master_port=str(store.port), store_hosted=True),
     )
 
 

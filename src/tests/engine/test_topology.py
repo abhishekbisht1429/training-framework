@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,6 +11,8 @@ import torch
 from training_framework.engine import (
     Configurator,
     LaunchTopology,
+    TrainingEngine,
+    host_rendezvous,
     load_session_for_worker,
     resolve_launch_topology,
 )
@@ -32,6 +35,15 @@ def _bindable_port() -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return str(sock.getsockname()[1])
+
+
+def _can_bind(port) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", int(port)))
+        except OSError:
+            return False
+    return True
 
 
 def _ddp_config(**overrides: Any) -> dict[str, Any]:
@@ -187,41 +199,184 @@ def test_an_unusable_world_size_is_rejected(world_size):
         resolve_launch_topology(_ddp_config(world_size=world_size))
 
 
-def test_an_absent_master_port_is_allocated():
+def test_an_absent_master_port_is_left_to_the_launcher():
     config = _ddp_config()
     del config["master_port"]
 
-    topology = resolve_launch_topology(config)
+    assert resolve_launch_topology(config).master_port is None
 
-    assert 0 < int(topology.master_port) < 65536
+
+# ---------------------------------------------------------------------------
+# Hosting the rendezvous
+# ---------------------------------------------------------------------------
+
+
+def test_an_absent_master_port_is_allocated_and_held_until_closed():
+    config = _ddp_config()
+    del config["master_port"]
+
+    with host_rendezvous(resolve_launch_topology(config)) as hosted:
+        port = hosted.topology.master_port
+        assert 0 < int(port) < 65536
+        assert hosted.topology.store_hosted
+        # Bound from the moment it was chosen, so nothing else can take it
+        # before the workers meet on it.
+        assert not _can_bind(port)
+
+    assert _can_bind(port)
 
 
 def test_a_free_master_port_is_reused_quietly(recwarn):
     port = _bindable_port()
 
-    topology = resolve_launch_topology(
+    with host_rendezvous(resolve_launch_topology(
         _ddp_config(master_port=port),
         from_checkpoint=True,
-    )
+    )) as hosted:
+        assert hosted.topology.master_port == port
 
-    assert topology.master_port == port
     assert [str(warning.message) for warning in recwarn] == []
 
 
-def test_a_taken_master_port_is_replaced():
+def test_a_taken_master_port_from_a_checkpoint_is_replaced():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen(1)
         port = str(taken.getsockname()[1])
 
         with pytest.warns(UserWarning, match="already in use"):
-            topology = resolve_launch_topology(
+            hosted = host_rendezvous(resolve_launch_topology(
                 _ddp_config(master_port=port),
                 from_checkpoint=True,
-            )
+            ))
 
-    assert topology.master_port != port
-    assert 0 < int(topology.master_port) < 65536
+        with hosted:
+            assert hosted.topology.master_port != port
+            assert 0 < int(hosted.topology.master_port) < 65536
+
+
+def test_a_configured_master_port_that_is_taken_is_refused():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        port = str(taken.getsockname()[1])
+
+        with pytest.raises(
+                RuntimeError,
+                match=rf"ddp\.master_port={port} is already in use",
+        ):
+            host_rendezvous(resolve_launch_topology(
+                _ddp_config(master_port=port),
+            ))
+
+
+def _launch_config(tmp_path, **ddp_overrides: Any) -> dict[str, Any]:
+    register_test_components()
+    ddp = _ddp_config(**ddp_overrides)
+    del ddp["parallel_components"]
+    return {
+        "session_config": {
+            "rng_seed": 7,
+            "sessions_dir": str(tmp_path),
+            "max_iterations": 2,
+            "device": "cpu",
+            "components_package": COMPONENTS_PACKAGE,
+        },
+        "component_bindings": {"model": "it_3d45_model"},
+        "ddp": ddp,
+        "it_3d45_model": {},
+    }
+
+
+def _launcher(config) -> TrainingEngine:
+    """An engine that registers `config` on entry and starts no worker."""
+    return TrainingEngine(SimpleNamespace(
+        mode="new",
+        session_configs=[config],
+        process_timeout_on_join=10,
+        heartbeat_timeout=30,
+        topology_overrides=None,
+        debug=True,
+    ))
+
+
+def test_the_launcher_holds_the_rendezvous_port_until_it_exits(tmp_path):
+    port = _bindable_port()
+
+    with _launcher(_launch_config(tmp_path, master_port=port)):
+        # Registered, no worker started yet: the port is already held.
+        assert not _can_bind(port)
+
+    assert _can_bind(port)
+
+
+class _StopAtRendezvous(Exception):
+    pass
+
+
+def _rendezvous_call(monkeypatch, session) -> dict[str, Any]:
+    """Enter `session` and return how `ddp` rendezvouses.
+
+    Stops at the first rendezvous step, so nothing waits on a port: joining
+    a store shows up as `{"store": ...}`, a plain rendezvous as the
+    `init_process_group` keyword arguments.
+    """
+    calls = []
+
+    def join_store(*args, **kwargs):
+        calls.append({"store": (args, kwargs)})
+        raise _StopAtRendezvous
+
+    def init_process_group(*args, **kwargs):
+        calls.append(kwargs)
+        raise _StopAtRendezvous
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.distributed, "TCPStore", join_store)
+        patch.setattr(
+            torch.distributed,
+            "init_process_group",
+            init_process_group,
+        )
+        with pytest.raises(_StopAtRendezvous):
+            with session:
+                pass
+    [call] = calls
+    return call
+
+
+def test_only_a_launched_worker_joins_the_hosted_store(tmp_path, monkeypatch):
+    config = _launch_config(tmp_path, world_size=1)
+    state = TrainingSession(config).get_state()
+
+    with host_rendezvous(resolve_launch_topology(config["ddp"])) as hosted:
+        worker = load_session_for_worker(
+            state,
+            0,
+            launch_topology=hosted.topology,
+        )
+        saved = worker.get_state()
+        assert "store" in _rendezvous_call(monkeypatch, worker)
+
+    # The worker's checkpoint says nothing about a store that is gone: driven
+    # by hand, it rendezvouses on its own port as before.
+    restored = TrainingSession.from_state(saved)
+    call = _rendezvous_call(monkeypatch, restored)
+    assert "store" not in call
+    assert call["init_method"].startswith("tcp://127.0.0.1:")
+
+
+def test_a_launch_whose_configured_port_is_taken_fails_at_registration(
+        tmp_path,
+):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        port = str(taken.getsockname()[1])
+
+        with pytest.raises(RuntimeError, match=f"master_port={port}"):
+            with _launcher(_launch_config(tmp_path, master_port=port)):
+                pass
 
 
 def test_an_override_replaces_the_master_endpoint():
