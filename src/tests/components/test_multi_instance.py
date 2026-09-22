@@ -7,7 +7,7 @@ its own state.
 
 import pytest
 
-from tests.test_utils import make_config
+from tests.test_utils import component_named, component_names, make_config
 from training_framework.components import (
     ComponentDependencyError,
     Resource,
@@ -61,11 +61,12 @@ def test_a_suffixed_key_activates_its_own_instance(tmp_path):
     config["multi_dep#b"] = {"tag": "second"}
 
     session = TrainingSession(config)
-    components = session._components.components
+    first = component_named(session, "multi_dep")
+    second = component_named(session, "multi_dep#b")
 
-    assert components["multi_dep"].tag == "first"
-    assert components["multi_dep#b"].tag == "second"
-    assert components["multi_dep"] is not components["multi_dep#b"]
+    assert first.tag == "first"
+    assert second.tag == "second"
+    assert first is not second
 
 
 def test_every_instance_may_be_suffixed(tmp_path):
@@ -76,9 +77,9 @@ def test_every_instance_may_be_suffixed(tmp_path):
 
     session = TrainingSession(config)
 
-    assert "multi_dep" not in session._components.components
-    assert session._components.components["multi_dep#a"].tag == "a"
-    assert session._components.components["multi_dep#b"].tag == "b"
+    assert "multi_dep" not in component_names(session)
+    assert component_named(session, "multi_dep#a").tag == "a"
+    assert component_named(session, "multi_dep#b").tag == "b"
 
 
 def test_each_instance_keeps_its_own_state(tmp_path):
@@ -92,8 +93,8 @@ def test_each_instance_keeps_its_own_state(tmp_path):
     restored = TrainingSession.from_state(state)
 
     assert sorted(state["components_state"])[:2] == ["checkpointer", "logger"]
-    assert restored._components.components["multi_dep#a"].tag == "a"
-    assert restored._components.components["multi_dep#b"].tag == "b"
+    assert component_named(restored, "multi_dep#a").tag == "a"
+    assert component_named(restored, "multi_dep#b").tag == "b"
 
 
 def test_a_checkpointed_instance_records_its_component(tmp_path):
@@ -119,8 +120,8 @@ def test_a_dependency_uses_the_only_instance(tmp_path):
 
     session = TrainingSession(config)
 
-    consumer = session._components.components["multi_consumer"]
-    assert consumer.dependency is session._components.components["multi_dep#b"]
+    consumer = component_named(session, "multi_consumer")
+    assert consumer.dependency is component_named(session, "multi_dep#b")
 
 
 def test_a_dependency_prefers_the_unsuffixed_instance(tmp_path):
@@ -134,7 +135,7 @@ def test_a_dependency_prefers_the_unsuffixed_instance(tmp_path):
     session = TrainingSession(config)
 
     # Adding an instance must not rewire a consumer that already worked.
-    assert session._components.components["multi_consumer"].dependency.tag == "plain"
+    assert component_named(session, "multi_consumer").dependency.tag == "plain"
 
 
 def test_an_undecidable_dependency_is_rejected(tmp_path):
@@ -180,7 +181,7 @@ def test_a_consumer_may_name_the_instance_it_wants(tmp_path):
 
     session = TrainingSession(config)
 
-    consumer = session._components.components["multi_consumer"]
+    consumer = component_named(session, "multi_consumer")
     assert consumer.dependency.tag == "b"
     assert consumer.linked_components == {"multi_dep": "multi_dep#b"}
 
@@ -221,7 +222,7 @@ def test_a_singleton_component_may_still_be_configured_once(tmp_path):
 
     session = TrainingSession(config)
 
-    assert "multi_only_one#b" in session._components.components
+    assert "multi_only_one#b" in component_names(session)
 
 
 def test_the_ddp_resource_is_a_singleton():

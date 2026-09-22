@@ -9,7 +9,7 @@ split itself, which later phases rely on.
 
 import pytest
 
-from tests.test_utils import make_config
+from tests.test_utils import component_named, make_config
 from training_framework.components import (
     Resource,
     requires_resource,
@@ -81,7 +81,7 @@ def test_only_a_suffixed_name_is_an_instance_name():
 
 def test_a_constructed_component_is_named_per_instance(tmp_path):
     session = TrainingSession(make_config(tmp_path / "identity"))
-    logger = session._components.components["logger"]
+    logger = component_named(session, "logger")
 
     # Set on the instance, not inherited from the class.
     assert "name" in logger.__dict__
@@ -91,7 +91,7 @@ def test_a_constructed_component_is_named_per_instance(tmp_path):
 
 def test_an_instance_keeps_the_registered_name_of_its_class(tmp_path):
     session = TrainingSession(make_config(tmp_path / "implementation"))
-    logger = session._components.components["logger"]
+    logger = component_named(session, "logger")
 
     assert logger.implementation_name == "logger"
     assert type(logger).name == "logger"
@@ -99,7 +99,7 @@ def test_an_instance_keeps_the_registered_name_of_its_class(tmp_path):
 
 def test_naming_an_instance_does_not_rename_its_class(tmp_path):
     session = TrainingSession(make_config(tmp_path / "class-untouched"))
-    logger = session._components.components["logger"]
+    logger = component_named(session, "logger")
 
     session._components._stamp_identity(logger, "logger#2")
 
@@ -139,7 +139,7 @@ def test_wiring_records_the_instance_that_was_handed_over(tmp_path):
     config = make_config(tmp_path / "wiring")
     config["identity_consumer"] = {}
     session = TrainingSession(config)
-    consumer = session._components.components["identity_consumer"]
+    consumer = component_named(session, "identity_consumer")
 
     assert consumer.linked_components == {
         "identity_dependency": "identity_dependency",
@@ -175,7 +175,7 @@ def test_a_state_without_an_implementation_still_restores(tmp_path):
 
     restored = TrainingSession.from_state(state)
 
-    assert restored._components.components["logger"].name == "logger"
+    assert component_named(restored, "logger").name == "logger"
 
 
 def test_a_state_disagreeing_with_its_own_name_is_rejected(tmp_path):

@@ -100,6 +100,28 @@ def inject_dependencies(component, **dependencies):
     return component
 
 
+def _named(components, session, name, kind):
+    target = session.resolve_component_name(name)
+    for component in components:
+        if component.name == target:
+            return component
+    raise KeyError(f"{name} not found in {kind}!")
+
+
+def all_components(session):
+    """Every resource, hook and step the session holds."""
+    return (
+        session.get_all_resources()
+        + session.get_all_hooks()
+        + session.get_all_steps()
+    )
+
+
+def component_names(session) -> set[str]:
+    """The instance names of everything the session holds."""
+    return {component.name for component in all_components(session)}
+
+
 def resource_named(session, name):
     """Return the resource `name` refers to, for a test to inspect.
 
@@ -108,11 +130,12 @@ def resource_named(session, name):
     implementation bound to it -- and matches the instance name exactly.
     Components take their prerequisites with `get_dependency` instead.
     """
-    target = session.resolve_component_name(name)
-    for component in session.get_all_resources():
-        if component.name == target:
-            return component
-    raise KeyError(f"{name} not found in resources!")
+    return _named(session.get_all_resources(), session, name, "resources")
+
+
+def component_named(session, name):
+    """Like `resource_named`, but also finds hooks and steps."""
+    return _named(all_components(session), session, name, "components")
 
 
 def has_resource_named(session, name) -> bool:
