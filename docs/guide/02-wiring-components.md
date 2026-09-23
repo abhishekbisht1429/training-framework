@@ -22,12 +22,17 @@ metrics: {}
 ```
 
 The framework recursively activates resources, hooks, steps, and wrapped hooks
-required by those roots, constructing each one after everything it declared. A
-missing dependency is constructed automatically and without arguments only when
-its effective constructor is the inherited `Component.__init__`. If its class
-or a component base class defines another constructor, add a top-level mapping
-for it. Unrelated registered components stay inactive. A dependency cycle has
-no valid construction order and is rejected, naming the chain that closed it.
+required by those roots, plus any [companions](#companions) they declare, and
+constructs each one after everything it declared. A missing dependency is
+constructed automatically when that needs no decision: its class declares a
+[`config_schema`](../concepts/component-model.md#declaring-a-configuration-schema)
+whose every field has a default (it is then built with `{}`, so it can still be
+changed by `--extend-session`), or its effective constructor is the inherited
+`Component.__init__` (built without arguments). Otherwise, add a top-level
+mapping for it. Unrelated registered components stay inactive. Every component
+the roots need is known and checked before any constructor runs. A dependency
+cycle has no valid construction order and is rejected, naming the chain that
+closed it.
 The former top-level `components` list is no longer supported; configs that
 contain it receive a migration error.
 
@@ -58,7 +63,7 @@ registered name or a virtual role. Configuration belongs under the registered
 implementation name; defining `optimizer` as a top-level component is rejected.
 Without explicit configuration, the role may still be activated by a dependency
 or built-in default when normal constructor rules permit it. Dependencies such
-as `@requires_step("optimizer")` resolve to `my_custom_optimizer`. The
+as `@requires_resource("optimizer")` resolve to `my_custom_optimizer`. The
 registered name is used in component state and shown in the execution graph,
 which also includes a `COMPONENT BINDINGS` section.
 
@@ -268,11 +273,47 @@ The resulting order controls resource setup, hook callbacks, and step execution.
 Teardown and post-iteration hook callbacks use reverse order.
 
 Activating a component automatically activates its recursive dependency and
-wrapping-target closure when each omitted dependency uses the inherited
-component constructor. Activation follows dependency edges outward: activating
-a wrapped hook alone does not activate hooks that wrap it. Under DDP, every
-rank activates the same components except those declared rank-zero-only — see
+wrapping-target closure when each omitted dependency can be built without
+configuration (see [Selecting components](#selecting-components)). Activation
+follows dependency edges outward: activating a wrapped hook alone does not
+activate hooks that wrap it. Under DDP, every rank activates the same
+components except those declared rank-zero-only — see
 [What each rank builds](05-distributed-training.md#what-each-rank-builds).
+
+## Companions
+
+A resource cannot require a step, so a resource whose work is done by a step
+would be active with nothing driving it. `@activates(name)` declares such a
+*companion*: activating the component activates `name` too.
+
+```python
+from training_framework.components import activates, requires_resource, resource, step
+
+
+@activates("optimizer_step")
+@resource("optimizer")
+class Optimizer(Resource):
+    ...
+
+
+@requires_resource("optimizer")
+@step("optimizer_step")
+class OptimizerStep(Step):
+    ...
+```
+
+A companion only says what must be active. It is not a prerequisite -- it is
+not constructed first, not handed over by `get_dependency`, and adds no
+ordering edge -- so it may require the component that activates it, as
+`optimizer_step` requires `optimizer`, without forming a cycle. Two components
+may activate each other.
+
+The companion name is resolved like a dependency, so per-consumer
+`component_bindings` redirect it (`optimizer: {optimizer_step: my_step}`).
+It is kept on every rank that keeps the component activating it. A session
+that holds a component without its companion -- for instance one registered by
+hand -- is rejected when it orders its components, and the execution graph
+shows the relationship as `activates: Step.optimizer_step`.
 
 ---
 

@@ -632,6 +632,38 @@ def wraps(hook_name: str):
     return wrapper
 
 
+def activates(component_name: str):
+    """Declare a companion: activating this component also activates `name`.
+
+    A companion is neither a prerequisite nor an ordering constraint. It is
+    not constructed first, not injected, and adds no edge to the execution
+    order, so it may itself depend on the component that activates it. It
+    exists for a component whose purpose is carried out by another one that
+    nothing else would pull in -- a resource driven by a step, for instance,
+    which a resource cannot require.
+    """
+    validate_component_name(component_name, kind="Activated component name")
+
+    def wrapper(cls):
+        if not isinstance(cls, type) or not issubclass(cls, (Step, Hook, Resource)):
+            name = getattr(cls, "__name__", repr(cls))
+            raise TypeError(
+                "@activates can only be applied to Step, Hook, or Resource "
+                f"subclasses. '{name}' is neither."
+            )
+        if "activated_components" not in cls.__dict__:
+            cls.activated_components = list(
+                getattr(cls, "activated_components", ())
+            )
+        if component_name in cls.activated_components:
+            raise ValueError(
+                f"'{cls.__name__}' already activates '{component_name}'"
+            )
+        cls.activated_components.append(component_name)
+        return cls
+    return wrapper
+
+
 def singleton(cls):
     """Mark a component a session may hold only one instance of.
 

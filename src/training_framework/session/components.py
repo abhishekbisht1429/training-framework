@@ -1,5 +1,6 @@
 import warnings
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from training_framework.components import (
@@ -14,6 +15,7 @@ from training_framework.components import (
     Step,
 )
 from training_framework.components.base import _DEPENDENCIES_KEYWORD
+from training_framework.components.config_schema import has_all_defaults
 from training_framework.components.config import (
     reject_legacy_components_entry,
     reserved_config_names,
@@ -37,6 +39,25 @@ from training_framework.components.registry import (
     topological_sort_of_components,
 )
 from training_framework.session.config import TRAINING_SESSION_TYPE, normalize_session_type
+
+
+@dataclass(frozen=True)
+class _ActivationEdge:
+    """One component another needs active, as resolved for that consumer."""
+
+    asked: str
+    target: str
+    expected_type: type[Component] | None
+    prerequisite: bool
+    """True for a requirement or wrap target; False for an `@activates`
+    companion, which is only brought along."""
+
+
+@dataclass(frozen=True)
+class _PlannedComponent:
+    component_class: type[Component]
+    constructor_args: tuple
+    edges: list[_ActivationEdge]
 
 
 class ComponentNotFoundError(KeyError):
@@ -583,115 +604,217 @@ class SessionComponents:
         self._activate_all([name], component_configs)
         return resolved_name
 
+    def _activation_edges(
+            self,
+            component_class: type[Component],
+            consumer: str,
+            active: Iterable[str],
+    ) -> list["_ActivationEdge"]:
+        """Return every component `consumer` needs active, resolved for it.
+
+        The one place a component's outgoing edges are listed, so planning,
+        ordering and `dependency_closure` cannot disagree about them. An edge
+        is a *prerequisite* (a declared requirement or wrap target: built
+        first, and ordered before) or a *companion* (`@activates`: only
+        brought along). Both are resolved per consumer, so nested
+        `component_bindings` redirect either.
+        """
+        edges = [
+            _ActivationEdge(
+                asked=name,
+                target=self.resolve_dependency(
+                    name, consumer=consumer, active=active,
+                ),
+                expected_type=dependency_type,
+                prerequisite=True,
+            )
+            for name, dependency_type in self._dependency_specs(component_class)
+        ]
+        edges.extend(
+            _ActivationEdge(
+                asked=name,
+                target=self.resolve_dependency(
+                    name, consumer=consumer, active=active,
+                ),
+                expected_type=None,
+                prerequisite=False,
+            )
+            for name in getattr(component_class, "activated_components", ())
+        )
+        return edges
+
     def _activate_all(
             self,
             roots: Iterable[str],
             component_configs: Mapping[str, Mapping],
     ) -> None:
-        visiting: list[str] = []
-        # Every instance this call will end up holding. A dependency has to be
-        # resolved against all of them, not against the ones built so far, or
-        # a component activated early would see a second instance as the only
-        # one simply because the first had not been constructed yet.
-        planned = set(component_configs) | {
-            self.resolve_name(root) for root in roots
-        }
+        """Activate `roots` and everything they need, in three phases.
 
-        # Checked against everything the session will hold, not only what
-        # this call adds, or a second activate_component() would slip a
-        # second instance past it.
-        self._check_instance_limits(planned | set(self.components))
-
-        def activate(target: str) -> None:
-            resolved_name, component_class = self._registered_component_class(
-                target,
+        Which components must be active, the order they are built in, and the
+        order they run in are three different relations, and only the last
+        two can have a cycle. Planning (reachability over every edge, with
+        all validation), ordering (prerequisite edges only) and construction
+        are therefore separate, and no constructor runs until the first two
+        have succeeded.
+        """
+        roots = list(roots)
+        plan = self._plan_activation(roots, component_configs)
+        for name in self._construction_order(plan, roots):
+            planned = plan[name]
+            component = self._construct(
+                planned.component_class,
+                name,
+                *planned.constructor_args,
+                dependencies={
+                    edge.asked: edge.target
+                    for edge in planned.edges
+                    if edge.prerequisite and edge.expected_type is Resource
+                },
             )
-            if resolved_name in self.components:
+            self._register_component_instance(component)
+
+    def _plan_activation(
+            self,
+            roots: list[str],
+            component_configs: Mapping[str, Mapping],
+    ) -> dict[str, "_PlannedComponent"]:
+        """Return every component to build, in discovery order, validated.
+
+        Reachability over prerequisites and companions alike: a component
+        reached twice is simply already planned, so no relation here can
+        form a cycle. Each edge is resolved once, against every instance this
+        call will hold that is known when it is resolved: the configured and
+        root names from the start (the only way an instance name enters the
+        session), plus unsuffixed names as they are discovered. The ordering
+        and construction phases reuse these resolutions rather than resolving
+        again.
+        """
+        known = (
+            set(component_configs)
+            | {self.resolve_name(root) for root in roots}
+            | set(self.components)
+        )
+        plan: dict[str, _PlannedComponent] = {}
+
+        def visit(name: str, component_class: type[Component]) -> None:
+            if name in self.components or name in plan:
                 return
-            if resolved_name in visiting:
-                # Components are wired as they are constructed, so a cycle has
-                # no valid construction order. Report it here, where the chain
-                # that closed it is still known.
-                chain = " -> ".join([*visiting, resolved_name])
-                raise RuntimeError(
-                    f"Cyclic dependency detected in the component graph! {chain}"
+            edges = self._activation_edges(component_class, name, known)
+            plan[name] = _PlannedComponent(
+                component_class=component_class,
+                constructor_args=self._constructor_args(
+                    name, component_class, component_configs,
+                ),
+                edges=edges,
+            )
+            for edge in edges:
+                _, target_class = self._registered_component_class(
+                    edge.asked,
+                    edge.expected_type,
+                    consumer=component_class,
+                    resolved_name=edge.target,
                 )
-
-            visiting.append(resolved_name)
-            try:
-                # Kept as each dependency is resolved and handed to
-                # _construct, so the instance injected is the very one this
-                # call decided to activate. Resolving again inside _construct
-                # would read the components built so far, where a sibling
-                # that is merely not built yet looks like it does not exist.
-                resource_dependencies: dict[str, str] = {}
-                for dependency_name, dependency_type in self._dependency_specs(
-                        component_class,
-                ):
-                    # Resolved against this consumer, so a component wired to
-                    # a particular instance activates that one.
-                    dependency_target = self.resolve_dependency(
-                        dependency_name,
-                        consumer=resolved_name,
-                        active=planned | set(self.components),
-                    )
-                    self._registered_component_class(
-                        dependency_name,
-                        dependency_type,
-                        consumer=component_class,
-                        resolved_name=dependency_target,
-                    )
-                    activate(dependency_target)
-                    if dependency_type is Resource:
-                        resource_dependencies[dependency_name] = (
-                            dependency_target
-                        )
-
-                if resolved_name in component_configs:
-                    component = self._construct(
-                        component_class,
-                        resolved_name,
-                        component_configs[resolved_name],
-                        dependencies=resource_dependencies,
-                    )
-                elif is_instance_name(resolved_name):
-                    # Only a configured key declares an instance. Creating one
-                    # because something is wired to it would turn a mistyped
-                    # suffix into a fresh, unconfigured instance -- a run that
-                    # works and is quietly wrong.
-                    configured = sorted(
-                        name for name in planned | set(self.components)
-                        if implementation_of(name)
-                        == implementation_of(resolved_name)
-                    )
-                    raise ComponentDependencyError(
-                        f"Component instance '{resolved_name}' is not "
-                        "configured in this session, so nothing can be wired "
-                        "to it. An instance is created only by a top-level "
-                        f"'{resolved_name}' key. Configured instances of "
-                        f"'{implementation_of(resolved_name)}': "
-                        f"{configured or 'none'}."
-                    )
-                elif component_class.__init__ is Component.__init__:
-                    component = self._construct(
-                        component_class,
-                        resolved_name,
-                        dependencies=resource_dependencies,
-                    )
-                else:
-                    raise RuntimeError(
-                        f"Component '{resolved_name}' is required but defines "
-                        "a custom constructor. Add a top-level component "
-                        f"mapping for '{resolved_name}'."
-                    )
-                self._register_component_instance(component)
-            finally:
-                visiting.pop()
+                known.add(edge.target)
+                visit(edge.target, target_class)
 
         for root in roots:
             # A configured name says which instance to create, so it is taken
             # literally. Only a *dependency* is resolved to an instance.
-            activate(root)
+            visit(*self._registered_component_class(root))
+
+        # Checked against everything the session will hold -- what this call
+        # plans, companions included, and what an earlier call added -- or a
+        # second activate_component() would slip a second instance past it.
+        self._check_instance_limits(set(plan) | set(self.components))
+        return plan
+
+    def _constructor_args(
+            self,
+            name: str,
+            component_class: type[Component],
+            component_configs: Mapping[str, Mapping],
+    ) -> tuple:
+        """Return the arguments `name` is constructed with, or say why none.
+
+        A configured component gets its mapping. An unconfigured one is built
+        only when that needs no decision: its constructor is the inherited
+        one, or its `config_schema` gives every field a default, in which
+        case it gets `{}` so it holds a configuration mapping like any
+        configured component (and so can be extended later).
+        """
+        if name in component_configs:
+            return (component_configs[name],)
+        if is_instance_name(name):
+            # Only a configured key declares an instance. Creating one because
+            # something is wired to it would turn a mistyped suffix into a
+            # fresh, unconfigured instance -- a run that works and is quietly
+            # wrong.
+            configured = sorted(
+                configured_name
+                for configured_name in {*component_configs, *self.components}
+                if implementation_of(configured_name) == implementation_of(name)
+            )
+            raise ComponentDependencyError(
+                f"Component instance '{name}' is not configured in this "
+                "session, so nothing can be wired to it. An instance is "
+                f"created only by a top-level '{name}' key. Configured "
+                f"instances of '{implementation_of(name)}': "
+                f"{configured or 'none'}."
+            )
+        if has_all_defaults(component_class.config_schema):
+            return ({},)
+        if component_class.__init__ is Component.__init__:
+            return ()
+        raise RuntimeError(
+            f"Component '{name}' is required but defines a custom "
+            "constructor. Add a top-level component mapping for "
+            f"'{name}'."
+        )
+
+    def _construction_order(
+            self,
+            plan: Mapping[str, "_PlannedComponent"],
+            roots: list[str],
+    ) -> list[str]:
+        """Return the planned names prerequisite-first, or report a cycle.
+
+        Depth-first over prerequisite edges only; a companion is never a
+        prerequisite, so a companion that requires the component activating
+        it is not a cycle. Walked from the roots in configured order and then
+        from every planned name in discovery order, which is how a companion
+        is reached. Without companions this is exactly the order activation
+        has always constructed in, so seeded constructors draw the same
+        numbers.
+        """
+        order: list[str] = []
+        done: set[str] = set(self.components)
+        visiting: list[str] = []
+
+        def visit(name: str) -> None:
+            if name in done:
+                return
+            if name in visiting:
+                # Components are wired as they are constructed, so a cycle has
+                # no valid construction order. Report it here, where the chain
+                # that closed it is still known.
+                chain = " -> ".join([*visiting, name])
+                raise RuntimeError(
+                    f"Cyclic dependency detected in the component graph! {chain}"
+                )
+            visiting.append(name)
+            try:
+                for edge in plan[name].edges:
+                    if edge.prerequisite:
+                        visit(edge.target)
+            finally:
+                visiting.pop()
+            done.add(name)
+            order.append(name)
+
+        starts = [self.resolve_name(root) for root in roots]
+        for name in [*starts, *plan]:
+            visit(name)
+        return order
 
     def _check_instance_limits(self, planned: Iterable[str]) -> None:
         """Reject a second instance of a component that must stay unique.
@@ -728,11 +851,14 @@ class SessionComponents:
             *,
             active_names: Iterable[str] | None = None,
     ) -> set[str]:
-        """Return `names` plus everything they depend on, transitively.
+        """Return `names` plus everything they need active, transitively.
 
-        `active_names` lets a caller resolve the closure before any component
-        is constructed -- the dependency graph is class-level, so the worker
-        can decide what a rank needs without building the session first.
+        Follows the same edges as activation -- prerequisites and
+        `@activates` companions -- so a rank keeps whatever activation would
+        have brought along. `active_names` lets a caller resolve the closure
+        before any component is constructed -- the graph is class-level, so
+        the worker can decide what a rank needs without building the session
+        first.
         """
         active = (
             set(self.components)
@@ -760,21 +886,16 @@ class SessionComponents:
                 return
 
             closure.add(resolved_name)
-            for dependency_name, dependency_type in self._dependency_specs(
-                    component_class,
+            for edge in self._activation_edges(
+                    component_class, resolved_name, active,
             ):
-                dependency_target = self.resolve_dependency(
-                    dependency_name,
-                    consumer=resolved_name,
-                    active=active,
-                )
                 self._registered_component_class(
-                    dependency_name,
-                    dependency_type,
+                    edge.asked,
+                    edge.expected_type,
                     consumer=component_class,
-                    resolved_name=dependency_target,
+                    resolved_name=edge.target,
                 )
-                visit(dependency_target)
+                visit(edge.target)
 
         for name in names:
             visit(name)
@@ -867,11 +988,11 @@ class SessionComponents:
         rank_zero.discard(ddp_name)
 
         # Only the names this session wrote down are questioned. A class-level
-        # @rank_zero_only is its author's settled decision -- `timer` requires
-        # `optimizer`, which requires `ddp`, and it is still rank-zero-only on
-        # purpose -- while a config entry is a per-run override worth a second
-        # look, because excluding a participant in the collectives is what
-        # leaves the other ranks waiting.
+        # @rank_zero_only is its author's settled decision -- a reporter may
+        # require something that requires `ddp` and still be rank-zero-only
+        # on purpose -- while a config entry is a per-run override worth a
+        # second look, because excluding a participant in the collectives is
+        # what leaves the other ranks waiting.
         using_ddp = sorted(
             name for name in declared_names - {ddp_name}
             if ddp_name in self.dependency_closure([name], active_names=active)

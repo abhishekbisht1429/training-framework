@@ -332,6 +332,44 @@ def topological_sort_components(
             )
             prerequisites_graph[wrapped_id].append(wrapper.id)
 
+    # Companions (`@activates`) add no edge: they are not ordered relative to
+    # the component that brings them along. They are checked here because
+    # this is where every way a session comes to hold its components --
+    # activation, hand registration, restore -- converges.
+    for component in selected_components:
+        for companion_name in getattr(component, "activated_components", ()):
+            resolved_name, companion_node = _resolve_to_node(
+                binding_resolver,
+                nodes_by_name,
+                component,
+                companion_name,
+            )
+            if registry.get(implementation_of(resolved_name)) is None:
+                raise RuntimeError(with_explanation(
+                    f"'{component.name}' activates '{companion_name}', which "
+                    f"resolves to '{resolved_name}' and is not registered.",
+                    explain_missing_component(
+                        companion_name,
+                        resolved_name,
+                        session_type=session_type,
+                        consumer=component,
+                    ),
+                ))
+            if session_scoped and companion_node is None:
+                raise RuntimeError(with_explanation(
+                    f"'{component.name}' activates '{companion_name}', which "
+                    f"resolves to '{resolved_name}' and is not configured in "
+                    "this session. Activate it too, or build the session from "
+                    "configuration, which brings it along.",
+                    explain_missing_component(
+                        companion_name,
+                        resolved_name,
+                        session_type=session_type,
+                        consumer=component,
+                        active_names=active_names,
+                    ),
+                ))
+
     dependents_graph: dict[str, list[str]] = {
         component_id: [] for component_id in prerequisites_graph
     }
@@ -527,6 +565,11 @@ def _append_execution_calls(
         )
         if wrapped_hooks:
             annotations.append(f"wraps: {', '.join(wrapped_hooks)}")
+        companions = _component_companions(
+            component, binding_resolver, nodes_by_name,
+        )
+        if companions:
+            annotations.append(f"activates: {', '.join(companions)}")
         if method_name in {
             "pre_iteration_callback",
             "post_iteration_callback",
@@ -589,6 +632,23 @@ def _component_wrapped_hooks(
         )
         for name in getattr(component, "wrapped_hooks", ())
     ]
+
+
+def _component_companions(
+        component,
+        binding_resolver,
+        nodes_by_name,
+) -> list[str]:
+    names = []
+    for name in getattr(component, "activated_components", ()):
+        _, node = _resolve_to_node(
+            binding_resolver, nodes_by_name, component, name,
+        )
+        display = _dependency_display_name(
+            binding_resolver, nodes_by_name, component, name,
+        )
+        names.append(display if node is None else node.id)
+    return names
 
 
 def _hook_cadence(call_every: int) -> str:

@@ -139,6 +139,7 @@ The engine monitors workers while leaving the context.
 | `parse_component_config(cls, config)` | Parse a mapping against a `config_schema` directly |
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
 | `Stateful.get_state()` / `set_state(state)` | Capture and restore a component's own state |
+| `GradientProcessor.process(session, named_parameters)` | Base class (`training_framework.components.builtin`) for a step that edits gradients between `backward` and `optimizer_step`; see [custom gradient stages](builtin-components.md#optimizer) |
 | `Checkpointer.load_component(path, name, session_type=None)` | Read one resource out of a checkpoint, resolved through the checkpoint's own bindings, without adopting its RNG |
 
 `get_dependency` is the one way a component takes a prerequisite, whether in
@@ -171,6 +172,7 @@ documented in [`ModuleResource`](../concepts/module-resource.md#members).
 | `@requires_hook(name)` | Declare a Hook prerequisite for a Step |
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
 | `@wraps(name)` | Declare that a Hook wraps another Hook |
+| `@activates(name)` | Declare a [companion](../guide/02-wiring-components.md#companions): activating this component activates `name` too, with no ordering or injection |
 | `@rank_zero_only` | Declare that a distributed session builds this component on rank 0 only |
 | `@singleton` | Declare that a session may hold only one instance of this component |
 | `component_registry(session_type)` | Return shared components overlaid by the matching scoped registry |

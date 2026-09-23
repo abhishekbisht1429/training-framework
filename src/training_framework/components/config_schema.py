@@ -105,3 +105,18 @@ def _name(component_class: type) -> str:
 def field_names(schema: type) -> tuple[str, ...]:
     """Return the configuration keys a schema accepts."""
     return tuple(_accepted_keys(schema))
+
+
+def has_all_defaults(schema: type | None) -> bool:
+    """Return whether every field of `schema` has a default.
+
+    Such a component is fully configured by an empty mapping, so the session
+    may build it without a top-level entry.
+    """
+    if schema is None or not is_dataclass(schema):
+        return False
+    return all(
+        field.default is not MISSING
+        or field.default_factory is not MISSING  # type: ignore[misc]
+        for field in fields(schema)
+    )
