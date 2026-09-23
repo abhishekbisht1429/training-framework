@@ -285,6 +285,8 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         self._module = None
         self._restored_state = None
         self._max_iterations = None
+        # How many optimizer steps the schedule was built for; see step.
+        self._schedule_steps = None
         self._device_type = None
         # Per iteration; see begin_iteration.
         self._boundary = True
@@ -493,6 +495,14 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         """
         return math.ceil(max_iterations / self._settings.accumulate_steps)
 
+    def _optimizer_steps_left(self, completed_iterations: int) -> int:
+        """How many times the optimizer steps after `completed_iterations`:
+        on every k-th iteration and on the final one."""
+        return (
+            self.optimizer_steps(self._max_iterations)
+            - completed_iterations // self._settings.accumulate_steps
+        )
+
     # -- construction -------------------------------------------------------
 
     def _build_optimizer(self, wrapped_model: nn.Module) -> optim.Optimizer:
@@ -537,22 +547,25 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         groups.append({"params": rest})
         return groups
 
-    def _prepare_scheduler(self, optimizer, max_iterations):
+    def _prepare_scheduler(self, optimizer, total_steps):
+        """Build the schedule over `total_steps` optimizer steps, which
+        `$max_iterations` resolves to."""
         scheduler_config = self._settings.scheduler_config
         if scheduler_config is None:
             return None
         milestones = scheduler_config["milestones"]
-        if max_iterations <= 0:
+        if total_steps <= 0:
             raise ValueError(
-                "A configured lr_scheduler requires max_iterations to be "
-                "positive"
+                "A configured lr_scheduler requires at least one optimizer "
+                "step left in the run (session_config.max_iterations)"
             )
-        total_steps = self.optimizer_steps(max_iterations)
         if milestones and milestones[-1] >= total_steps:
             raise ValueError(
                 "optimizer.lr_scheduler milestones must be less than the "
-                "number of optimizer steps (session_config.max_iterations "
-                "divided by optimizer.accumulate_steps)"
+                "number of optimizer steps the schedule runs for "
+                "(session_config.max_iterations divided by "
+                "optimizer.accumulate_steps, counted from where the schedule "
+                "started)"
             )
 
         boundaries = [0, *milestones, total_steps]
@@ -617,11 +630,23 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             # warmup factor) uses the correct base -- nothing will
             # overwrite it afterward.
             self._restore_optimizer_state(restored)
+            # A schedule starting here -- at the start of the run, or at
+            # the extension point for a replacement -- runs over the
+            # optimizer steps still to come.
+            self._schedule_steps = (
+                self._optimizer_steps_left(session.iteration)
+                if self._settings.scheduler_config is not None
+                else None
+            )
             self._lr_scheduler = self._prepare_scheduler(
-                self._optimizer, self._max_iterations
+                self._optimizer, self._schedule_steps
             )
             self._restore_scheduler_state(restored)
         else:
+            # A schedule in progress keeps the length it was built for; a
+            # longer run does not stretch it (see step). A checkpoint
+            # written before that length was saved has none.
+            self._schedule_steps = restored.get("schedule_steps")
             # An existing scheduler state is restored afterward via
             # load_state_dict, which only syncs the scheduler's own
             # counters (base_lrs, last_epoch, ...) and never touches
@@ -630,7 +655,10 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             # the fresh scheduler's construction-time initial step
             # overwrote it with its own (stale, epoch-0) value.
             self._lr_scheduler = self._prepare_scheduler(
-                self._optimizer, self._max_iterations
+                self._optimizer,
+                self._schedule_steps
+                if self._schedule_steps is not None
+                else self.optimizer_steps(self._max_iterations),
             )
             self._restore_optimizer_state(restored)
             self._restore_scheduler_state(restored)
@@ -687,6 +715,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         self.close_contexts()
         self._optimizer = None
         self._lr_scheduler = None
+        self._schedule_steps = None
         self._grad_scaler = None
         self._module = None
 
@@ -700,6 +729,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             return {
                 "optimizer_state": None,
                 "lr_scheduler_state": None,
+                "schedule_steps": None,
                 "grad_scaler_state": None,
             }
         return {
@@ -709,6 +739,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                 if self._lr_scheduler is not None
                 else None
             ),
+            "schedule_steps": self._schedule_steps,
             "grad_scaler_state": (
                 self._grad_scaler.state_dict()
                 if self._grad_scaler is not None
@@ -726,6 +757,8 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             restored = self._restored_state
             self._restore_optimizer_state(restored)
             self._restore_scheduler_state(restored)
+            if restored.get("lr_scheduler_state") is not None:
+                self._schedule_steps = restored.get("schedule_steps")
             self._restore_scaler_state(restored)
             self._restored_state = None
 
@@ -824,8 +857,9 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             if scheduler_changed:
                 # New schedule shape/class: old scheduler state is not
                 # guaranteed compatible, so restart schedule progress from
-                # the extension point.
+                # the extension point, over the optimizer steps left.
                 self._restored_state["lr_scheduler_state"] = None
+                self._restored_state["schedule_steps"] = None
                 if (
                         settings.scheduler_config is not None
                         and optimizer_state is not None
@@ -994,10 +1028,18 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         else:
             self._optimizer.step()
         if self._lr_scheduler is not None:
-            if metric is None:
-                self._lr_scheduler.step()
-            else:
+            if metric is not None:
                 self._lr_scheduler.step(metric)
+            elif (
+                    self._schedule_steps is None
+                    or self._lr_scheduler.last_epoch < self._schedule_steps
+            ):
+                # A schedule is defined over the steps it was built for.
+                # Past them -- a run extended without replacing it -- the lr
+                # holds at the schedule's final value: stepping on would
+                # wrap a cosine back up to its base lr, and OneCycleLR
+                # refuses outright.
+                self._lr_scheduler.step()
         self._optimizer.zero_grad()
 
     def record_grad_norm(self, norm: float) -> None:

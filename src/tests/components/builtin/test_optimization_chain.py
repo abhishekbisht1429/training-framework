@@ -535,6 +535,104 @@ def test_settings_that_change_the_state_cannot_be_extended(tmp_path, override):
         session.apply_extension_overrides([override])
 
 
+def _learning_rates(session, iterations=None) -> list[float]:
+    """The lr after each iteration run."""
+    optimizer = resource_named(session, "optimizer")
+    with session:
+        run = (
+            session if iterations is None
+            else (next(session) for _ in range(iterations))
+        )
+        return [optimizer.current_lrs[0] for _ in run]
+
+
+def _extended(session, overrides) -> TrainingSession:
+    """The session restored from its state and extended, as
+    `--extend-session` does from a checkpoint."""
+    extended = TrainingSession.from_state(session.get_state())
+    extended.apply_extension_overrides(overrides)
+    return extended
+
+
+COSINE_TO_A_FLOOR = {
+    "optimizer": {"name": "SGD", "kwargs": {"lr": 0.1}},
+    "lr_scheduler": {"stages": [{
+        "name": "CosineAnnealingLR",
+        "kwargs": {"T_max": "$max_iterations", "eta_min": 0.01},
+    }]},
+}
+
+
+def test_an_extension_holds_a_finished_schedule_at_its_final_lr(tmp_path):
+    session = _session(tmp_path, max_iterations=4, optimizer=COSINE_TO_A_FLOOR)
+    assert _learning_rates(session)[-1] == pytest.approx(0.01)
+
+    session = _extended(session, ["session_config.max_iterations=8"])
+    extended = _learning_rates(session, 2)
+    resumed = TrainingSession.from_state(session.get_state())
+    extended += _learning_rates(resumed)
+
+    # Without the hold, the cosine climbs back towards 0.1.
+    assert extended == pytest.approx([0.01] * 4)
+
+
+def test_an_extension_past_a_one_cycle_schedule_does_not_fail(tmp_path):
+    session = _session(tmp_path, max_iterations=3, optimizer={
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 0.1}},
+        "lr_scheduler": {"stages": [{
+            "name": "OneCycleLR",
+            "kwargs": {"max_lr": 0.1, "total_steps": "$max_iterations"},
+        }]},
+    })
+    final_lr = _learning_rates(session)[-1]
+
+    session = _extended(session, ["session_config.max_iterations=5"])
+
+    assert _learning_rates(session) == pytest.approx([final_lr] * 2)
+
+
+def test_a_replacement_schedule_runs_over_the_steps_left(tmp_path):
+    session = _session(tmp_path, max_iterations=4, optimizer=COSINE_TO_A_FLOOR)
+    _run(session)
+
+    session = _extended(session, [
+        "session_config.max_iterations=8",
+        "optimizer.lr_scheduler.stages=[{name: CosineAnnealingLR, "
+        "kwargs: {T_max: $max_iterations, eta_min: 0.02}}]",
+    ])
+    lrs = _learning_rates(session)
+
+    scheduler_state = resource_named(session, "optimizer").get_state()[
+        "lr_scheduler_state"
+    ]
+    assert scheduler_state["T_max"] == 4
+    # It restarts from the base lr and reaches its own floor at the end.
+    assert lrs[0] > 0.05
+    assert lrs[-1] == pytest.approx(0.02)
+
+
+def test_a_replacement_schedule_counts_optimizer_steps_left(tmp_path):
+    session = _session(tmp_path, max_iterations=5, optimizer={
+        **COSINE_TO_A_FLOOR, "accumulate_steps": 2,
+    })
+    _run(session)
+
+    session = _extended(session, [
+        "session_config.max_iterations=10",
+        "optimizer.lr_scheduler.stages=[{name: CosineAnnealingLR, "
+        "kwargs: {T_max: $max_iterations, eta_min: 0.02}}]",
+    ])
+    lrs = _learning_rates(session)
+
+    # Iterations 6 to 10 step at 6, 8 and 10.
+    scheduler_state = resource_named(session, "optimizer").get_state()[
+        "lr_scheduler_state"
+    ]
+    assert scheduler_state["T_max"] == 3
+    assert scheduler_state["last_epoch"] == 3
+    assert lrs[-1] == pytest.approx(0.02)
+
+
 # -- reporting ------------------------------------------------------------------------
 
 

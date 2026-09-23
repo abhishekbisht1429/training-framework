@@ -192,6 +192,8 @@ the rest form a final default group.
 micro-batch and the optimizer steps on every k-th iteration and on the final
 one. The schedule advances once per optimizer step, so `$max_iterations`
 resolves to `ceil(max_iterations / k)` and `milestones` count optimizer steps.
+(A schedule replaced by an extension counts only the steps left; see
+[Extending a session](../guide/04-checkpoints-and-resume.md).)
 Gradients of an unfinished group are not checkpointed: choose a
 `checkpoint_every` that is a multiple of `k`, or the first step after a resume
 uses fewer micro-batches.

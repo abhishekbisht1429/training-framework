@@ -136,9 +136,15 @@ configuration, so they bypass the extension rules and are applied when the
 workers are built — an extend can resize the run and change hyperparameters
 in one command.
 
+A schedule left unchanged keeps the length it was built for: raising
+`max_iterations` does not stretch it. Once it has run its steps the learning
+rate stays at the schedule's final value (a cosine stays at `eta_min`) for the
+rest of the extension.
+
 `optimizer.lr_scheduler` may be replaced entirely; the new schedule restarts
-from the extension point. To drop scheduling and continue at a fixed learning
-rate, set it to `null`:
+from the extension point, and `$max_iterations` in it counts only the
+optimizer steps still to come. To drop scheduling and continue at a fixed
+learning rate, set it to `null`:
 
 ```bash
 python -m my_project.train \
