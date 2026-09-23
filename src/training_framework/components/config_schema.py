@@ -15,9 +15,14 @@ from typing import Any, get_origin
 
 
 def _plain(value: Any) -> Any:
-    """Return `value` with OmegaConf containers converted to dict/list."""
+    """Return `value` with OmegaConf containers converted to dict/list.
+
+    Keys are kept as they are. Turning them into strings here would make a
+    mistyped key (a YAML `1:` where a name was meant) look valid to every
+    schema, and fail only when the value is finally used.
+    """
     if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
+        return {key: _plain(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_plain(item) for item in value]
     return value
@@ -64,7 +69,7 @@ def parse_component_config(
     values = _plain(config)
     accepted = _accepted_keys(schema)
 
-    unknown = sorted(set(values) - set(accepted))
+    unknown = sorted(set(values) - set(accepted), key=str)
     if unknown:
         raise ValueError(
             f"Invalid {_name(component_class)} config: unknown keys "

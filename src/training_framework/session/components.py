@@ -16,6 +16,14 @@ from training_framework.components import (
 )
 from training_framework.components.base import _DEPENDENCIES_KEYWORD
 from training_framework.components.config_schema import has_all_defaults
+from training_framework.components.edges import (
+    Edge,
+    context_keys_of,
+    declared_edges,
+    resolve_component_name,
+    resolve_edges,
+    writers_of,
+)
 from training_framework.components.config import (
     reject_legacy_components_entry,
     reserved_config_names,
@@ -42,22 +50,10 @@ from training_framework.session.config import TRAINING_SESSION_TYPE, normalize_s
 
 
 @dataclass(frozen=True)
-class _ActivationEdge:
-    """One component another needs active, as resolved for that consumer."""
-
-    asked: str
-    target: str
-    expected_type: type[Component] | None
-    prerequisite: bool
-    """True for a requirement or wrap target; False for an `@activates`
-    companion, which is only brought along."""
-
-
-@dataclass(frozen=True)
 class _PlannedComponent:
     component_class: type[Component]
     constructor_args: tuple
-    edges: list[_ActivationEdge]
+    edges: list[Edge]
 
 
 class ComponentNotFoundError(KeyError):
@@ -143,6 +139,10 @@ class SessionComponents:
                     else None
                 ),
                 "init_args": getattr(component, "_init_args"),
+                # What a worker needs to decide which components its rank
+                # keeps before anything is rebuilt from this state.
+                "context_reads": list(component.context_reads()),
+                "context_writes": list(component.context_writes()),
             }
             for name, component in self.components.items()
         }
@@ -288,13 +288,13 @@ class SessionComponents:
         servable through `get_dependency`.
         """
         return {
-            name: self.resolve_dependency(
-                name,
+            edge.asked: self.resolve_dependency(
+                edge.asked,
                 consumer=consumer,
                 active=active,
             )
-            for name, dependency_type in self._dependency_specs(component_class)
-            if dependency_type is Resource
+            for edge in declared_edges(component_class)
+            if edge.injects
         }
 
     def _construct(
@@ -310,9 +310,8 @@ class SessionComponents:
         `dependencies` maps each declared name to the instance name that
         satisfies it *for this consumer*. The caller resolves them, because
         only it knows the full set of components the session will end up
-        holding: `_instances_of` reads the components built so far, so "the
-        sole instance" could be sole only because its sibling is not built
-        yet.
+        holding: resolving against the components built so far would make a
+        "sole instance" sole only because its sibling is not built yet.
 
         Construction goes through the class call, so a custom `__new__` and
         the metaclass `__call__` behave as they would anywhere else;
@@ -452,20 +451,6 @@ class SessionComponents:
             if isinstance(component, Step)
         }
 
-    @staticmethod
-    def _dependency_specs(
-            component_class: type[Component],
-    ) -> Iterable[tuple[str, type[Component]]]:
-        for name in getattr(component_class, "required_resources", ()):
-            yield name, Resource
-        for name in getattr(component_class, "required_hooks", ()):
-            yield name, Hook
-        for name in getattr(component_class, "required_steps", ()):
-            yield name, Step
-        if issubclass(component_class, Hook):
-            for name in getattr(component_class, "wrapped_hooks", ()):
-                yield name, Hook
-
     def _registered_component_class(
             self,
             name: str,
@@ -584,6 +569,10 @@ class SessionComponents:
 
         roots.extend(configured_roots)
         self._activate_all(roots, component_configs)
+        # Validate the whole graph -- requirements, wrapping, companions and
+        # dataflow -- while the session is being built, which with the engine
+        # is in the parent process, instead of when a worker first enters it.
+        self._component_order()
 
     def activate_component(
             self,
@@ -604,44 +593,33 @@ class SessionComponents:
         self._activate_all([name], component_configs)
         return resolved_name
 
-    def _activation_edges(
+    def _resolved_edges(
             self,
-            component_class: type[Component],
+            component: Component | type[Component],
             consumer: str,
             active: Iterable[str],
-    ) -> list["_ActivationEdge"]:
-        """Return every component `consumer` needs active, resolved for it.
+            *,
+            context_keys=None,
+    ) -> list[Edge]:
+        """The shared edges of `component`, resolved for `consumer` here.
 
-        The one place a component's outgoing edges are listed, so planning,
-        ordering and `dependency_closure` cannot disagree about them. An edge
-        is a *prerequisite* (a declared requirement or wrap target: built
-        first, and ordered before) or a *companion* (`@activates`: only
-        brought along). Both are resolved per consumer, so nested
-        `component_bindings` redirect either.
+        `context_keys` (name -> (reads, writes)) adds the edges from the keys
+        the component reads to their writers; without it only named edges
+        are listed, which is all activation can know before anything exists.
         """
-        edges = [
-            _ActivationEdge(
-                asked=name,
-                target=self.resolve_dependency(
-                    name, consumer=consumer, active=active,
-                ),
-                expected_type=dependency_type,
-                prerequisite=True,
-            )
-            for name, dependency_type in self._dependency_specs(component_class)
-        ]
-        edges.extend(
-            _ActivationEdge(
-                asked=name,
-                target=self.resolve_dependency(
-                    name, consumer=consumer, active=active,
-                ),
-                expected_type=None,
-                prerequisite=False,
-            )
-            for name in getattr(component_class, "activated_components", ())
+        reads = ()
+        writers = None
+        if context_keys:
+            reads = context_keys.get(consumer, ((), ()))[0]
+            writers = writers_of(context_keys)
+        return resolve_edges(
+            component,
+            consumer=consumer,
+            bindings=self.component_bindings,
+            active=active,
+            context_reads=reads,
+            writers=writers,
         )
-        return edges
 
     def _activate_all(
             self,
@@ -668,7 +646,7 @@ class SessionComponents:
                 dependencies={
                     edge.asked: edge.target
                     for edge in planned.edges
-                    if edge.prerequisite and edge.expected_type is Resource
+                    if edge.injects
                 },
             )
             self._register_component_instance(component)
@@ -699,7 +677,10 @@ class SessionComponents:
         def visit(name: str, component_class: type[Component]) -> None:
             if name in self.components or name in plan:
                 return
-            edges = self._activation_edges(component_class, name, known)
+            edges = [
+                edge for edge in self._resolved_edges(component_class, name, known)
+                if edge.activates
+            ]
             plan[name] = _PlannedComponent(
                 component_class=component_class,
                 constructor_args=self._constructor_args(
@@ -804,7 +785,7 @@ class SessionComponents:
             visiting.append(name)
             try:
                 for edge in plan[name].edges:
-                    if edge.prerequisite:
+                    if edge.builds_first:
                         visit(edge.target)
             finally:
                 visiting.pop()
@@ -850,21 +831,30 @@ class SessionComponents:
             names: Iterable[str],
             *,
             active_names: Iterable[str] | None = None,
+            context_keys=None,
     ) -> set[str]:
         """Return `names` plus everything they need active, transitively.
 
-        Follows the same edges as activation -- prerequisites and
-        `@activates` companions -- so a rank keeps whatever activation would
-        have brought along. `active_names` lets a caller resolve the closure
+        Follows every edge the shared model lists -- prerequisites,
+        `@activates` companions, and the writers of the keys a component
+        reads -- so a rank keeps everything its components need to run.
+        `active_names` lets a caller resolve the closure
         before any component is constructed -- the graph is class-level, so
         the worker can decide what a rank needs without building the session
-        first.
+        first. `context_keys` (name -> (reads, writes)) supplies the keys
+        when the components are not live -- a worker deciding from a
+        checkpoint's record; with live components they are read from them.
         """
         active = (
             set(self.components)
             if active_names is None
             else set(active_names)
         )
+        if context_keys is None:
+            context_keys = context_keys_of(
+                component for name, component in self.components.items()
+                if name in active
+            )
         closure: set[str] = set()
 
         def visit(name: str) -> None:
@@ -886,9 +876,13 @@ class SessionComponents:
                 return
 
             closure.add(resolved_name)
-            for edge in self._activation_edges(
+            for edge in self._resolved_edges(
                     component_class, resolved_name, active,
+                    context_keys=context_keys,
             ):
+                if not edge.kept_with_source or edge.target is None:
+                    # A read nobody writes is the sort's error to report.
+                    continue
                 self._registered_component_class(
                     edge.asked,
                     edge.expected_type,
@@ -905,12 +899,15 @@ class SessionComponents:
             self,
             target_name: str,
             active: set[str],
+            context_keys=None,
     ) -> set[str]:
         """Return the active components that reach `target_name` transitively."""
         dependents = set()
         for name in active:
             try:
-                closure = self.dependency_closure([name], active_names=active)
+                closure = self.dependency_closure(
+                    [name], active_names=active, context_keys=context_keys,
+                )
             except (RuntimeError, KeyError):
                 # A component whose graph cannot be resolved is not this
                 # diagnostic's problem; the activation path reports it.
@@ -960,6 +957,7 @@ class SessionComponents:
             *,
             active_names: Iterable[str] | None = None,
             declared: Iterable[str] | None = None,
+            context_keys=None,
     ) -> set[str]:
         """Return the active components a secondary rank does not build.
 
@@ -995,7 +993,9 @@ class SessionComponents:
         # what leaves the other ranks waiting.
         using_ddp = sorted(
             name for name in declared_names - {ddp_name}
-            if ddp_name in self.dependency_closure([name], active_names=active)
+            if ddp_name in self.dependency_closure(
+                [name], active_names=active, context_keys=context_keys,
+            )
         )
         if using_ddp:
             warnings.warn(
@@ -1014,6 +1014,7 @@ class SessionComponents:
             active_names: Iterable[str] | None = None,
             parallel_components: Iterable[str] | None = None,
             rank_zero_components: Iterable[str] | None = None,
+            context_keys=None,
     ) -> set[str]:
         """Return the component names a secondary rank builds.
 
@@ -1031,20 +1032,48 @@ class SessionComponents:
         `parallel_components` is the deprecated opt-in list. When a session
         provides it (even empty) it decides the answer on its own: only those
         roots, their closure, and the DDP resource are kept.
+
+        What a component needs is every edge of the shared model, the writers
+        of the keys it reads included. `context_keys` gives those keys when
+        the components are not live -- a worker deciding from a checkpoint's
+        record. With live components the reduced set is also sorted before it
+        is returned, so a rank that could not run is rejected here, in the
+        parent, rather than in a worker the others are waiting for.
         """
         active = (
             set(self.components)
             if active_names is None
             else set(active_names)
         )
+        if context_keys is None:
+            context_keys = context_keys_of(
+                component for name, component in self.components.items()
+                if name in active
+            )
+        keep = self._rank_names(
+            active, parallel_components, rank_zero_components, context_keys,
+        )
+        self._check_rank_graph(keep)
+        return keep
+
+    def _rank_names(
+            self,
+            active: set[str],
+            parallel_components,
+            rank_zero_components,
+            context_keys,
+    ) -> set[str]:
         ddp_name = self.resolve_name("ddp")
 
         if parallel_components is not None:
             keep = self.dependency_closure(
                 list(parallel_components) + ["ddp"],
                 active_names=active,
+                context_keys=context_keys,
             )
-            pruned = sorted(self._names_depending_on(ddp_name, active) - keep)
+            pruned = sorted(
+                self._names_depending_on(ddp_name, active, context_keys) - keep
+            )
             if pruned:
                 # The classic mistake the opt-in list invites: a component
                 # that takes part in the collectives is simply forgotten, and
@@ -1063,10 +1092,12 @@ class SessionComponents:
         rank_zero = self.rank_zero_component_names(
             active_names=active,
             declared=rank_zero_components,
+            context_keys=context_keys,
         )
         keep = self.dependency_closure(
             active - rank_zero,
             active_names=active,
+            context_keys=context_keys,
         )
         keep.add(ddp_name)
 
@@ -1082,6 +1113,24 @@ class SessionComponents:
                 stacklevel=2,
             )
         return keep
+
+    def _check_rank_graph(self, keep: set[str]) -> None:
+        """Sort a rank's reduced component set when it can be: every name
+        live, which is the parent planning a launch. A worker holds no live
+        components when it prunes, and applies a plan checked here."""
+        if not keep <= set(self.components):
+            return
+        try:
+            topological_sort_of_components(
+                self.component_bindings,
+                components=[self.components[name] for name in sorted(keep)],
+                session_type=self.session_type,
+            )
+        except (RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"A secondary rank would build {sorted(keep)}, which cannot "
+                f"run on its own: {error}"
+            ) from error
 
     def register_resource(self, component: Resource, overwrite=False) -> str:
         return self._add_component(component, Resource, overwrite=overwrite)
@@ -1160,11 +1209,10 @@ class SessionComponents:
             injected = consumer.__dict__.get(Component.DEPENDENCIES_ATTR)
             if injected is None:
                 continue
-            for asked, dependency_type in self._dependency_specs(
-                    type(consumer),
-            ):
-                if dependency_type is not Resource:
+            for edge in declared_edges(type(consumer)):
+                if not edge.injects:
                     continue
+                asked = edge.asked
                 try:
                     target = self.resolve_dependency(
                         asked,
@@ -1190,9 +1238,9 @@ class SessionComponents:
         in `__init__` must still be activated by the session.
         """
         component.__dict__[Component.DEPENDENCIES_ATTR] = {
-            name: self.get_resource(name, consumer=component.name)
-            for name, dependency_type in self._dependency_specs(type(component))
-            if dependency_type is Resource
+            edge.asked: self.get_resource(edge.asked, consumer=component.name)
+            for edge in declared_edges(type(component))
+            if edge.injects
         }
 
     def _validate_component(
@@ -1320,31 +1368,6 @@ class SessionComponents:
         """Return the name `name` is bound to, applying bindings only."""
         return self.component_bindings.resolve(name)
 
-    def _instances_of(
-            self,
-            name: str,
-            active: Iterable[str] | None = None,
-    ) -> list[str]:
-        """Return the active instances `name` could refer to.
-
-        An exact match is the answer on its own: a component named `model`
-        stays the answer to `model` however many `model#...` instances join
-        it, so adding an instance never silently rewires anything.
-        """
-        active = self.components if active is None else set(active)
-        if name in active:
-            return [name]
-        if is_instance_name(name):
-            # A suffixed name is a precise reference. When that instance is
-            # not active the answer is "not configured", never a sibling that
-            # happens to share its implementation.
-            return []
-        implementation = implementation_of(name)
-        return sorted(
-            instance_name for instance_name in active
-            if implementation_of(instance_name) == implementation
-        )
-
     def resolve_dependency(
             self,
             name: str,
@@ -1354,32 +1377,15 @@ class SessionComponents:
     ) -> str:
         """Return the instance name that satisfies `name` for `consumer`.
 
-        Three rules, in order: the consumer's own wiring decides if it has
-        any; otherwise the sole active instance of the component; otherwise
-        it is an error naming the candidates. Picking one of several would
-        mean wiring a component to something its session never chose, which
-        produces a run that works and is quietly wrong.
-
-        A name with nothing active behind it is returned as bound, so a
-        component that is simply not configured is reported by the caller
-        that knows what it was looking for.
+        The rule is `resolve_component_name`, shared with the sort, against
+        the components this session holds unless `active` says otherwise.
         """
-        resolved = self.component_bindings.resolve(name, consumer=consumer)
-        candidates = self._instances_of(resolved, active)
-        if len(candidates) == 1:
-            return candidates[0]
-        if not candidates:
-            return resolved
-        raise ComponentDependencyError(with_explanation(
-            f"Component '{name}' resolves to '{resolved}', which {len(candidates)} "
-            f"active components implement: {candidates}.",
-            "Fix: name the one that is meant with per-component wiring, "
-            "component_bindings: {'"
-            f"{consumer if consumer is not None else '<component>'}"
-            "': {'"
-            f"{name}': '{candidates[0]}'"
-            "}}.",
-        ))
+        return resolve_component_name(
+            self.component_bindings,
+            name,
+            consumer=consumer,
+            active=self.components if active is None else active,
+        )
 
     @property
     def bindings(self) -> dict[str, str]:

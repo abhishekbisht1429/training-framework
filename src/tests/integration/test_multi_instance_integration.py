@@ -56,7 +56,6 @@ def _session_config(tmp_path, output_dir):
         "component_bindings": {
             "model": "integration_ddp_model",
             "dataset": "integration_dataset",
-            "loss": "integration_loss",
         },
         "integration_ddp_model": {"initial_weight": 0.0},
         "integration_dataset": {"dataset_size": 8},

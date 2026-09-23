@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 
 from training_framework.components import Resource, StatefulResource
 from training_framework.dataloader import DistributedInfiniteSampler
@@ -150,7 +150,7 @@ class DataManager(StatefulResource):
         dataset_size = len(dataset)
         world_size = ddp.world_size
         self._validate_setup(dataset_size, world_size)
-        collate_fn = getattr(dataset, "collate_fn", torch.stack)
+        collate_fn = getattr(dataset, "collate_fn", default_collate)
         if not callable(collate_fn):
             raise TypeError(
                 f"Dataset resource '{type(dataset).__name__}' collate_fn "
@@ -271,7 +271,7 @@ class AnalysisDataManager(Resource):
         dataset = self.get_dependency("dataset")
         if len(dataset) <= 0:
             raise ValueError("DataManager requires a non-empty dataset")
-        collate_fn = getattr(dataset, "collate_fn", torch.stack)
+        collate_fn = getattr(dataset, "collate_fn", default_collate)
         if not callable(collate_fn):
             raise TypeError(
                 f"Dataset resource '{type(dataset).__name__}' collate_fn "

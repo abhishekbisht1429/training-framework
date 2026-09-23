@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from training_framework.components.base import Component, Hook, Resource, Step
 from training_framework.components.config import reserved_config_names
+from training_framework.components.edges import takes_part_in_iterations
 from training_framework.components.graph import (
     render_execution_graph,
     topological_sort_components,
@@ -630,6 +631,55 @@ def wraps(hook_name: str):
         cls.wrapped_hooks.append(hook_name)
         return cls
     return wrapper
+
+
+def _context_keys(attribute: str, decorator: str, keys: tuple):
+    if not keys:
+        raise TypeError(f"@{decorator} needs at least one iteration_context key")
+    for key in keys:
+        if not isinstance(key, str) or not key:
+            raise ValueError(
+                f"@{decorator} keys must be non-empty strings; got {key!r}"
+            )
+
+    def wrapper(cls):
+        if not isinstance(cls, type) or not takes_part_in_iterations(cls):
+            name = getattr(cls, "__name__", repr(cls))
+            raise TypeError(
+                f"@{decorator} can only be applied to Step or IterationHook "
+                f"subclasses; '{name}' is neither. Only they run inside an "
+                "iteration: a step in `run`, an iteration hook in its pre "
+                "(writes) and post (reads) callbacks."
+            )
+        existing = tuple(getattr(cls, attribute, ()))
+        repeated = sorted(set(existing) & set(keys))
+        if repeated or len(set(keys)) != len(keys):
+            raise ValueError(
+                f"'{cls.__name__}' declares @{decorator} for "
+                f"{repeated or sorted(keys)} more than once"
+            )
+        setattr(cls, attribute, existing + tuple(keys))
+        return cls
+    return wrapper
+
+
+def reads(*keys: str):
+    """Declare the `iteration_context` keys a step or hook reads.
+
+    A step reading a key runs after the step that writes it, and every key
+    read must have exactly one writer in the session -- checked when the
+    session is built. A hook reads in its post-iteration callback.
+    """
+    return _context_keys("declared_reads", "reads", keys)
+
+
+def writes(*keys: str):
+    """Declare the `iteration_context` keys a step or hook writes.
+
+    A step must write them in `run` (checked each iteration); a hook in its
+    pre-iteration callback. Each key has one writer per session.
+    """
+    return _context_keys("declared_writes", "writes", keys)
 
 
 def activates(component_name: str):

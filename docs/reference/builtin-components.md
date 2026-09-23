@@ -21,18 +21,20 @@ which registers all built-ins. Their classes are also importable from
 | `data_manager` | Stateful resource | Creates a resumable distributed `DataLoader`; requires `dataset` and `ddp` (analysis sessions use a [separate implementation](#analysis-data_manager)) |
 | `optimizer` | Stateful resource | Owns the PyTorch optimizer, its learning-rate schedule and the fp16 gradient scaler; requires `ddp` and activates the [optimization chain](#optimizer) |
 | `forward_context` | Lifecycle hook | Opens each iteration on `optimizer`: autocast and DDP `no_sync` around the forward pass; part of the chain |
-| `backward` | Step | Backpropagates `iteration_context["loss"]`; requires the step bound to the `loss` role |
+| `load_batch` | Step | Takes the next batch from `data_manager`, moves it to the device and names its parts; [generic](#generic-steps) |
+| `forward` | Step | Calls a model on context keys (through the DDP wrapper for the trained model); [generic](#generic-steps) |
+| `compute` | Step | Calls a function or class on context keys (losses, combinations, `torch` ops); [generic](#generic-steps) |
+| `backward` | Step | Backpropagates `iteration_context["loss"]`; runs after whichever step writes it |
 | `freeze_gradients` | Step | Drops the gradients of matching parameters until an iteration; does nothing unless configured |
 | `clip_gradients` | Step | Clips or measures the total gradient norm; does nothing unless configured |
 | `optimizer_step` | Step | Steps the optimizer and its schedule on iterations that end an accumulation group |
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
 
-`dataset`, `model` and `loss` are declared roles (see [Component
+`dataset` and `model` are declared roles (see [Component
 bindings](../guide/02-wiring-components.md#component-bindings)) with no built-in
-implementation; register a component under that name, or bind one via
-`component_bindings`, before activating `data_manager`, `ddp` or `optimizer`
-(`loss` is a Step: the one that writes the training loss).
+implementation; register a `Resource` under that name, or bind one via
+`component_bindings`, before activating `data_manager` or `ddp`.
 
 The training defaults are equivalent to:
 
@@ -64,10 +66,7 @@ data_manager:
   num_workers: 0
   pin_memory: false
 
-component_bindings:
-  loss: my_loss_step         # the step that writes iteration_context["loss"]
-
-optimizer:
+optimizer:                   # backward reads iteration_context["loss"]
   optimizer:
     name: AdamW
     kwargs:
@@ -139,7 +138,7 @@ checkpoints their state in between. The work of an iteration is done by
 steps, each requiring the one before it:
 
 ```
-<loss step> -> backward -> freeze_gradients -> clip_gradients -> optimizer_step
+<step writing "loss"> -> backward -> freeze_gradients -> clip_gradients -> optimizer_step
 ```
 
 Configuring `optimizer` activates `optimizer_step` (a
@@ -147,9 +146,10 @@ Configuring `optimizer` activates `optimizer_step` (a
 rest of the chain and the `forward_context` hook. Every post-iteration hook --
 `checkpointer`, `logger`, `timer` -- therefore runs after the update.
 
-- **`loss`** is a role: bind the step that writes the training loss to
-  `iteration_context["loss"]` (`component_bindings: {loss: my_loss_step}`),
-  or name that step `loss`. `backward.loss_key` reads another key.
+- **The loss** is whatever step [declares](../guide/02-wiring-components.md#ordering-by-dataflow)
+  writing `iteration_context["loss"]` -- a built-in [`compute`](#generic-steps)
+  or your own step with `@writes("loss")`. `backward` reads it, so it runs
+  after that step. `backward.loss_key` reads another key.
 - **`forward_context`** (hook) opens the iteration before the forward steps
   run: DDP's `no_sync` while gradients are being accumulated, and
   `torch.autocast` for `bf16` / `fp16`.
@@ -256,9 +256,9 @@ was never configured.
 
 `optimizer` used to be a hook that ran backward, step and schedule itself.
 
-- **Configs:** the `optimizer:` block is unchanged. Add the `loss` binding --
-  `component_bindings: {loss: <your loss step>}` -- or name that step `loss`.
-  A config without it fails at start-up with an error naming the binding.
+- **Configs:** the `optimizer:` block is unchanged. The step that computes the
+  loss declares `@writes("loss")` (or is a built-in `compute`). A session
+  where nothing writes `loss` fails when it is built, naming the key.
 - **Checkpoints** written by the hook cannot be resumed: restoring one fails
   with "stored as a Hook, but is now registered as a Resource".
 - **Code** that looked the hook up (`session.get_all_hooks()`) reads the
@@ -269,6 +269,99 @@ For the operator's view of what `--extend-session` accepts, see
 [Extend](../guide/04-checkpoints-and-resume.md#extend); for the contract a
 custom component implements to opt in, see
 [Opting into extension](../concepts/component-model.md#opting-into-extension).
+
+### Generic steps
+
+`load_batch`, `forward` and `compute` cover the work in front of `backward`
+for any kind of training: they are used as many times as needed, through
+[instances](../guide/02-wiring-components.md#configuring-a-component-more-than-once)
+(`forward#teacher`, `compute#kl`), and each declares the `iteration_context`
+keys it reads and writes from its configuration. Those keys are what order
+them -- see [Ordering by dataflow](../guide/02-wiring-components.md#ordering-by-dataflow).
+
+**`load_batch`** (training and analysis) takes `next(data_manager.data_iter)`,
+moves every tensor in it to the session's device, and names it:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `key` | `batch` | Store the whole batch under this key |
+| `fields` | none | A list unpacks a tuple/list batch by position (`[inputs, targets]`); a mapping picks fields of a dict batch (`{inputs: image, targets: label}`) |
+| `non_blocking` | `false` | Passed to `.to()` |
+
+**`forward`** calls the `model` resource -- or, per instance, whatever a
+binding names: `component_bindings: {forward#teacher: {model: teacher}}`. In a
+training session the model DDP wraps is always called through the wrapper,
+so gradients are synchronised. In an analysis session it calls
+`trained_model.model`, without gradients unless `no_grad: false`.
+
+**`compute`** calls `function`: a name from `training_framework.functions`
+(`weighted_sum`), `torch.nn` (`CrossEntropyLoss`), `torch.nn.functional`
+(`mse_loss`) or `torch` (`cat`), searched in that order, or a dotted path to
+your own. An `nn.Module` class, or any class given `init` -- even `init: {}`
+-- is constructed once and the instance called (a module is moved to the
+device); any other class (`builtins.int`) is called directly.
+
+Both take the same call settings:
+
+| Key | Meaning |
+|---|---|
+| `args` | Positional arguments, as context keys; a nested list passes a list of values (`[[view_a, view_b]]`) |
+| `kwargs` | `{parameter: context key}` keyword arguments |
+| `constants` | `{parameter: value}` literal keyword arguments |
+| `outputs` | Required. A key; a list of keys to unpack a tuple result; or `{key: field}` to pick fields of a dict or attribute result |
+| `no_grad` | Run without gradients (default `false`; `true` for analysis `forward`) |
+| `method` | `forward` only: call this method of the model instead. It bypasses DDP, so use it for paths without gradients |
+| `init` | `compute` only: constructor arguments |
+
+`weighted_sum(weights=..., **terms)` adds named terms, each scaled by its
+weight (default 1).
+
+Supervised training:
+
+```yaml
+component_bindings: {model: my_model, dataset: my_dataset}
+load_batch: {fields: [inputs, targets]}
+forward: {args: [inputs], outputs: logits}
+compute#loss: {function: CrossEntropyLoss, init: {label_smoothing: 0.1},
+               args: [logits, targets], outputs: loss}
+optimizer: {optimizer: {name: AdamW, kwargs: {lr: 3.0e-4}}}
+```
+
+Several loss terms (a VAE):
+
+```yaml
+load_batch: {fields: [images, labels]}
+forward: {args: [images], outputs: [reconstruction, mu, logvar]}
+compute#recon: {function: mse_loss, args: [reconstruction, images], outputs: recon}
+compute#kl: {function: my_project.losses.kl_divergence, args: [mu, logvar], outputs: kl}
+compute#loss: {function: weighted_sum, kwargs: {recon: recon, kl: kl},
+               constants: {weights: {kl: 0.1}}, outputs: loss}
+```
+
+Distillation, with a teacher that gets no gradients:
+
+```yaml
+component_bindings: {forward#teacher: {model: teacher_model}}
+forward#student: {args: [inputs], outputs: student_logits}
+forward#teacher: {args: [inputs], outputs: teacher_logits, no_grad: true}
+compute#loss: {function: my_project.losses.distill,
+               args: [student_logits, teacher_logits, targets], outputs: loss}
+```
+
+Contrastive, with two views in one pass through DDP (calling the same
+DDP-wrapped model twice before one backward is fragile, so concatenate):
+
+```yaml
+load_batch: {fields: [view_a, view_b]}
+compute#views: {function: cat, args: [[view_a, view_b]], outputs: views}
+forward: {args: [views], outputs: embeddings}
+compute#loss: {function: my_project.losses.nt_xent, args: [embeddings], outputs: loss}
+```
+
+State that must survive a checkpoint (a running centre, a queue of negatives)
+does not belong in `compute`, which is stateless: write a `StatefulStep` and
+declare what it reads and writes. The optimizer is one resource over the
+model's parameters, so GANs and other multi-optimizer setups are not covered.
 
 ### `data_manager`
 
@@ -294,7 +387,8 @@ class TokenDataset(Dataset, Resource):
 ```
 
 When the dataset does not define `collate_fn`, the data manager uses
-`torch.stack`. Keeping the collator on the importable dataset class makes it
+`torch.utils.data.default_collate`: tensor samples are stacked, and tuple,
+dict and number samples are collated field by field. Keeping the collator on the importable dataset class makes it
 available after checkpoint restoration and in spawned workers.
 
 ### `checkpointer`

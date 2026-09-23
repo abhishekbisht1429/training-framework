@@ -32,6 +32,17 @@ class ReportStep(Step):
         ...
 ```
 
+The built-in [generic steps](../reference/builtin-components.md#generic-steps)
+work in analysis sessions too: `load_batch` names the batch, and `forward`
+calls `trained_model.model` without gradients, so a custom step can start
+from the model's outputs:
+
+```yaml
+load_batch: {fields: [inputs, targets]}
+forward: {args: [inputs], outputs: logits}
+report: {output_path: ./report.json}   # a step that declares @reads("logits")
+```
+
 ## Configuring the source checkpoint
 
 An analysis configuration uses the same `sessions` structure. The shared

@@ -7,14 +7,19 @@ group calls are stubbed, as the other built-in tests do.
 
 from __future__ import annotations
 
-import contextlib
 import math
+import pickle
 
 import pytest
 import torch
 from torch import nn
 
-from tests.test_utils import component_named, make_config, resource_named
+from tests.test_utils import (
+    component_named,
+    make_config,
+    resource_named,
+    stub_process_group,
+)
 from training_framework.components import (
     StatefulResource,
     Step,
@@ -22,36 +27,15 @@ from training_framework.components import (
     requires_step,
     resource,
     step,
+    writes,
 )
-from training_framework.components.builtin import GradientProcessor, distributed
+from training_framework.components.builtin import GradientProcessor
 from training_framework.session import TrainingSession
-
-
-class RecordingDistributedDataParallel(nn.Module):
-    """Stands in for DDP: forwards to the model and records `no_sync`."""
-
-    def __init__(self, module, device_ids):
-        super().__init__()
-        self.module = module
-        self.syncing = True
-
-    def forward(self, *args, **kwargs):
-        return self.module(*args, **kwargs)
-
-    @contextlib.contextmanager
-    def no_sync(self):
-        self.syncing = False
-        try:
-            yield
-        finally:
-            self.syncing = True
 
 
 @pytest.fixture(autouse=True)
 def _stub_process_group(monkeypatch):
-    monkeypatch.setattr(distributed, "DDP", RecordingDistributedDataParallel)
-    monkeypatch.setattr(torch.distributed, "init_process_group", lambda **_: None)
-    monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: None)
+    stub_process_group(monkeypatch)
 
 
 INITIAL_WEIGHT = [[0.5, -0.25]]
@@ -98,6 +82,7 @@ def _register_components(records: dict):
         def set_state(self, state):
             self.load_state_dict(state)
 
+    @writes("loss")
     @requires_resource("ddp")
     @step("chain_loss", overwrite=True)
     class ChainLoss(Step):
@@ -132,7 +117,7 @@ def _config(tmp_path, *, max_iterations=3, optimizer=None, loss=None, **extra):
     config = make_config(tmp_path, max_iterations=max_iterations)
     config["session_config"]["show_execution_graph"] = False
     config.update({
-        "component_bindings": {"model": "chain_model", "loss": "chain_loss"},
+        "component_bindings": {"model": "chain_model"},
         "chain_model": {},
         "chain_loss": loss or {},
         "ddp": {
@@ -239,13 +224,33 @@ def test_configuring_the_optimizer_brings_in_the_whole_chain(tmp_path):
     assert "Hook.forward_context.pre_iteration_callback()" in graph
 
 
-def test_a_config_without_a_loss_step_names_the_binding_to_add(tmp_path):
+def test_a_loss_nobody_writes_is_a_start_up_error_naming_the_key(tmp_path):
     _register_components({})
     config = _config(tmp_path)
-    del config["component_bindings"]["loss"]
+    config["backward"] = {"loss_key": "objective"}
 
-    with pytest.raises(RuntimeError, match="Role 'loss'.*component_bindings"):
+    with pytest.raises(
+            RuntimeError,
+            match=r"Step.backward reads iteration_context key 'objective', "
+                  r"which no step or hook writes.*Keys written in this "
+                  r"session: loss",
+    ):
         TrainingSession(config)
+
+
+def test_a_metric_schedule_whose_metric_nobody_writes_fails_at_start_up(
+        tmp_path,
+):
+    _register_components({})
+
+    with pytest.raises(RuntimeError, match="reads iteration_context key 'val_loss'"):
+        TrainingSession(_config(tmp_path, optimizer={
+            "optimizer": {"name": "SGD", "kwargs": {"lr": 0.1}},
+            "lr_scheduler": {
+                "stages": [{"name": "ReduceLROnPlateau"}],
+                "metric_key": "val_loss",
+            },
+        }))
 
 
 def test_a_checkpoint_of_the_former_optimizer_hook_does_not_restore(tmp_path):
@@ -450,7 +455,6 @@ def test_a_bound_custom_stage_runs_between_clipping_and_the_step(tmp_path):
         max_iterations=1,
         component_bindings={
             "model": "chain_model",
-            "loss": "chain_loss",
             "optimizer_step": {"clip_gradients": "chain_doubling"},
         },
         chain_doubling={},
@@ -652,3 +656,58 @@ def test_the_logger_reports_learning_rates_and_the_gradient_norm(tmp_path, capsy
     ]
     assert lines[0] == "Iteration 1/2 | lr: 1.000e-01"
     assert lines[1].startswith("Iteration 2/2 | lr: 1.000e-01 | grad_norm: ")
+
+
+# -- serialization ------------------------------------------------------------------------
+
+
+EVERY_STAGE = {
+    "optimizer": {
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 0.1, "momentum": 0.9}},
+        "precision": "bf16",
+        "accumulate_steps": 2,
+    },
+    "freeze_gradients": {"rules": [{"match": "*bias", "until_iteration": 2}]},
+    "clip_gradients": {"max_norm": 0.5},
+}
+
+
+def _pickled(component):
+    return pickle.loads(pickle.dumps(component))
+
+
+def test_pickled_chain_components_train_like_fresh_ones(tmp_path):
+    fresh = _session(tmp_path / "fresh", max_iterations=6, **EVERY_STAGE)
+    _run(fresh)
+
+    session = _session(tmp_path / "copies", max_iterations=6, **EVERY_STAGE)
+    hook = next(h for h in session.get_all_hooks() if h.name == "forward_context")
+    session.unregister_hook("forward_context")
+    session.register_hook(_pickled(hook))
+    for name in ("backward", "freeze_gradients", "clip_gradients", "optimizer_step"):
+        original = next(s for s in session.get_all_steps() if s.name == name)
+        session.remove_step(name)
+        session.add_step(_pickled(original))
+    _run(session)
+
+    torch.testing.assert_close(_linear(session).weight, _linear(fresh).weight)
+    torch.testing.assert_close(_linear(session).bias, _linear(fresh).bias)
+    assert (
+        resource_named(session, "optimizer").grad_norm
+        == resource_named(fresh, "optimizer").grad_norm
+    )
+
+
+def test_a_run_with_every_stage_configured_resumes_exactly(tmp_path):
+    uninterrupted = _session(tmp_path / "a", max_iterations=8, **EVERY_STAGE)
+    _run(uninterrupted)
+
+    paused = _session(tmp_path / "b", max_iterations=8, **EVERY_STAGE)
+    # Resumed at a group boundary: a partly accumulated group is not saved.
+    _run(paused, 4)
+    resumed = TrainingSession.from_state(paused.get_state())
+    with resumed:
+        assert list(resumed) == [5, 6, 7, 8]
+
+    torch.testing.assert_close(_linear(resumed).weight, _linear(uninterrupted).weight)
+    torch.testing.assert_close(_linear(resumed).bias, _linear(uninterrupted).bias)

@@ -23,6 +23,7 @@ from training_framework.components import (
     requires_step,
     resource,
     step,
+    writes,
 )
 from training_framework.session import TrainingSession
 
@@ -195,6 +196,7 @@ class DDPTrainingStep(Step):
 
 
 @step("integration_loss")
+@writes("loss")
 @requires_step("integration_train")
 class MeanSquaredLossStep(Step):
     def __init__(self, config: dict):

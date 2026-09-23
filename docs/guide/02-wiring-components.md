@@ -315,6 +315,71 @@ that holds a component without its companion -- for instance one registered by
 hand -- is rejected when it orders its components, and the execution graph
 shows the relationship as `activates: Step.optimizer_step`.
 
+## Ordering by dataflow
+
+Steps pass values through `session.iteration_context`. A step or an
+iteration hook can declare the keys it reads and writes, and the session then
+orders and checks steps by them:
+
+```python
+from training_framework.components import Step, reads, step, writes
+
+
+@reads("logits", "targets")
+@writes("loss")
+@step("my_loss")
+class MyLoss(Step):
+    def run(self, session):
+        context = session.iteration_context
+        context["loss"] = loss_fn(context["logits"], context["targets"])
+```
+
+A component whose keys come from its configuration overrides
+`context_reads()` / `context_writes()` instead; the built-in
+[generic steps](../reference/builtin-components.md#generic-steps) do, which is
+how several `compute#...` instances of one class are ordered.
+
+- **Order.** A step that reads a key runs after the step that writes it. These
+  edges join the ones from `@requires_*` and `@wraps`; a contradiction is a
+  cycle, reported with its chain and the reason for each link, e.g.
+  `Step.a -> Step.b (reads 'z') -> Step.a (reads 'y')`.
+- **One writer per key.** Two components writing one key are rejected, naming
+  both: their order would be a guess.
+- **No update in place.** A step that reads and writes the same key is
+  rejected; write a new key instead.
+- **Every declared read has a writer**, or the error names the key and lists
+  the keys that are written.
+- **Iteration hooks.** An iteration hook's writes happen in
+  `pre_iteration_callback`, before every step, and its reads in
+  `post_iteration_callback`, after every step, so hooks are checked but not
+  ordered.
+- **Cadence.** The context is cleared after every iteration, so a reader may
+  only run on iterations its writer runs on. Everything runs on the first and
+  final iteration and on multiples of its cadence -- 1 for a step,
+  `call_every` for a hook -- so a reader's cadence must be a multiple of its
+  writer's: a step cannot read what a `call_every: 5` hook writes, and a hook
+  reading it needs `call_every: 5`, `10`, ... Every iteration hook's
+  `call_every` must be a positive integer; that is checked when the session
+  is built, for every hook. Only steps and iteration hooks take part in an
+  iteration: declaring keys on anything else -- a session hook, a resource --
+  is rejected.
+
+These checks run when a session is built from configuration -- with the
+engine, in the parent process, before any worker starts -- and again when a
+session is entered, which covers components registered by hand. While a
+session runs, a step or hook that did not write a key it declared fails right
+after the callback that should have written it. A rank of a distributed run
+keeps the writer of every key its components read -- see
+[What each rank builds](05-distributed-training.md#what-each-rank-builds).
+
+Declaring is optional: a component that declares nothing is neither ordered
+nor checked by keys, exactly as before. The built-in `backward` reads `loss`,
+so the step producing the loss has to declare `@writes("loss")` (or be a
+built-in `compute`).
+
+The execution graph shows each component's `reads:` / `writes:` and a
+`DATAFLOW` section listing every key with its writer and readers.
+
 ---
 
 **Next:** [Configuration](03-configuration.md) — the full `sessions` YAML

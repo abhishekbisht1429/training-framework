@@ -131,11 +131,19 @@ spawned, so a typo fails the launch rather than one rank — including on a
 single-rank launch, which has no ranks to prune for but would otherwise carry
 the mistake until the day the same configuration is scaled up.
 
-A rank-zero-only component that a component this rank *does* build declares as
-a prerequisite is built anyway, with a warning: a prerequisite has to exist
-wherever its consumer does. Nothing else is inferred — a component is left off
-a rank because it was declared rank-zero-only, never because the framework
+A rank-zero-only component that a component this rank *does* build needs is
+built anyway, with a warning: whatever a component requires, wraps, brings
+along with `@activates`, or reads from `iteration_context` (the writer of a
+[declared key](02-wiring-components.md#ordering-by-dataflow)) has to exist
+wherever that component does. Nothing else is inferred — a component is left
+off a rank because it was declared rank-zero-only, never because the framework
 decided it was needed only there.
+
+The parent works this out from the live components before it spawns anything,
+and sorts the reduced set a secondary rank will build: a rank that could not
+run fails the launch there, not in a worker the other ranks are waiting for.
+Each worker then reaches the same set from the checkpointed session state,
+which records the keys every component reads and writes.
 
 ### How a rank settles its component set
 

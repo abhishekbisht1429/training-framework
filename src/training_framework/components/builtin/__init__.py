@@ -2,6 +2,12 @@
 
 from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.components.builtin.analysis import AnalysisLogger
+from training_framework.components.builtin.computation import (
+    AnalysisForward,
+    Compute,
+    Forward,
+    LoadBatch,
+)
 from training_framework.components.builtin.data import (
     AnalysisDataManager,
     DataManager,
@@ -33,17 +39,21 @@ from training_framework.components.builtin.transformer import (
 
 __all__ = [
     "AnalysisDataManager",
+    "AnalysisForward",
     "AnalysisLogger",
     "Backward",
     "Checkpointer",
     "ClipGradients",
+    "Compute",
     "DataManager",
     "DDPResource",
+    "Forward",
     "ForwardContext",
     "FreezeGradients",
     "GradientProcessor",
     "LayerCapture",
     "LayerInspector",
+    "LoadBatch",
     "Logger",
     "OptimizerResource",
     "OptimizerStep",

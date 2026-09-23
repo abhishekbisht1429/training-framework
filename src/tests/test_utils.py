@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+from torch import nn
 
 from training_framework.components import LifecycleHook, Resource, Stateful, Step
 
@@ -284,3 +287,39 @@ class AdditionalHookBase(LifecycleHook, Stateful):
         self.pre_iterations = list(state["pre_iterations"])
         self.post_iterations = list(state["post_iterations"])
         self.shared_snapshots = [dict(item) for item in state["shared_snapshots"]]
+
+
+# -- distributed stand-ins -------------------------------------------------------
+
+
+class RecordingDistributedDataParallel(nn.Module):
+    """Stands in for DDP: forwards to the model, records calls and `no_sync`."""
+
+    def __init__(self, module, device_ids=None):
+        super().__init__()
+        self.module = module
+        self.syncing = True
+        self.calls = 0
+
+    def forward(self, *args, **kwargs):
+        self.calls += 1
+        return self.module(*args, **kwargs)
+
+    @contextlib.contextmanager
+    def no_sync(self):
+        self.syncing = False
+        try:
+            yield
+        finally:
+            self.syncing = True
+
+
+def stub_process_group(monkeypatch) -> None:
+    """Run the `ddp` resource in one process: DDP is the recording stand-in
+    and no process group is created."""
+    import torch
+    from training_framework.components.builtin import distributed
+
+    monkeypatch.setattr(distributed, "DDP", RecordingDistributedDataParallel)
+    monkeypatch.setattr(torch.distributed, "init_process_group", lambda **_: None)
+    monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: None)

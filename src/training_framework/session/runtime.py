@@ -12,6 +12,22 @@ def clear_iteration_state(session: "Session") -> None:
     session._shared_state.clear()
 
 
+def _check_declared_writes(session: "Session", writer) -> None:
+    """Hold a step or iteration hook to the keys it declared writing, right
+    after the callback that writes them: the order and the checks made when
+    the session was built rely on that promise."""
+    missing = [
+        key for key in writer.context_writes()
+        if key not in session._shared_state
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{writer.id} declares it writes iteration_context {missing} but "
+            "did not write them; its readers are ordered and checked on that "
+            "promise."
+        )
+
+
 def run_iteration(session: "Session") -> int:
     iteration_complete = False
     try:
@@ -30,10 +46,12 @@ def run_iteration(session: "Session") -> int:
             ):
                 session.send_heartbeat(f"Running {iteration_hook.id}")
                 iteration_hook.pre_iteration_callback(session)
+                _check_declared_writes(session, iteration_hook)
 
         for step in session._sorted_steps:
             session.send_heartbeat(f"Running {step.id}")
             step.run(session)
+            _check_declared_writes(session, step)
 
         for iteration_hook in reversed(session._iteration_hooks):
             if (

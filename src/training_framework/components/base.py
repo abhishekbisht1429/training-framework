@@ -87,9 +87,33 @@ class Component(ABC, metaclass=ComponentMeta):
     a rank-zero-only component everywhere merely duplicates its work.
     """
 
+    declared_reads: ClassVar[tuple[str, ...]] = ()
+    """`iteration_context` keys this component reads; set by `@reads`."""
+
+    declared_writes: ClassVar[tuple[str, ...]] = ()
+    """`iteration_context` keys this component writes; set by `@writes`."""
+
     def __init__(self, config: Mapping | None = None) -> None:
         """Initialize a component that does not require configuration."""
         self._parse_config_schema(config)
+
+    def context_reads(self) -> tuple[str, ...]:
+        """Return the `iteration_context` keys this instance reads.
+
+        A step runs after the step that writes each of them; a hook reads
+        them in its post-iteration callback. Override when the keys come from
+        the configuration rather than the class.
+        """
+        return tuple(type(self).declared_reads)
+
+    def context_writes(self) -> tuple[str, ...]:
+        """Return the `iteration_context` keys this instance writes.
+
+        A step writes them in `run`; a hook in its pre-iteration callback, so
+        they are there before any step runs. Override when the keys come from
+        the configuration rather than the class.
+        """
+        return tuple(type(self).declared_writes)
 
     @classmethod
     def _component_name(cls) -> str:

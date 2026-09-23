@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from training_framework.components import (
     requires_resource,
     resource,
 )
+from training_framework.components.importing import import_module_class
 from training_framework.util import requires_context
 
 if TYPE_CHECKING:
@@ -45,27 +45,11 @@ def _resolve_module_type(dotted_path: str) -> type[nn.Module]:
             f"dotted paths (e.g. 'torch.nn.MultiheadAttention'); got "
             f"{dotted_path!r}"
         )
-    module_path, _, attr_name = dotted_path.rpartition(".")
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError as error:
-        raise ImportError(
-            f"layer_inspector.module_types entry {dotted_path!r} could not "
-            f"be imported: {error}"
-        ) from error
-    try:
-        resolved = getattr(module, attr_name)
-    except AttributeError as error:
-        raise ValueError(
-            f"layer_inspector.module_types entry {dotted_path!r} has no "
-            f"attribute {attr_name!r} in module {module_path!r}"
-        ) from error
-    if not isinstance(resolved, type) or not issubclass(resolved, nn.Module):
-        raise TypeError(
-            f"layer_inspector.module_types entry {dotted_path!r} does not "
-            "resolve to an nn.Module subclass"
-        )
-    return resolved
+    return import_module_class(
+        dotted_path,
+        "layer_inspector.module_types entry",
+        example="torch.nn.MultiheadAttention",
+    )
 
 
 @requires_resource("trained_model")

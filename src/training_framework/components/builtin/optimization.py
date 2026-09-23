@@ -10,7 +10,8 @@ Per-iteration work is done by steps, ordered by the steps they require:
 `forward_context` is the one hook: autocast and DDP's `no_sync` have to be
 entered before the forward pass, which a step cannot guarantee to precede.
 Configuring `optimizer` activates `optimizer_step`, which brings in the rest
-of the chain; the loss step fills the `loss` role.
+of the chain; `backward` reads `iteration_context["loss"]`, so it runs after
+whichever step declares writing it.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 import math
 from abc import abstractmethod
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -38,7 +39,6 @@ from training_framework.components import (
     requires_resource,
     requires_step,
     resource,
-    role,
     step,
 )
 
@@ -254,17 +254,6 @@ class _OptimizerSettings:
     accumulate_steps: int
 
 
-role(
-    "loss",
-    Step,
-    description=(
-        "the step that writes the training loss to "
-        "iteration_context['loss']; backward runs after it"
-    ),
-    session_type="training",
-)
-
-
 @activates("optimizer_step")
 @requires_resource("ddp")
 @resource("optimizer", session_type="training")
@@ -292,7 +281,6 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         self._boundary = True
         self._autocast = None
         self._no_sync = None
-        self._processors: list[Step] = []
         self._processed: set[int] = set()
         self._grad_norm: float | None = None
 
@@ -974,23 +962,22 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             if parameter.grad is not None
         ]
 
-    def register_processor(self, processor: Step) -> None:
-        if all(existing is not processor for existing in self._processors):
-            self._processors.append(processor)
-
     def mark_processed(self, processor: Step) -> None:
         self._processed.add(id(processor))
 
-    def check_processed(self) -> None:
-        """Refuse to step before every gradient processor has run.
+    def check_processed(self, processors: Iterable[Step]) -> None:
+        """Refuse to step before every one of `processors` has run.
 
         A processor ordered after `optimizer_step` -- a custom stage whose
         binding was forgotten -- would edit gradients the step has already
         applied. Caught here, before the first such step is taken.
+        `processors` are the session's stages bound to this optimizer, taken
+        from the session when the step runs, so a stage replaced or removed
+        since is never waited for.
         """
         late = [
             getattr(processor, "name", type(processor).__name__)
-            for processor in self._processors
+            for processor in processors
             if id(processor) not in self._processed
         ]
         if late:
@@ -1002,14 +989,17 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                 "have it require the stage it follows."
             )
 
+    @property
+    def metric_key(self) -> str | None:
+        """The iteration_context key a metric-driven schedule steps on."""
+        scheduler_config = self._settings.scheduler_config
+        if scheduler_config is None:
+            return None
+        return scheduler_config["metric_key"]
+
     def scheduler_metric(self, iteration_context: Mapping) -> Any:
         """The value a metric-driven schedule steps on, if one is configured."""
-        scheduler_config = self._settings.scheduler_config
-        metric_key = (
-            scheduler_config["metric_key"]
-            if scheduler_config is not None
-            else None
-        )
+        metric_key = self.metric_key
         if metric_key is None:
             return None
         try:
@@ -1096,25 +1086,25 @@ class BackwardConfig:
 
 
 @requires_hook("forward_context")
-@requires_step("loss")
 @requires_resource("optimizer")
 @step("backward", session_type="training")
 class Backward(Step):
-    """Backpropagate the loss the `loss` step wrote."""
+    """Backpropagate the loss another step wrote under `loss_key`.
+
+    It reads that key, so it runs after whichever step declares writing it.
+    """
 
     config_schema = BackwardConfig
 
     @override
+    def context_reads(self) -> tuple[str, ...]:
+        return (self._cfg.loss_key,)
+
+    @override
     def run(self, session: Session) -> None:
-        key = self._cfg.loss_key
-        try:
-            loss = session.iteration_context[key]
-        except KeyError as error:
-            raise KeyError(
-                f"backward expects the loss in iteration_context[{key!r}], "
-                "written by the step bound to the 'loss' role"
-            ) from error
-        self.get_dependency("optimizer").backward(loss)
+        self.get_dependency("optimizer").backward(
+            session.iteration_context[self._cfg.loss_key]
+        )
 
 
 @requires_resource("optimizer")
@@ -1130,18 +1120,9 @@ class GradientProcessor(Step, ExtendableComponent):
     extension: it holds no state beyond its configuration.
     """
 
-    def __init__(self, config=None):
-        super().__init__(config)
-        # Registered as soon as it exists, so the guard in optimizer_step
-        # knows about it before the first iteration. One added by hand gets
-        # its prerequisites later and registers on its first run.
-        if self.has_dependency("optimizer"):
-            self.get_dependency("optimizer").register_processor(self)
-
     @override
     def run(self, session: Session) -> None:
         optimizer = self.get_dependency("optimizer")
-        optimizer.register_processor(self)
         if not optimizer.is_boundary:
             return
         self.process(session, optimizer.named_gradients())
@@ -1309,11 +1290,25 @@ class OptimizerStep(Step):
     """Step the optimizer and its schedule on iterations that end a group."""
 
     @override
+    def context_reads(self) -> tuple[str, ...]:
+        # A metric-driven schedule reads its metric here, so a session that
+        # never writes it is rejected when it is built.
+        if not self.has_dependency("optimizer"):
+            return ()
+        metric_key = self.get_dependency("optimizer").metric_key
+        return () if metric_key is None else (metric_key,)
+
+    @override
     def run(self, session: Session) -> None:
         optimizer = self.get_dependency("optimizer")
         if not optimizer.is_boundary:
             return
-        optimizer.check_processed()
+        optimizer.check_processed(
+            processor for processor in session.get_all_steps()
+            if isinstance(processor, GradientProcessor)
+            and processor.has_dependency("optimizer")
+            and processor.get_dependency("optimizer") is optimizer
+        )
         optimizer.step(optimizer.scheduler_metric(session.iteration_context))
 
 

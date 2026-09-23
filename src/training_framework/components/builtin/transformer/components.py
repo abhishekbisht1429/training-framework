@@ -10,7 +10,6 @@ bound to them during construction, so they are wiring plus a forward pass.
 
 from __future__ import annotations
 
-import importlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
@@ -28,6 +27,7 @@ from training_framework.components import (
     resource,
     role,
 )
+from training_framework.components.importing import import_module_class
 from training_framework.components.builtin.transformer.modules import (
     _ACTIVATIONS,
     _MODULE_DICT_ATTRIBUTES,
@@ -557,38 +557,6 @@ class LearnedPoolingQuery(ModuleResource):
         return self.queries.expand(batch_size, -1, -1)
 
 
-def _resolve_module_class(dotted_path: str, context: str) -> type[nn.Module]:
-    """Import an `nn.Module` subclass from a fully-qualified dotted path.
-
-    `layer_inspector.module_types` resolves dotted paths the same way; the two
-    could share a helper if a third caller appears.
-    """
-    if not isinstance(dotted_path, str) or "." not in dotted_path:
-        raise ValueError(
-            f"{context} must be a fully-qualified dotted path (e.g. "
-            f"'torch.nn.Linear'); got {dotted_path!r}"
-        )
-    module_path, _, attr_name = dotted_path.rpartition(".")
-    try:
-        imported = importlib.import_module(module_path)
-    except ImportError as error:
-        raise ImportError(
-            f"{context} {dotted_path!r} could not be imported: {error}"
-        ) from error
-    try:
-        resolved = getattr(imported, attr_name)
-    except AttributeError as error:
-        raise ValueError(
-            f"{context} {dotted_path!r} has no attribute {attr_name!r} in "
-            f"module {module_path!r}"
-        ) from error
-    if not isinstance(resolved, type) or not issubclass(resolved, nn.Module):
-        raise TypeError(
-            f"{context} {dotted_path!r} does not resolve to an nn.Module subclass"
-        )
-    return resolved
-
-
 @dataclass
 class ConditionedPoolingQueryConfig:
     embed_dim: int
@@ -676,7 +644,7 @@ class ConditionedPoolingQuery(ModuleResource):
             raise ValueError(f"{context} must be a mapping; got {spec!r}")
         kwargs = dict(spec)
         reduce = kwargs.pop("reduce", None)
-        module_class = _resolve_module_class(
+        module_class = import_module_class(
             kwargs.pop("module", None),
             f"{context}.module",
         )

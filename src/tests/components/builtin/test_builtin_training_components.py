@@ -16,6 +16,7 @@ from training_framework.components import (
     requires_resource,
     resource,
     step,
+    writes,
 )
 from training_framework.session import TrainingSession
 from tests.test_utils import has_resource_named, inject_dependencies, resource_named
@@ -68,6 +69,7 @@ def _register_training_components():
                 self.weight.copy_(state["weight"])
 
     @step("public_test_loss")
+    @writes("loss")
     @requires_resource("ddp")
     class PublicTestLoss(Step):
         def __init__(self, config):
@@ -89,7 +91,6 @@ def _training_config(tmp_path, *, max_iterations=3):
         ),
         "component_bindings": {
             "model": "public_test_model",
-            "loss": "public_test_loss",
         },
         "public_test_model": {"initial_weight": 1.0},
         "ddp": {

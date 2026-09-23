@@ -91,7 +91,14 @@ class TrainStep(Step):
         ...
 ```
 
-Steps are executed in dependency order.
+Steps are executed in dependency order: after the steps they require, and
+after the steps that write the `iteration_context` keys they declare reading
+(see [Ordering by dataflow](02-wiring-components.md#ordering-by-dataflow)).
+
+For the common work -- taking a batch, calling a model, computing a loss --
+the built-in [generic steps](../reference/builtin-components.md#generic-steps)
+`load_batch`, `forward` and `compute` need only configuration; write a step
+when you need something they do not do.
 
 A component that does not need constructor configuration or other initialization
 may omit `__init__` entirely:

@@ -31,6 +31,7 @@ from training_framework.components.registry import (
     format_execution_graph,
     hook,
     rank_zero_only,
+    reads,
     singleton,
     requires_hook,
     requires_resource,
@@ -41,6 +42,7 @@ from training_framework.components.registry import (
     step,
     topological_sort_of_components,
     wraps,
+    writes,
 )
 
 __all__ = [
@@ -72,6 +74,7 @@ __all__ = [
     "format_execution_graph",
     "hook",
     "rank_zero_only",
+    "reads",
     "singleton",
     "requires_hook",
     "requires_resource",
@@ -82,6 +85,7 @@ __all__ = [
     "step",
     "topological_sort_of_components",
     "wraps",
+    "writes",
 ]
 
 from training_framework.components import builtin as builtin

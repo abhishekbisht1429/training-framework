@@ -10,10 +10,15 @@ from training_framework.components.base import (
     SessionHook,
     Step,
 )
-from training_framework.components.naming import (
-    implementation_of,
-    is_instance_name,
+from training_framework.components.edges import (
+    EdgeKind,
+    context_keys_of,
+    declared_edges,
+    is_valid_cadence,
+    iteration_cadence,
+    resolve_component_name,
 )
+from training_framework.components.naming import implementation_of
 
 if TYPE_CHECKING:
     from training_framework.components.registry import RoleDeclaration
@@ -48,30 +53,18 @@ def _missing_role_message(
 def _resolve_to_node(binding_resolver, nodes_by_name, consumer, name):
     """Return the node satisfying `name` for `consumer`, and the name tried.
 
-    Mirrors the session's resolution: the consumer's own wiring first, then
-    the sole node the name can mean. An exact match wins outright, so a
-    second instance of a component never takes an edge away from the first.
-    Ambiguity is left to the session, which can explain it properly; here it
-    simply resolves to nothing and is reported as unconfigured.
+    Resolution is `resolve_component_name`, the one the session uses: the
+    consumer's own wiring first, then the sole node the name can mean, and an
+    error naming the candidates when several could. The node is None when
+    nothing active answers to the name, for the caller to report.
     """
-    resolved_name = binding_resolver.resolve(
+    resolved_name = resolve_component_name(
+        binding_resolver,
         name,
         consumer=getattr(consumer, "name", None),
+        active=nodes_by_name,
     )
-    if resolved_name in nodes_by_name:
-        return resolved_name, nodes_by_name[resolved_name]
-    if is_instance_name(resolved_name):
-        # A precise reference to an instance that is not here; never a sibling.
-        return resolved_name, None
-
-    implementation = implementation_of(resolved_name)
-    candidates = [
-        node for node_name, node in nodes_by_name.items()
-        if implementation_of(node_name) == implementation
-    ]
-    if len(candidates) == 1:
-        return resolved_name, candidates[0]
-    return resolved_name, None
+    return resolved_name, nodes_by_name.get(resolved_name)
 
 
 def _is_component_type(
@@ -110,12 +103,7 @@ def _validate_wrapping_lifecycle(
     wrapper_cadence = getattr(wrapper, "call_every", missing)
     wrapped_cadence = getattr(wrapped, "call_every", missing)
     valid_cadences = (
-        isinstance(wrapper_cadence, int)
-        and not isinstance(wrapper_cadence, bool)
-        and wrapper_cadence > 0
-        and isinstance(wrapped_cadence, int)
-        and not isinstance(wrapped_cadence, bool)
-        and wrapped_cadence > 0
+        is_valid_cadence(wrapper_cadence) and is_valid_cadence(wrapped_cadence)
     )
     if (
             wrapper_cadence is missing
@@ -174,201 +162,137 @@ def topological_sort_components(
         for component in selected_components
     }
     active_names = set(nodes_by_name)
+    # Why each edge exists, so a cycle can be reported as a chain of reasons.
+    # Keyed (dependent id, prerequisite id).
+    edge_reasons: dict[tuple[str, str], str] = {}
+
+    # Keys are what the session's instances declare; the registry-wide sort
+    # has no instances, and unrelated classes may well share key names.
+    context_keys = context_keys_of(selected_components) if session_scoped else {}
+    writers = _checked_writers(nodes_by_name, context_keys)
 
     for component in selected_components:
-        requirements = (
-            ("required_hooks", Hook),
-            ("required_steps", Step),
-            ("required_resources", Resource),
-        )
-        for attribute, required_type in requirements:
-            for required_name in getattr(component, attribute, []):
-                resolved_name, prerequisite = _resolve_to_node(
-                    binding_resolver,
-                    nodes_by_name,
-                    component,
-                    required_name,
+        reads, writes = context_keys.get(component.name, ((), ()))
+        wrapped_targets: set[str] = set()
+        for edge in declared_edges(component, reads):
+            if edge.kind is EdgeKind.READS:
+                _add_read_edge(
+                    component, edge, writes, writers, nodes_by_name,
+                    prerequisites_graph, edge_reasons,
                 )
-                # A name may identify an instance; the class it is an
-                # instance of is what the registry holds.
-                registered_class = registry.get(
-                    implementation_of(resolved_name),
-                )
-                if (
-                        registered_class is None
-                        or not issubclass(registered_class, required_type)
-                ):
-                    declared_role = (
-                        roles.get(resolved_name)
-                        if registered_class is None
-                        else None
-                    )
-                    if (
-                            declared_role is not None
-                            and declared_role.category is required_type
-                    ):
-                        raise RuntimeError(
-                            _missing_role_message(
-                                category=required_type,
-                                name=required_name,
-                                resolved_name=resolved_name,
-                                declared_role=declared_role,
-                                consumer=component,
-                            )
-                        )
-                    raise RuntimeError(with_explanation(
-                        f"unmet prerequisite! {required_type.__name__} "
-                        f"'{required_name}' resolves to '{resolved_name}', which "
-                        f"is not registered as a {required_type.__name__}.",
-                        explain_missing_component(
-                            required_name,
-                            resolved_name,
-                            expected_type=required_type,
-                            session_type=session_type,
-                            consumer=component,
-                        ),
-                    ))
+                continue
 
-                assert registered_class is not None
-                if session_scoped and prerequisite is None:
-                    raise RuntimeError(with_explanation(
-                        f"unmet prerequisite! {required_type.__name__} "
-                        f"'{required_name}' resolves to '{resolved_name}', which "
-                        "is not configured in this session.",
-                        explain_missing_component(
-                            required_name,
-                            resolved_name,
-                            expected_type=required_type,
-                            session_type=session_type,
-                            consumer=component,
-                            active_names=active_names,
-                        ),
-                    ))
-                prerequisite_id = (
-                    prerequisite.id
-                    if prerequisite is not None
-                    else registered_class.id
-                )
-                prerequisites_graph[component.id].append(prerequisite_id)
-
-    for wrapper in selected_components:
-        if not _is_component_type(wrapper, Hook):
-            continue
-
-        resolved_targets = set()
-        for wrapped_name in getattr(wrapper, "wrapped_hooks", ()):
-            resolved_name, wrapped_node = _resolve_to_node(
-                binding_resolver,
-                nodes_by_name,
-                wrapper,
-                wrapped_name,
+            resolved_name, node = _resolve_to_node(
+                binding_resolver, nodes_by_name, component, edge.asked,
             )
-            registered_class = registry.get(
-                implementation_of(resolved_name),
-            )
-            if registered_class is None or not issubclass(registered_class, Hook):
+            # A name may identify an instance; the class it is an instance
+            # of is what the registry holds.
+            registered_class = registry.get(implementation_of(resolved_name))
+
+            if edge.kind is EdgeKind.COMPANION:
+                # Companions add no ordering edge; they are checked here
+                # because this is where every way a session comes to hold
+                # its components -- activation, hand registration, restore --
+                # converges.
+                _check_companion(
+                    component, edge.asked, resolved_name, node,
+                    registered_class, session_scoped, session_type,
+                    active_names, explain_missing_component, with_explanation,
+                )
+                continue
+
+            is_wrap = edge.kind is EdgeKind.WRAPS
+            required_type = edge.expected_type
+            if (
+                    registered_class is None
+                    or not issubclass(registered_class, required_type)
+            ):
                 declared_role = (
                     roles.get(resolved_name) if registered_class is None else None
                 )
-                if declared_role is not None and declared_role.category is Hook:
+                if (
+                        declared_role is not None
+                        and declared_role.category is required_type
+                ):
                     raise RuntimeError(
                         _missing_role_message(
-                            category=Hook,
-                            name=wrapped_name,
+                            category=required_type,
+                            name=edge.asked,
                             resolved_name=resolved_name,
                             declared_role=declared_role,
-                            consumer=wrapper,
+                            consumer=component,
                         )
                     )
                 raise RuntimeError(with_explanation(
-                    f"invalid wraps target! Hook '{wrapped_name}' resolves to "
-                    f"'{resolved_name}', which is not registered as a Hook.",
+                    (
+                        f"invalid wraps target! Hook '{edge.asked}' resolves "
+                        f"to '{resolved_name}', which is not registered as a "
+                        "Hook."
+                        if is_wrap else
+                        f"unmet prerequisite! {required_type.__name__} "
+                        f"'{edge.asked}' resolves to '{resolved_name}', which "
+                        f"is not registered as a {required_type.__name__}."
+                    ),
                     explain_missing_component(
-                        wrapped_name,
+                        edge.asked,
                         resolved_name,
-                        expected_type=Hook,
+                        expected_type=required_type,
                         session_type=session_type,
-                        consumer=wrapper,
+                        consumer=component,
                     ),
                 ))
 
-            wrapped_id = (
-                wrapped_node.id
-                if wrapped_node is not None
-                else registered_class.id
-            )
-            if wrapped_id == wrapper.id:
-                raise RuntimeError(
-                    f"Hook '{wrapper.name}' cannot wrap itself"
-                )
-            if wrapped_id in resolved_targets:
-                raise RuntimeError(
-                    f"Hook '{wrapper.name}' wraps Hook '{resolved_name}' "
+            target_id = node.id if node is not None else registered_class.id
+            if is_wrap:
+                if target_id == component.id:
+                    raise RuntimeError(
+                        f"Hook '{component.name}' cannot wrap itself"
+                    )
+                if target_id in wrapped_targets:
+                    raise RuntimeError(
+                        f"Hook '{component.name}' wraps Hook '{resolved_name}' "
                         "more than once after component binding resolution"
+                    )
+                wrapped_targets.add(target_id)
+
+            if session_scoped and node is None:
+                raise RuntimeError(with_explanation(
+                    (
+                        f"invalid wraps target! Hook '{edge.asked}' resolves "
+                        f"to '{resolved_name}', which is not configured in "
+                        "this session."
+                        if is_wrap else
+                        f"unmet prerequisite! {required_type.__name__} "
+                        f"'{edge.asked}' resolves to '{resolved_name}', which "
+                        "is not configured in this session."
+                    ),
+                    explain_missing_component(
+                        edge.asked,
+                        resolved_name,
+                        expected_type=required_type,
+                        session_type=session_type,
+                        consumer=component,
+                        active_names=active_names,
+                    ),
+                ))
+
+            if is_wrap:
+                _validate_wrapping_lifecycle(
+                    component,
+                    node if node is not None else registered_class,
+                    session_scoped=session_scoped,
                 )
-            resolved_targets.add(wrapped_id)
-
-            if session_scoped and wrapped_node is None:
-                raise RuntimeError(with_explanation(
-                    f"invalid wraps target! Hook '{wrapped_name}' resolves to "
-                    f"'{resolved_name}', which is not configured in this session.",
-                    explain_missing_component(
-                        wrapped_name,
-                        resolved_name,
-                        expected_type=Hook,
-                        session_type=session_type,
-                        consumer=wrapper,
-                        active_names=active_names,
-                    ),
-                ))
-
-            wrapped = (
-                wrapped_node if wrapped_node is not None else registered_class
+            _add_execution_edge(
+                component.id, target_id, edge,
+                prerequisites_graph, edge_reasons,
             )
-            _validate_wrapping_lifecycle(
-                wrapper,
-                wrapped,
-                session_scoped=session_scoped,
-            )
-            prerequisites_graph[wrapped_id].append(wrapper.id)
 
-    # Companions (`@activates`) add no edge: they are not ordered relative to
-    # the component that brings them along. They are checked here because
-    # this is where every way a session comes to hold its components --
-    # activation, hand registration, restore -- converges.
-    for component in selected_components:
-        for companion_name in getattr(component, "activated_components", ()):
-            resolved_name, companion_node = _resolve_to_node(
-                binding_resolver,
-                nodes_by_name,
-                component,
-                companion_name,
-            )
-            if registry.get(implementation_of(resolved_name)) is None:
-                raise RuntimeError(with_explanation(
-                    f"'{component.name}' activates '{companion_name}', which "
-                    f"resolves to '{resolved_name}' and is not registered.",
-                    explain_missing_component(
-                        companion_name,
-                        resolved_name,
-                        session_type=session_type,
-                        consumer=component,
-                    ),
-                ))
-            if session_scoped and companion_node is None:
-                raise RuntimeError(with_explanation(
-                    f"'{component.name}' activates '{companion_name}', which "
-                    f"resolves to '{resolved_name}' and is not configured in "
-                    "this session. Activate it too, or build the session from "
-                    "configuration, which brings it along.",
-                    explain_missing_component(
-                        companion_name,
-                        resolved_name,
-                        session_type=session_type,
-                        consumer=component,
-                        active_names=active_names,
-                    ),
-                ))
+    if session_scoped:
+        # The runtime takes every iteration hook's cadence modulo the
+        # iteration, wrapping or reading or neither; validate them all.
+        for component in selected_components:
+            if isinstance(component, IterationHook):
+                iteration_cadence(component)
 
     dependents_graph: dict[str, list[str]] = {
         component_id: [] for component_id in prerequisites_graph
@@ -395,12 +319,180 @@ def topological_sort_components(
                 queue.append(dependent_id)
 
     if len(sorted_components) != len(prerequisites_graph):
-        raise RuntimeError("Cyclic dependency detected in the component graph!")
+        remaining = {
+            component_id for component_id, count in prerequisite_count.items()
+            if count > 0
+        }
+        raise RuntimeError(
+            "Cyclic dependency detected in the component graph! "
+            + _describe_cycle(remaining, prerequisites_graph, edge_reasons)
+        )
 
     return {
         component_id: index
         for index, component_id in enumerate(sorted_components)
     }
+
+
+def _add_execution_edge(
+        source_id: str,
+        target_id: str,
+        edge,
+        prerequisites_graph: dict[str, list[str]],
+        edge_reasons: dict[tuple[str, str], str],
+) -> None:
+    """Record that `source` runs after (or, for a wrap, before) `target`."""
+    if edge.execution == "after":
+        prerequisites_graph[source_id].append(target_id)
+        edge_reasons.setdefault((source_id, target_id), edge.reason)
+    elif edge.execution == "before":
+        prerequisites_graph[target_id].append(source_id)
+        edge_reasons.setdefault((target_id, source_id), "wrapped by")
+
+
+def _checked_writers(nodes_by_name, context_keys) -> dict[str, str]:
+    """Key -> the one component that writes it.
+
+    Two writers of one key are rejected: their order would be a guess, and a
+    guess is what the resolution rules refuse to make.
+    """
+    writers: dict[str, str] = {}
+    for name, (_, writes) in context_keys.items():
+        for key in writes:
+            other = writers.get(key)
+            if other is not None and other != name:
+                raise RuntimeError(
+                    f"iteration_context key '{key}' is written by both "
+                    f"{nodes_by_name[other].id} and {nodes_by_name[name].id}. "
+                    "Each key has one writer, so the order of the two is "
+                    "never guessed; have one of them write another key."
+                )
+            writers[key] = name
+    return writers
+
+
+def _add_read_edge(
+        reader,
+        edge,
+        reader_writes,
+        writers,
+        nodes_by_name,
+        prerequisites_graph,
+        edge_reasons,
+) -> None:
+    """Order a step after the writer of a key it reads, after checking the
+    key is there on every iteration the reader runs.
+
+    A hook writes in its pre-iteration callback, before every step, and
+    reads in its post-iteration callback, after every step, so hooks are
+    checked but add no ordering edge.
+    """
+    key = edge.asked
+    reader_is_step = isinstance(reader, Step)
+    if reader_is_step and key in reader_writes:
+        raise RuntimeError(
+            f"{reader.id} reads and writes iteration_context key '{key}'. A "
+            f"step cannot update a key in place: write a new key (e.g. "
+            f"'{key}_updated') and read that instead."
+        )
+    writer_name = writers.get(key)
+    if writer_name is None:
+        available = ", ".join(sorted(writers)) or "none"
+        raise RuntimeError(
+            f"{reader.id} reads iteration_context key '{key}', which no step "
+            f"or hook writes. Declare @writes('{key}') on the step that "
+            "produces it, or configure a built-in step that does. Keys "
+            f"written in this session: {available}."
+        )
+    writer = nodes_by_name[writer_name]
+    # The context is cleared after every iteration, so a reader may only run
+    # on iterations its writer runs on too -- whichever of the two is a step
+    # or a hook.
+    writer_cadence = iteration_cadence(writer)
+    reader_cadence = iteration_cadence(reader)
+    if reader_cadence % writer_cadence != 0:
+        raise RuntimeError(
+            f"{reader.id} reads iteration_context key '{key}', which "
+            f"{writer.id} writes only every {writer_cadence} iterations, but "
+            f"it runs every {reader_cadence}; on the others the key would be "
+            "missing. A reader's cadence must be a multiple of its writer's: "
+            f"give it a call_every that is a multiple of {writer_cadence}."
+        )
+    if isinstance(writer, Hook):
+        return
+    if reader_is_step:
+        _add_execution_edge(
+            reader.id, writer.id, edge.resolved(writer_name),
+            prerequisites_graph, edge_reasons,
+        )
+
+
+def _check_companion(
+        component,
+        asked,
+        resolved_name,
+        node,
+        registered_class,
+        session_scoped,
+        session_type,
+        active_names,
+        explain_missing_component,
+        with_explanation,
+) -> None:
+    if registered_class is None:
+        raise RuntimeError(with_explanation(
+            f"'{component.name}' activates '{asked}', which resolves to "
+            f"'{resolved_name}' and is not registered.",
+            explain_missing_component(
+                asked,
+                resolved_name,
+                session_type=session_type,
+                consumer=component,
+            ),
+        ))
+    if session_scoped and node is None:
+        raise RuntimeError(with_explanation(
+            f"'{component.name}' activates '{asked}', which resolves to "
+            f"'{resolved_name}' and is not configured in this session. "
+            "Activate it too, or build the session from configuration, "
+            "which brings it along.",
+            explain_missing_component(
+                asked,
+                resolved_name,
+                session_type=session_type,
+                consumer=component,
+                active_names=active_names,
+            ),
+        ))
+
+
+def _describe_cycle(
+        remaining: set[str],
+        prerequisites_graph: Mapping[str, list[str]],
+        edge_reasons: Mapping[tuple[str, str], str],
+) -> str:
+    """Name one cycle among the components the sort could not place.
+
+    Every one of them waits on at least one other that could not be placed,
+    so following those waits from any of them must come back round.
+    """
+    current = min(remaining)
+    path: list[str] = []
+    seen: dict[str, int] = {}
+    while current not in seen:
+        seen[current] = len(path)
+        path.append(current)
+        current = next(
+            prerequisite for prerequisite in prerequisites_graph[current]
+            if prerequisite in remaining
+        )
+    cycle = path[seen[current]:] + [current]
+    parts = [cycle[0]]
+    for dependent, prerequisite in zip(cycle, cycle[1:]):
+        reason = edge_reasons.get((dependent, prerequisite), "requires")
+        # Read "A -> B (reads 'z')" as: A waits on B because A reads 'z'.
+        parts.append(f"{prerequisite} ({reason})")
+    return " -> ".join(parts)
 
 
 def render_execution_graph(
@@ -464,6 +556,9 @@ def render_execution_graph(
             in binding_resolver.instance_bindings.items()
             for role_name, target in wiring.items()
         )
+    dataflow = _dataflow_lines([*ordered_hooks, *ordered_steps])
+    if dataflow:
+        lines.extend(["", "DATAFLOW", *dataflow])
     lines.extend([
         "",
         "START",
@@ -570,6 +665,14 @@ def _append_execution_calls(
         )
         if companions:
             annotations.append(f"activates: {', '.join(companions)}")
+        if method_name in {"run", "pre_iteration_callback"}:
+            written = component.context_writes()
+            if written:
+                annotations.append(f"writes: {', '.join(written)}")
+        if method_name in {"run", "post_iteration_callback"}:
+            read = component.context_reads()
+            if read:
+                annotations.append(f"reads: {', '.join(read)}")
         if method_name in {
             "pre_iteration_callback",
             "post_iteration_callback",
@@ -601,19 +704,12 @@ def _component_requirements(
         nodes_by_name,
 ) -> list[str]:
     return [
-        f"{category}."
+        f"{edge.expected_type.__name__}."
         + _dependency_display_name(
-            binding_resolver,
-            nodes_by_name,
-            component,
-            name,
+            binding_resolver, nodes_by_name, component, edge.asked,
         )
-        for attribute, category in (
-            ("required_resources", "Resource"),
-            ("required_hooks", "Hook"),
-            ("required_steps", "Step"),
-        )
-        for name in getattr(component, attribute, ())
+        for edge in declared_edges(component)
+        if edge.kind is EdgeKind.REQUIRES
     ]
 
 
@@ -625,12 +721,26 @@ def _component_wrapped_hooks(
     return [
         "Hook."
         + _dependency_display_name(
-            binding_resolver,
-            nodes_by_name,
-            component,
-            name,
+            binding_resolver, nodes_by_name, component, edge.asked,
         )
-        for name in getattr(component, "wrapped_hooks", ())
+        for edge in declared_edges(component)
+        if edge.kind is EdgeKind.WRAPS
+    ]
+
+
+def _dataflow_lines(components) -> list[str]:
+    """`key: writer -> readers` for every declared iteration_context key."""
+    writers: dict[str, str] = {}
+    readers: dict[str, list[str]] = {}
+    for component in components:
+        for key in component.context_writes():
+            writers[key] = component.id
+        for key in component.context_reads():
+            readers.setdefault(key, []).append(component.id)
+    return [
+        f"  {key}: {writers.get(key, '(no writer)')} -> "
+        f"{', '.join(readers.get(key, [])) or '(not read)'}"
+        for key in sorted(set(writers) | set(readers))
     ]
 
 
@@ -640,14 +750,13 @@ def _component_companions(
         nodes_by_name,
 ) -> list[str]:
     names = []
-    for name in getattr(component, "activated_components", ()):
-        _, node = _resolve_to_node(
-            binding_resolver, nodes_by_name, component, name,
+    for edge in declared_edges(component):
+        if edge.kind is not EdgeKind.COMPANION:
+            continue
+        resolved_name, node = _resolve_to_node(
+            binding_resolver, nodes_by_name, component, edge.asked,
         )
-        display = _dependency_display_name(
-            binding_resolver, nodes_by_name, component, name,
-        )
-        names.append(display if node is None else node.id)
+        names.append(resolved_name if node is None else node.id)
     return names
 
 

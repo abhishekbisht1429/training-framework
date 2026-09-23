@@ -115,3 +115,10 @@ def test_a_component_without_a_schema_is_untouched():
     component = _Plain({"anything": 1})
 
     assert not hasattr(component, "_cfg")
+
+
+def test_keys_are_not_turned_into_strings():
+    # A YAML `1:` where a name was meant stays an unknown key, reported as
+    # one, rather than becoming the string "1" some schema might accept.
+    with pytest.raises(ValueError, match=r"unknown keys \[1\]"):
+        parse_component_config(_Configured, {"width": 4, 1: "x"})
