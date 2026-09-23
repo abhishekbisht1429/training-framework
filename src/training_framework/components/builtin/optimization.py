@@ -1,17 +1,46 @@
+"""Optimization as a resource and the steps that drive it.
+
+The `optimizer` resource owns the torch optimizer, its learning-rate
+schedule and, for fp16, the gradient scaler: it builds them in `setup`,
+checkpoints their state, and keeps the precision and accumulation settings.
+Per-iteration work is done by steps, ordered by the steps they require:
+
+    <loss step> -> backward -> freeze_gradients -> clip_gradients -> optimizer_step
+
+`forward_context` is the one hook: autocast and DDP's `no_sync` have to be
+entered before the forward pass, which a step cannot guarantee to precede.
+Configuring `optimizer` activates `optimizer_step`, which brings in the rest
+of the chain; the loss step fills the `loss` role.
+"""
+
 from __future__ import annotations
 
+import math
+from abc import abstractmethod
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, override
 
+import torch
 from torch import empty, nn, optim
 
 from training_framework.components import (
     ExtendableComponent,
-    StatefulLifeCycleHook,
+    LifecycleHook,
+    StatefulResource,
+    Step,
+    activates,
+    hook,
+    requires_hook,
+    requires_resource,
+    requires_step,
+    resource,
+    role,
+    step,
 )
-from training_framework.components import hook, requires_resource
 
 if TYPE_CHECKING:
     from training_framework.session import Session
@@ -22,13 +51,25 @@ _LEGACY_CONFIG_KEYS = frozenset({
     "weight_decay",
     "warmup_iters",
 })
+_CONFIG_KEYS = frozenset({
+    "optimizer",
+    "lr_scheduler",
+    "param_groups",
+    "precision",
+    "accumulate_steps",
+})
 _SPEC_KEYS = frozenset({"name", "kwargs"})
 _SCHEDULER_KEYS = frozenset({"stages", "milestones", "metric_key"})
+_PARAM_GROUP_KEYS = frozenset({"match", "kwargs"})
 _RUNTIME_PLACEHOLDERS = frozenset({
     "$max_iterations",
     "$stage_iterations",
 })
-
+_PRECISIONS: dict[str, torch.dtype | None] = {
+    "fp32": None,
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+}
 
 def _unknown_keys(config: Mapping, allowed: frozenset[str]) -> list[str]:
     return sorted(str(key) for key in set(config) - allowed)
@@ -156,21 +197,107 @@ def _resolve_placeholders(
     return deepcopy(value)
 
 
-@hook("optimizer", session_type="training")
+
+def _patterns(value: Any, path: str) -> list[str]:
+    """Return a list of parameter-name glob patterns, one string or several."""
+    if isinstance(value, str):
+        value = [value]
+    if (
+            not isinstance(value, Sequence)
+            or isinstance(value, (bytes, Mapping))
+            or not value
+            or any(not isinstance(item, str) or not item for item in value)
+    ):
+        raise ValueError(
+            f"{path} must be a non-empty list of parameter name patterns"
+        )
+    return list(value)
+
+
+def _matches(name: str, patterns: Sequence[str]) -> bool:
+    return any(fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def _check_patterns_match(
+        patterns: Sequence[str],
+        names: Sequence[str],
+        path: str,
+) -> None:
+    """Reject a pattern that selects no parameter: it is almost always a typo,
+    and a rule that silently applies to nothing gives a run that works and is
+    quietly wrong."""
+    unmatched = [
+        pattern for pattern in patterns
+        if not any(fnmatchcase(name, pattern) for name in names)
+    ]
+    if unmatched:
+        preview = ", ".join(names[:8]) + (", ..." if len(names) > 8 else "")
+        raise ValueError(
+            f"{path} patterns {unmatched} match no parameter. Parameter "
+            f"names look like: {preview}"
+        )
+
+
+def _unwrapped(wrapped_model: nn.Module) -> nn.Module:
+    """The model DDP wraps, whose parameter names patterns are written for."""
+    if isinstance(wrapped_model, nn.parallel.DistributedDataParallel):
+        return wrapped_model.module
+    return wrapped_model
+
+
+@dataclass(frozen=True)
+class _OptimizerSettings:
+    optimizer_spec: dict[str, Any]
+    scheduler_config: dict[str, Any] | None
+    param_groups: list[dict[str, Any]]
+    precision: str
+    accumulate_steps: int
+
+
+role(
+    "loss",
+    Step,
+    description=(
+        "the step that writes the training loss to "
+        "iteration_context['loss']; backward runs after it"
+    ),
+    session_type="training",
+)
+
+
+@activates("optimizer_step")
 @requires_resource("ddp")
-class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
+@resource("optimizer", session_type="training")
+class OptimizerResource(StatefulResource, ExtendableComponent):
+    """The optimizer, its schedule and gradient scaler, and how they step.
+
+    Built in `setup` from the parameters of the DDP-wrapped model and dropped
+    in `teardown`, keeping their state across both, as a checkpoint does.
+    The steps of the optimization chain drive it through the methods below;
+    `forward_context` opens each iteration with `begin_iteration`.
+    """
 
     def __init__(self, config):
-        self.call_every = 1
-        self._optimizer_spec, self._scheduler_config = self._normalize_config(
-            config
-        )
+        self._settings = self._normalize_config(config)
         self._optimizer = None
         self._lr_scheduler = None
+        self._grad_scaler = None
+        self._module = None
         self._restored_state = None
+        self._max_iterations = None
+        self._device_type = None
+        # Per iteration; see begin_iteration.
+        self._boundary = True
+        self._autocast = None
+        self._no_sync = None
+        self._processors: list[Step] = []
+        self._processed: set[int] = set()
+        self._grad_norm: float | None = None
+
+    # -- configuration ------------------------------------------------------
 
     @staticmethod
-    def _normalize_config(config):
+    def _normalize_config(config) -> _OptimizerSettings:
         config = _require_mapping(config, "optimizer config")
         legacy = sorted(_LEGACY_CONFIG_KEYS & set(config))
         if legacy:
@@ -180,9 +307,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 "optimizer.optimizer.kwargs; configure scheduling under "
                 "optimizer.lr_scheduler."
             )
-        unknown = _unknown_keys(
-            config, frozenset({"optimizer", "lr_scheduler"})
-        )
+        unknown = _unknown_keys(config, _CONFIG_KEYS)
         if unknown:
             raise ValueError(
                 "Unknown optimizer config fields: " + ", ".join(unknown)
@@ -199,12 +324,72 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
         if "params" in optimizer_spec["kwargs"]:
             raise ValueError(
                 "optimizer.optimizer.kwargs must not contain 'params'; model "
-                "parameters are supplied by OptimizerHook"
+                "parameters are supplied by the optimizer resource"
             )
 
-        scheduler_value = config.get("lr_scheduler")
+        precision = config.get("precision", "fp32")
+        if precision not in _PRECISIONS:
+            raise ValueError(
+                f"optimizer.precision must be one of {sorted(_PRECISIONS)}; "
+                f"got {precision!r}"
+            )
+        accumulate_steps = config.get("accumulate_steps", 1)
+        if (
+                isinstance(accumulate_steps, bool)
+                or not isinstance(accumulate_steps, int)
+                or accumulate_steps <= 0
+        ):
+            raise ValueError(
+                "optimizer.accumulate_steps must be a positive integer; got "
+                f"{accumulate_steps!r}"
+            )
+
+        return _OptimizerSettings(
+            optimizer_spec=optimizer_spec,
+            scheduler_config=OptimizerResource._normalize_scheduler(
+                config.get("lr_scheduler")
+            ),
+            param_groups=OptimizerResource._normalize_param_groups(
+                config.get("param_groups")
+            ),
+            precision=precision,
+            accumulate_steps=accumulate_steps,
+        )
+
+    @staticmethod
+    def _normalize_param_groups(value) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if isinstance(value, (str, bytes, Mapping)) or not isinstance(
+                value, Sequence,
+        ):
+            raise TypeError(
+                "optimizer.param_groups must be a list of {match, kwargs} "
+                "mappings"
+            )
+        groups = []
+        for index, entry in enumerate(value):
+            path = f"optimizer.param_groups[{index}]"
+            entry = _require_mapping(entry, path)
+            unknown = _unknown_keys(entry, _PARAM_GROUP_KEYS)
+            if unknown:
+                raise ValueError(f"Unknown {path} fields: {', '.join(unknown)}")
+            kwargs = _require_mapping(entry.get("kwargs", {}), f"{path}.kwargs")
+            if "params" in kwargs:
+                raise ValueError(
+                    f"{path}.kwargs must not contain 'params'; the group's "
+                    "parameters are the ones its patterns match"
+                )
+            groups.append({
+                "match": _patterns(entry.get("match"), f"{path}.match"),
+                "kwargs": deepcopy(dict(kwargs)),
+            })
+        return groups
+
+    @staticmethod
+    def _normalize_scheduler(scheduler_value) -> dict[str, Any] | None:
         if scheduler_value is None:
-            return optimizer_spec, None
+            return None
         scheduler = _require_mapping(
             scheduler_value, "optimizer.lr_scheduler"
         )
@@ -238,7 +423,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             if "optimizer" in stage["kwargs"]:
                 raise ValueError(
                     "Scheduler kwargs must not contain 'optimizer'; it is "
-                    "supplied by OptimizerHook"
+                    "supplied by the optimizer resource"
                 )
             stages.append(stage)
 
@@ -286,30 +471,93 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 )
             metric_key = metric_key.strip()
 
-        return optimizer_spec, {
+        return {
             "stages": stages,
             "milestones": milestones,
             "metric_key": metric_key,
         }
 
+    @property
+    def precision(self) -> str:
+        return self._settings.precision
+
+    @property
+    def accumulate_steps(self) -> int:
+        return self._settings.accumulate_steps
+
+    def optimizer_steps(self, max_iterations: int) -> int:
+        """How many times the optimizer steps in `max_iterations` iterations.
+
+        The schedule advances once per optimizer step, so this is what
+        `$max_iterations` and the milestones are counted in.
+        """
+        return math.ceil(max_iterations / self._settings.accumulate_steps)
+
+    # -- construction -------------------------------------------------------
+
+    def _build_optimizer(self, wrapped_model: nn.Module) -> optim.Optimizer:
+        spec = self._settings.optimizer_spec
+        optimizer_class = _resolve_class(
+            optim, spec["name"], optim.Optimizer, "optimizer",
+        )
+        try:
+            return optimizer_class(
+                self._parameter_groups(wrapped_model),
+                **deepcopy(spec["kwargs"]),
+            )
+        except TypeError as error:
+            raise ValueError(
+                f"Invalid kwargs for optimizer {spec['name']!r}: {error}"
+            ) from error
+
+    def _parameter_groups(self, wrapped_model: nn.Module):
+        configured = self._settings.param_groups
+        if not configured:
+            # One group of every parameter, in model order: the layout an
+            # optimizer state saved without param_groups has.
+            return wrapped_model.parameters()
+
+        named = list(self._module.named_parameters())
+        names = [name for name, _ in named]
+        claimed: set[str] = set()
+        groups = []
+        for index, group in enumerate(configured):
+            _check_patterns_match(
+                group["match"], names, f"optimizer.param_groups[{index}].match",
+            )
+            params = []
+            for name, parameter in named:
+                if name not in claimed and _matches(name, group["match"]):
+                    claimed.add(name)
+                    params.append(parameter)
+            groups.append({"params": params, **deepcopy(group["kwargs"])})
+        rest = [parameter for name, parameter in named if name not in claimed]
+        # Always present, even when empty, so group indices -- and a saved
+        # state's layout -- depend only on the configuration.
+        groups.append({"params": rest})
+        return groups
+
     def _prepare_scheduler(self, optimizer, max_iterations):
-        if self._scheduler_config is None:
+        scheduler_config = self._settings.scheduler_config
+        if scheduler_config is None:
             return None
-        milestones = self._scheduler_config["milestones"]
+        milestones = scheduler_config["milestones"]
         if max_iterations <= 0:
             raise ValueError(
                 "A configured lr_scheduler requires max_iterations to be "
                 "positive"
             )
-        if milestones and milestones[-1] >= max_iterations:
+        total_steps = self.optimizer_steps(max_iterations)
+        if milestones and milestones[-1] >= total_steps:
             raise ValueError(
-                "optimizer.lr_scheduler milestones must be less than "
-                "session_config.max_iterations"
+                "optimizer.lr_scheduler milestones must be less than the "
+                "number of optimizer steps (session_config.max_iterations "
+                "divided by optimizer.accumulate_steps)"
             )
 
-        boundaries = [0, *milestones, max_iterations]
+        boundaries = [0, *milestones, total_steps]
         schedulers = []
-        for index, spec in enumerate(self._scheduler_config["stages"]):
+        for index, spec in enumerate(scheduler_config["stages"]):
             scheduler_class = _resolve_class(
                 optim.lr_scheduler,
                 spec["name"],
@@ -318,7 +566,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             )
             kwargs = _resolve_placeholders(
                 spec["kwargs"],
-                max_iterations=max_iterations,
+                max_iterations=total_steps,
                 stage_iterations=boundaries[index + 1] - boundaries[index],
             )
             try:
@@ -333,41 +581,46 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             optimizer, schedulers=schedulers, milestones=milestones
         )
 
-    @override
-    def pre_session(self, session: Session):
-        ddp_model: nn.Module = self.get_dependency("ddp")
-        optimizer_class = _resolve_class(
-            optim,
-            self._optimizer_spec["name"],
-            optim.Optimizer,
-            "optimizer",
-        )
-        try:
-            self._optimizer = optimizer_class(
-                ddp_model.wrapped_model.parameters(),
-                **deepcopy(self._optimizer_spec["kwargs"]),
-            )
-        except TypeError as error:
+    def _check_precision_supported(self) -> None:
+        if (
+                self._settings.precision == "bf16"
+                and self._device_type == "cuda"
+                and not torch.cuda.is_bf16_supported()
+        ):
             raise ValueError(
-                f"Invalid kwargs for optimizer "
-                f"{self._optimizer_spec['name']!r}: {error}"
-            ) from error
-        scheduler_state = None
-        if self._restored_state is not None:
-            scheduler_state = self._restored_state.get("lr_scheduler_state")
+                "optimizer.precision is bf16, but this CUDA device does not "
+                "support bfloat16. Use fp16 or fp32."
+            )
 
+    # -- lifecycle ----------------------------------------------------------
+
+    @override
+    def setup(self, session: Session) -> None:
+        wrapped_model = self.get_dependency("ddp").wrapped_model
+        self._module = _unwrapped(wrapped_model)
+        self._max_iterations = session.session_config.max_iterations
+        self._device_type = session.device.type
+        self._check_precision_supported()
+        self._optimizer = self._build_optimizer(wrapped_model)
+        if self._settings.precision == "fp16":
+            self._grad_scaler = torch.amp.GradScaler(self._device_type)
+
+        restored = self._restored_state
+        scheduler_state = (
+            restored.get("lr_scheduler_state") if restored is not None else None
+        )
         if scheduler_state is None:
             # No prior scheduler state will be layered on afterward (first
             # run, or an extension replaced the scheduler): restore the
             # optimizer's lr first, so a freshly constructed scheduler's
             # own initial-step application (e.g. a LinearLR/ConstantLR
-            # warmup factor) uses the correct base — nothing will
+            # warmup factor) uses the correct base -- nothing will
             # overwrite it afterward.
-            self._restore_optimizer_state()
+            self._restore_optimizer_state(restored)
             self._lr_scheduler = self._prepare_scheduler(
-                self._optimizer, session.session_config.max_iterations
+                self._optimizer, self._max_iterations
             )
-            self._restore_scheduler_state()
+            self._restore_scheduler_state(restored)
         else:
             # An existing scheduler state is restored afterward via
             # load_state_dict, which only syncs the scheduler's own
@@ -377,22 +630,35 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             # the fresh scheduler's construction-time initial step
             # overwrote it with its own (stale, epoch-0) value.
             self._lr_scheduler = self._prepare_scheduler(
-                self._optimizer, session.session_config.max_iterations
+                self._optimizer, self._max_iterations
             )
-            self._restore_optimizer_state()
-            self._restore_scheduler_state()
+            self._restore_optimizer_state(restored)
+            self._restore_scheduler_state(restored)
+        self._restore_scaler_state(restored)
+        self._restored_state = None
+        # Gradients from a previous session, or a partly accumulated group,
+        # are never carried into a new one.
+        self._optimizer.zero_grad()
 
-    def _restore_optimizer_state(self):
-        if self._restored_state is None:
+    def _restore_optimizer_state(self, restored) -> None:
+        if restored is None:
             return
-        optimizer_state = self._restored_state.get("optimizer_state")
-        if optimizer_state is not None:
+        optimizer_state = restored.get("optimizer_state")
+        if optimizer_state is None:
+            return
+        try:
             self._optimizer.load_state_dict(optimizer_state)
+        except ValueError as error:
+            raise ValueError(
+                "The saved optimizer state does not match the optimizer's "
+                "parameter groups; optimizer.param_groups (or the model) "
+                f"changed since it was saved: {error}"
+            ) from error
 
-    def _restore_scheduler_state(self):
-        if self._restored_state is None:
+    def _restore_scheduler_state(self, restored) -> None:
+        if restored is None:
             return
-        scheduler_state = self._restored_state.get("lr_scheduler_state")
+        scheduler_state = restored.get("lr_scheduler_state")
         if scheduler_state is not None:
             if self._lr_scheduler is None:
                 raise ValueError(
@@ -400,7 +666,70 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                     "lr_scheduler"
                 )
             self._lr_scheduler.load_state_dict(scheduler_state)
-        self._restored_state = None
+
+    def _restore_scaler_state(self, restored) -> None:
+        if restored is None or self._grad_scaler is None:
+            return
+        scaler_state = restored.get("grad_scaler_state")
+        if scaler_state:
+            self._grad_scaler.load_state_dict(scaler_state)
+
+    @override
+    def teardown(self, session: Session) -> None:
+        self._restored_state = self.get_state()
+        self._release()
+
+    @override
+    def rollback_setup(self, session: Session) -> None:
+        self._release()
+
+    def _release(self) -> None:
+        self.close_contexts()
+        self._optimizer = None
+        self._lr_scheduler = None
+        self._grad_scaler = None
+        self._module = None
+
+    # -- state --------------------------------------------------------------
+
+    @override
+    def get_state(self) -> Any:
+        if self._optimizer is None:
+            if self._restored_state is not None:
+                return deepcopy(self._restored_state)
+            return {
+                "optimizer_state": None,
+                "lr_scheduler_state": None,
+                "grad_scaler_state": None,
+            }
+        return {
+            "optimizer_state": self._optimizer.state_dict(),
+            "lr_scheduler_state": (
+                self._lr_scheduler.state_dict()
+                if self._lr_scheduler is not None
+                else None
+            ),
+            "grad_scaler_state": (
+                self._grad_scaler.state_dict()
+                if self._grad_scaler is not None
+                else None
+            ),
+        }
+
+    @override
+    def set_state(self, state: Any) -> None:
+        self._restored_state = deepcopy(state)
+        if self._optimizer is not None:
+            # Everything already exists here (no fresh scheduler
+            # construction involved), so restore order doesn't matter the
+            # way it does in setup.
+            restored = self._restored_state
+            self._restore_optimizer_state(restored)
+            self._restore_scheduler_state(restored)
+            self._restore_scaler_state(restored)
+            self._restored_state = None
+
+    # -- extension ----------------------------------------------------------
 
     @override
     def apply_extension_config(
@@ -418,8 +747,11 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 + names
             )
 
-        optimizer_spec, scheduler_config = self._normalize_config(config)
-        if optimizer_spec["name"] != self._optimizer_spec["name"]:
+        settings = self._normalize_config(config)
+        if (
+                settings.optimizer_spec["name"]
+                != self._settings.optimizer_spec["name"]
+        ):
             raise ValueError(
                 "Optimizer class cannot change during session extension"
             )
@@ -429,6 +761,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 "is active"
             )
 
+        optimizer_spec = settings.optimizer_spec
         optimizer_class = _resolve_class(
             optim,
             optimizer_spec["name"],
@@ -463,14 +796,30 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 + ", ".join(missing)
             )
 
-        scheduler_changed = scheduler_config != self._scheduler_config
+        scheduler_changed = (
+            settings.scheduler_config != self._settings.scheduler_config
+        )
+        group_overrides = [
+            group["kwargs"] for group in self._settings.param_groups
+        ]
+
+        def own_value(index: int, key: str, default):
+            # A configured group that sets `key` itself keeps it: the
+            # session-wide kwarg is only the default for the others.
+            if index < len(group_overrides) and key in group_overrides[index]:
+                return group_overrides[index][key]
+            return default
 
         if self._restored_state is not None:
             optimizer_state = self._restored_state.get("optimizer_state")
             if optimizer_state is not None:
-                for group in optimizer_state.get("param_groups", []):
+                for index, group in enumerate(
+                        optimizer_state.get("param_groups", []),
+                ):
                     for key in changed_kwarg_keys:
-                        group[key] = deepcopy(optimizer_kwargs[key])
+                        group[key] = deepcopy(
+                            own_value(index, key, optimizer_kwargs[key])
+                        )
 
             if scheduler_changed:
                 # New schedule shape/class: old scheduler state is not
@@ -478,7 +827,7 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                 # the extension point.
                 self._restored_state["lr_scheduler_state"] = None
                 if (
-                        scheduler_config is not None
+                        settings.scheduler_config is not None
                         and optimizer_state is not None
                         and effective_lr is not None
                 ):
@@ -497,46 +846,167 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
                     # that key off base_lrs (e.g. CosineAnnealingWarmRestarts)
                     # would otherwise fall back to via LRScheduler.__init__'s
                     # setdefault.
-                    for group in optimizer_state.get("param_groups", []):
-                        group["lr"] = deepcopy(effective_lr)
+                    for index, group in enumerate(
+                            optimizer_state.get("param_groups", []),
+                    ):
+                        base_lr = own_value(index, "lr", effective_lr)
+                        group["lr"] = deepcopy(base_lr)
                         if "initial_lr" in group:
-                            group["initial_lr"] = deepcopy(effective_lr)
+                            group["initial_lr"] = deepcopy(base_lr)
             elif "lr" in changed_kwarg_keys:
                 scheduler_state = self._restored_state.get("lr_scheduler_state")
                 if scheduler_state is not None:
                     _rebase_scheduler_lrs(scheduler_state, optimizer_kwargs["lr"])
 
-        self._optimizer_spec = optimizer_spec
-        self._scheduler_config = scheduler_config
+        self._settings = settings
 
-    @override
-    def pre_iteration_callback(self, session: Session) -> None:
-        self._optimizer.zero_grad()
+    # -- the iteration, as the chain drives it ------------------------------
 
-    @override
-    def post_iteration_callback(self, session: Session) -> None:
-        loss = session.iteration_context["loss"]
-        metric = None
+    def begin_iteration(self, iteration: int) -> None:
+        """Open an iteration: decide whether it steps, and enter the forward
+        contexts (DDP `no_sync` while accumulating, autocast for bf16/fp16).
+
+        Anything a previous iteration left open -- one that raised before
+        `backward` -- is closed first.
+        """
+        self.close_contexts()
+        self._processed = set()
+        accumulate_steps = self._settings.accumulate_steps
+        self._boundary = (
+            accumulate_steps == 1
+            or iteration % accumulate_steps == 0
+            or iteration >= self._max_iterations
+        )
+        if not self._boundary:
+            no_sync = getattr(
+                self.get_dependency("ddp").wrapped_model, "no_sync", None,
+            )
+            if no_sync is not None:
+                context = no_sync()
+                context.__enter__()
+                self._no_sync = context
+        dtype = _PRECISIONS[self._settings.precision]
+        if dtype is not None:
+            context = torch.autocast(self._device_type, dtype=dtype)
+            context.__enter__()
+            self._autocast = context
+
+    @property
+    def is_boundary(self) -> bool:
+        """Whether this iteration ends an accumulation group and steps."""
+        return self._boundary
+
+    def exit_autocast(self) -> None:
+        context, self._autocast = self._autocast, None
+        if context is not None:
+            context.__exit__(None, None, None)
+
+    def exit_no_sync(self) -> None:
+        context, self._no_sync = self._no_sync, None
+        if context is not None:
+            context.__exit__(None, None, None)
+
+    def close_contexts(self) -> None:
+        self.exit_autocast()
+        self.exit_no_sync()
+
+    def backward(self, loss: torch.Tensor) -> None:
+        """Backpropagate `loss`, scaled for accumulation and fp16.
+
+        Runs outside autocast. At a boundary the fp16 gradients are unscaled
+        right away, so every later step sees true gradients.
+        """
+        self.exit_autocast()
+        try:
+            accumulate_steps = self._settings.accumulate_steps
+            scaled = loss / accumulate_steps if accumulate_steps > 1 else loss
+            if self._grad_scaler is not None:
+                scaled = self._grad_scaler.scale(scaled)
+            scaled.backward()
+        finally:
+            self.exit_no_sync()
+        if self._boundary and self._grad_scaler is not None:
+            self._grad_scaler.unscale_(self._optimizer)
+
+    def parameter_names(self) -> list[str]:
+        """Every parameter name of the model, as patterns match them."""
+        return [name for name, _ in self._module.named_parameters()]
+
+    def named_gradients(self) -> list[tuple[str, nn.Parameter]]:
+        """The model's parameters that have a gradient, by name."""
+        return [
+            (name, parameter)
+            for name, parameter in self._module.named_parameters()
+            if parameter.grad is not None
+        ]
+
+    def register_processor(self, processor: Step) -> None:
+        if all(existing is not processor for existing in self._processors):
+            self._processors.append(processor)
+
+    def mark_processed(self, processor: Step) -> None:
+        self._processed.add(id(processor))
+
+    def check_processed(self) -> None:
+        """Refuse to step before every gradient processor has run.
+
+        A processor ordered after `optimizer_step` -- a custom stage whose
+        binding was forgotten -- would edit gradients the step has already
+        applied. Caught here, before the first such step is taken.
+        """
+        late = [
+            getattr(processor, "name", type(processor).__name__)
+            for processor in self._processors
+            if id(processor) not in self._processed
+        ]
+        if late:
+            raise RuntimeError(
+                f"Gradient processors {late} had not run when optimizer_step "
+                "was about to step. Put each in the chain by binding "
+                "optimizer_step to it, e.g. component_bindings: "
+                f"{{optimizer_step: {{clip_gradients: {late[0]}}}}}, and "
+                "have it require the stage it follows."
+            )
+
+    def scheduler_metric(self, iteration_context: Mapping) -> Any:
+        """The value a metric-driven schedule steps on, if one is configured."""
+        scheduler_config = self._settings.scheduler_config
         metric_key = (
-            self._scheduler_config["metric_key"]
-            if self._scheduler_config is not None
+            scheduler_config["metric_key"]
+            if scheduler_config is not None
             else None
         )
-        if metric_key is not None:
-            try:
-                metric = session.iteration_context[metric_key]
-            except KeyError as error:
-                raise KeyError(
-                    f"Configured lr_scheduler metric {metric_key!r} is "
-                    "missing from session.iteration_context"
-                ) from error
-        loss.backward()
-        self._optimizer.step()
+        if metric_key is None:
+            return None
+        try:
+            return iteration_context[metric_key]
+        except KeyError as error:
+            raise KeyError(
+                f"Configured lr_scheduler metric {metric_key!r} is "
+                "missing from session.iteration_context"
+            ) from error
+
+    def step(self, metric: Any = None) -> None:
+        """Apply the gradients, advance the schedule, and clear them."""
+        if self._grad_scaler is not None:
+            self._grad_scaler.step(self._optimizer)
+            self._grad_scaler.update()
+        else:
+            self._optimizer.step()
         if self._lr_scheduler is not None:
-            if metric_key is None:
+            if metric is None:
                 self._lr_scheduler.step()
             else:
                 self._lr_scheduler.step(metric)
+        self._optimizer.zero_grad()
+
+    def record_grad_norm(self, norm: float) -> None:
+        self._grad_norm = float(norm)
+
+    @property
+    def grad_norm(self) -> float | None:
+        """The last gradient norm measured, before clipping; None if none."""
+        return self._grad_norm
 
     @property
     def current_lrs(self) -> list[float] | None:
@@ -545,40 +1015,272 @@ class OptimizerHook(StatefulLifeCycleHook, ExtendableComponent):
             return None
         return [group["lr"] for group in self._optimizer.param_groups]
 
-    @override
-    def post_session(self, session: Session):
-        self._restored_state = self.get_state()
-        self._optimizer = None
-        self._lr_scheduler = None
+
+@requires_resource("optimizer")
+@hook("forward_context", session_type="training")
+class ForwardContext(LifecycleHook):
+    """Open each iteration on the optimizer before the forward pass runs."""
+
+    call_every = 1
 
     @override
-    def rollback_pre_session(self, session: Session) -> None:
-        self._optimizer = None
-        self._lr_scheduler = None
+    def pre_session(self, session: Session) -> None:
+        pass
 
     @override
-    def set_state(self, state: Any) -> None:
-        self._restored_state = deepcopy(state)
-        if self._optimizer is not None:
-            # The optimizer and scheduler already exist here (no fresh
-            # scheduler construction involved), so restore order doesn't
-            # matter the way it does in pre_session.
-            self._restore_optimizer_state()
-            self._restore_scheduler_state()
+    def pre_iteration_callback(self, session: Session) -> None:
+        self.get_dependency("optimizer").begin_iteration(session.iteration)
 
     @override
-    def get_state(self) -> Any:
-        if self._optimizer is None and self._lr_scheduler is None:
-            if self._restored_state is not None:
-                return deepcopy(self._restored_state)
-            return {"optimizer_state": None, "lr_scheduler_state": None}
-        return {
-            "optimizer_state": (
-                self._optimizer.state_dict() if self._optimizer else None
-            ),
-            "lr_scheduler_state": (
-                self._lr_scheduler.state_dict()
-                if self._lr_scheduler
-                else None
-            ),
-        }
+    def post_iteration_callback(self, session: Session) -> None:
+        # `backward` has closed them already; this covers an iteration whose
+        # loss was never backpropagated.
+        self.get_dependency("optimizer").close_contexts()
+
+    @override
+    def post_session(self, session: Session) -> None:
+        self.get_dependency("optimizer").close_contexts()
+
+
+@dataclass
+class BackwardConfig:
+    loss_key: str = "loss"
+
+    def __post_init__(self):
+        if not isinstance(self.loss_key, str) or not self.loss_key:
+            raise ValueError(
+                f"loss_key must be a non-empty string; got {self.loss_key!r}"
+            )
+
+
+@requires_hook("forward_context")
+@requires_step("loss")
+@requires_resource("optimizer")
+@step("backward", session_type="training")
+class Backward(Step):
+    """Backpropagate the loss the `loss` step wrote."""
+
+    config_schema = BackwardConfig
+
+    @override
+    def run(self, session: Session) -> None:
+        key = self._cfg.loss_key
+        try:
+            loss = session.iteration_context[key]
+        except KeyError as error:
+            raise KeyError(
+                f"backward expects the loss in iteration_context[{key!r}], "
+                "written by the step bound to the 'loss' role"
+            ) from error
+        self.get_dependency("optimizer").backward(loss)
+
+
+@requires_resource("optimizer")
+class GradientProcessor(Step, ExtendableComponent):
+    """A step that edits gradients between `backward` and `optimizer_step`.
+
+    `process` runs only on iterations that step, after the gradients are
+    complete and unscaled. A subclass requires the stage it follows and is
+    put in the chain by binding `optimizer_step` to it; one that ends up
+    after the step is refused before any step is taken.
+
+    A subclass with a `config_schema` can be reconfigured by a session
+    extension: it holds no state beyond its configuration.
+    """
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        # Registered as soon as it exists, so the guard in optimizer_step
+        # knows about it before the first iteration. One added by hand gets
+        # its prerequisites later and registers on its first run.
+        if self.has_dependency("optimizer"):
+            self.get_dependency("optimizer").register_processor(self)
+
+    @override
+    def run(self, session: Session) -> None:
+        optimizer = self.get_dependency("optimizer")
+        optimizer.register_processor(self)
+        if not optimizer.is_boundary:
+            return
+        self.process(session, optimizer.named_gradients())
+        optimizer.mark_processed(self)
+
+    @abstractmethod
+    def process(
+            self,
+            session: Session,
+            named_parameters: list[tuple[str, nn.Parameter]],
+    ) -> None:
+        """Edit `parameter.grad` in place for the given parameters."""
+        raise NotImplementedError
+
+    @override
+    def apply_extension_config(
+            self,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        if type(self).config_schema is None:
+            raise ValueError(
+                f"{self._component_name()} has no configuration to extend"
+            )
+        self._parse_config_schema(config)
+
+
+@dataclass
+class FreezeGradientsConfig:
+    rules: tuple = ()
+
+    def __post_init__(self):
+        rules = []
+        for index, rule in enumerate(self.rules):
+            path = f"freeze_gradients.rules[{index}]"
+            rule = _require_mapping(rule, path)
+            unknown = _unknown_keys(rule, frozenset({"match", "until_iteration"}))
+            if unknown:
+                raise ValueError(f"Unknown {path} fields: {', '.join(unknown)}")
+            until = rule.get("until_iteration")
+            if isinstance(until, bool) or not isinstance(until, int) or until < 0:
+                raise ValueError(
+                    f"{path}.until_iteration must be a non-negative integer; "
+                    f"got {until!r}"
+                )
+            rules.append({
+                "match": _patterns(rule.get("match"), f"{path}.match"),
+                "until_iteration": until,
+            })
+        self.rules = tuple(rules)
+
+
+@requires_step("backward")
+@step("freeze_gradients", session_type="training")
+class FreezeGradients(GradientProcessor):
+    """Drop the gradients of matching parameters until an iteration.
+
+    A parameter whose gradient is None is skipped by the optimizer entirely,
+    weight decay and moment updates included. With no rules it does nothing.
+    """
+
+    config_schema = FreezeGradientsConfig
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self._patterns_checked = False
+
+    @override
+    def apply_extension_config(self, config, changed_paths) -> None:
+        super().apply_extension_config(config, changed_paths)
+        self._patterns_checked = False
+
+    @override
+    def run(self, session: Session) -> None:
+        if not self._patterns_checked and self._cfg.rules:
+            names = self.get_dependency("optimizer").parameter_names()
+            for index, rule in enumerate(self._cfg.rules):
+                _check_patterns_match(
+                    rule["match"], names,
+                    f"freeze_gradients.rules[{index}].match",
+                )
+            self._patterns_checked = True
+        super().run(session)
+
+    @override
+    def process(self, session, named_parameters) -> None:
+        active = [
+            rule["match"] for rule in self._cfg.rules
+            if session.iteration <= rule["until_iteration"]
+        ]
+        if not active:
+            return
+        for name, parameter in named_parameters:
+            if any(_matches(name, patterns) for patterns in active):
+                parameter.grad = None
+
+
+@dataclass
+class ClipGradientsConfig:
+    max_norm: float | None = None
+    norm_type: float = 2.0
+    track_norm: bool = False
+
+    def __post_init__(self):
+        if self.max_norm is not None:
+            if (
+                    isinstance(self.max_norm, bool)
+                    or not isinstance(self.max_norm, (int, float))
+                    or not math.isfinite(self.max_norm)
+                    or self.max_norm <= 0
+            ):
+                raise ValueError(
+                    "max_norm must be a finite positive number or null; got "
+                    f"{self.max_norm!r}"
+                )
+            self.max_norm = float(self.max_norm)
+        if (
+                isinstance(self.norm_type, bool)
+                or not isinstance(self.norm_type, (int, float))
+                or self.norm_type <= 0
+        ):
+            raise ValueError(
+                f"norm_type must be a positive number; got {self.norm_type!r}"
+            )
+        self.norm_type = float(self.norm_type)
+        if not isinstance(self.track_norm, bool):
+            raise ValueError(
+                f"track_norm must be a boolean; got {self.track_norm!r}"
+            )
+
+
+@requires_step("freeze_gradients")
+@step("clip_gradients", session_type="training")
+class ClipGradients(GradientProcessor):
+    """Clip the total gradient norm, or only measure it.
+
+    The norm before clipping is recorded on the optimizer as `grad_norm`.
+    With neither `max_norm` nor `track_norm` it does nothing.
+    """
+
+    config_schema = ClipGradientsConfig
+
+    @override
+    def process(self, session, named_parameters) -> None:
+        cfg = self._cfg
+        if cfg.max_norm is None and not cfg.track_norm:
+            return
+        parameters = [parameter for _, parameter in named_parameters]
+        if cfg.max_norm is not None:
+            norm = nn.utils.clip_grad_norm_(
+                parameters, cfg.max_norm, norm_type=cfg.norm_type,
+            )
+        else:
+            norm = nn.utils.get_total_norm(
+                [parameter.grad for parameter in parameters],
+                norm_type=cfg.norm_type,
+            )
+        self.get_dependency("optimizer").record_grad_norm(norm)
+
+
+@requires_step("clip_gradients")
+@requires_resource("optimizer")
+@step("optimizer_step", session_type="training")
+class OptimizerStep(Step):
+    """Step the optimizer and its schedule on iterations that end a group."""
+
+    @override
+    def run(self, session: Session) -> None:
+        optimizer = self.get_dependency("optimizer")
+        if not optimizer.is_boundary:
+            return
+        optimizer.check_processed()
+        optimizer.step(optimizer.scheduler_metric(session.iteration_context))
+
+
+__all__ = [
+    "Backward",
+    "ClipGradients",
+    "ForwardContext",
+    "FreezeGradients",
+    "GradientProcessor",
+    "OptimizerResource",
+    "OptimizerStep",
+]

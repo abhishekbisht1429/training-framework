@@ -15,18 +15,24 @@ which registers all built-ins. Their classes are also importable from
 
 | Name | Kind | Purpose and dependencies |
 |---|---|---|
-| `logger` | Hook | Prints `Iteration <current>/<maximum>`, followed by ` \| lr: <lr>` (one value per param group) when `optimizer` is active; enabled by default |
+| `logger` | Hook | Prints `Iteration <current>/<maximum>`, followed by ` \| lr: <lr>` (one value per param group) when `optimizer` is active and ` \| grad_norm: <norm>` once one has been measured; enabled by default |
 | `checkpointer` | Hook | Saves complete session checkpoints; enabled by default |
 | `ddp` | Resource | Initializes distributed execution and wraps the required `model` resource |
 | `data_manager` | Stateful resource | Creates a resumable distributed `DataLoader`; requires `dataset` and `ddp` (analysis sessions use a [separate implementation](#analysis-data_manager)) |
-| `optimizer` | Stateful lifecycle hook | Runs a configured PyTorch optimizer and optional learning-rate schedule; requires `ddp` and reads `iteration_context["loss"]` |
-| `timer` | Lifecycle hook | Reports iteration and elapsed durations; wraps `optimizer` |
+| `optimizer` | Stateful resource | Owns the PyTorch optimizer, its learning-rate schedule and the fp16 gradient scaler; requires `ddp` and activates the [optimization chain](#optimizer) |
+| `forward_context` | Lifecycle hook | Opens each iteration on `optimizer`: autocast and DDP `no_sync` around the forward pass; part of the chain |
+| `backward` | Step | Backpropagates `iteration_context["loss"]`; requires the step bound to the `loss` role |
+| `freeze_gradients` | Step | Drops the gradients of matching parameters until an iteration; does nothing unless configured |
+| `clip_gradients` | Step | Clips or measures the total gradient norm; does nothing unless configured |
+| `optimizer_step` | Step | Steps the optimizer and its schedule on iterations that end an accumulation group |
+| `timer` | Lifecycle hook | Reports iteration and elapsed durations |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
 
-`dataset` and `model` are declared roles (see [Component
+`dataset`, `model` and `loss` are declared roles (see [Component
 bindings](../guide/02-wiring-components.md#component-bindings)) with no built-in
-implementation; register a `Resource` under that name, or bind one via
-`component_bindings`, before activating `data_manager` or `ddp`.
+implementation; register a component under that name, or bind one via
+`component_bindings`, before activating `data_manager`, `ddp` or `optimizer`
+(`loss` is a Step: the one that writes the training loss).
 
 The training defaults are equivalent to:
 
@@ -58,13 +64,16 @@ data_manager:
   num_workers: 0
   pin_memory: false
 
+component_bindings:
+  loss: my_loss_step         # the step that writes iteration_context["loss"]
+
 optimizer:
   optimizer:
     name: AdamW
     kwargs:
       lr: 0.0003
       weight_decay: 0.01
-  lr_scheduler:
+  lr_scheduler:              # optional
     stages:
       - name: LinearLR
         kwargs:
@@ -74,6 +83,21 @@ optimizer:
         kwargs:
           T_max: "$stage_iterations"
     milestones: [100]
+  param_groups:              # optional; first match wins
+    - match: ["*.bias", "*norm*"]
+      kwargs: {weight_decay: 0.0}
+  precision: fp32            # fp32 | bf16 | fp16
+  accumulate_steps: 1        # iterations per optimizer step
+
+clip_gradients:              # optional
+  max_norm: 1.0
+  norm_type: 2.0
+  track_norm: false          # measure the norm without clipping
+
+freeze_gradients:            # optional
+  rules:
+    - match: ["head.last_layer.*"]
+      until_iteration: 1000
 
 timer:
   call_every: 10
@@ -108,11 +132,43 @@ opt-in behaviour and warns.
 
 ### `optimizer`
 
-`optimizer` expects a loss tensor in `session.iteration_context` and performs
-zeroing, backward propagation, optimization, and scheduler advancement.
-If its pre-session initialization fails after creating an optimizer or
-scheduler, its rollback callback clears those incomplete runtime handles
-without changing the persisted component-state schema.
+`optimizer` is a resource that owns the PyTorch optimizer, its learning-rate
+schedule and, for fp16, the gradient scaler. It builds them in `setup` from
+the parameters of the DDP-wrapped model, drops them in `teardown`, and
+checkpoints their state in between. The work of an iteration is done by
+steps, each requiring the one before it:
+
+```
+<loss step> -> backward -> freeze_gradients -> clip_gradients -> optimizer_step
+```
+
+Configuring `optimizer` activates `optimizer_step` (a
+[companion](../guide/02-wiring-components.md#companions)), which brings in the
+rest of the chain and the `forward_context` hook. Every post-iteration hook --
+`checkpointer`, `logger`, `timer` -- therefore runs after the update.
+
+- **`loss`** is a role: bind the step that writes the training loss to
+  `iteration_context["loss"]` (`component_bindings: {loss: my_loss_step}`),
+  or name that step `loss`. `backward.loss_key` reads another key.
+- **`forward_context`** (hook) opens the iteration before the forward steps
+  run: DDP's `no_sync` while gradients are being accumulated, and
+  `torch.autocast` for `bf16` / `fp16`.
+- **`backward`** leaves autocast, backpropagates the loss (divided by
+  `accumulate_steps`, and scaled for fp16), and unscales fp16 gradients on an
+  iteration that steps, so every later stage sees true gradients.
+- **`freeze_gradients`** sets the gradients of parameters matching a rule to
+  None while `iteration <= until_iteration`. The optimizer then skips them
+  entirely, weight decay and moment updates included.
+- **`clip_gradients`** clips the total norm to `max_norm`, or with
+  `track_norm` only measures it. The norm before clipping is exposed as
+  `optimizer.grad_norm`, which `logger` prints.
+- **`optimizer_step`** steps the optimizer and advances the schedule, then
+  clears the gradients.
+
+`freeze_gradients` and `clip_gradients` do nothing until configured. Patterns
+are `fnmatch` globs over the model's parameter names (the names of the model
+DDP wraps, without a `module.` prefix); a pattern that matches no parameter is
+an error.
 
 Optimizer names are resolved from `torch.optim`; scheduler names are resolved
 from `torch.optim.lr_scheduler`. Constructor options belong in each entry's
@@ -127,17 +183,62 @@ may use the exact values `$max_iterations` and `$stage_iterations`, which are
 resolved when the session starts. The latter is the distance between the
 stage's surrounding milestones (or the start/end of the session).
 
+`param_groups` splits the parameters into optimizer parameter groups. Each
+entry's `kwargs` override the optimizer's for the parameters its `match`
+patterns select; a parameter belongs to the first group that matches it, and
+the rest form a final default group.
+
+**Gradient accumulation.** With `accumulate_steps: k`, each iteration is one
+micro-batch and the optimizer steps on every k-th iteration and on the final
+one. The schedule advances once per optimizer step, so `$max_iterations`
+resolves to `ceil(max_iterations / k)` and `milestones` count optimizer steps.
+Gradients of an unfinished group are not checkpointed: choose a
+`checkpoint_every` that is a multiple of `k`, or the first step after a resume
+uses fewer micro-batches.
+
+**Precision.** `bf16` runs the forward pass under autocast; `fp16` also scales
+the loss with a `GradScaler`, whose state is checkpointed. bf16 is rejected on
+a CUDA device that does not support it.
+
+**Custom gradient stages.** Subclass `GradientProcessor` (from
+`training_framework.components.builtin`), implement
+`process(session, named_parameters)`, require the stage it follows, and bind
+`optimizer_step` to it so it runs before the step:
+
+```python
+@requires_step("clip_gradients")
+@step("scale_gradients")
+class ScaleGradients(GradientProcessor):
+    def process(self, session, named_parameters):
+        for _, parameter in named_parameters:
+            parameter.grad.mul_(0.5)
+```
+
+```yaml
+component_bindings:
+  optimizer_step: {clip_gradients: scale_gradients}
+scale_gradients: {}
+```
+
+`process` runs only on iterations that step, with the parameters that have a
+gradient. A stage that ends up after `optimizer_step` -- its binding forgotten
+-- is refused on the first iteration, before any step is taken.
+
+If `setup` fails after creating the optimizer or scheduler, its rollback
+clears those incomplete runtime handles.
+
 The former `learning_rate`, `weight_decay`, and `warmup_iters` optimizer fields
 are no longer accepted. Move optimizer arguments under `optimizer.kwargs` and
 describe the warmup/main schedule explicitly as shown above.
 
 `--extend-session` overrides may change `optimizer.optimizer.kwargs` values
 (the optimizer class itself cannot change) and may replace `lr_scheduler`
-entirely. Overriding `optimizer.optimizer.kwargs.lr` while leaving
-`lr_scheduler` unchanged scales the active stage's base learning rate(s) by
-the same ratio as the override, keeping its schedule progress; a multi-stage
-schedule's not-yet-reached stage is unaffected and runs its own originally
-configured base once it activates. Changing `lr_scheduler` itself
+entirely. A changed kwarg does not replace the value a `param_groups` entry
+sets for its own group. Overriding `optimizer.optimizer.kwargs.lr` while
+leaving `lr_scheduler` unchanged scales the active stage's base learning
+rate(s) by the same ratio as the override, keeping its schedule progress; a
+multi-stage schedule's not-yet-reached stage is unaffected and runs its own
+originally configured base once it activates. Changing `lr_scheduler` itself
 (scheduler class, stages, milestones, or `metric_key`) restarts its schedule
 from the extension point (`last_epoch` and any per-stage progress reset), since
 old scheduler state cannot be assumed compatible with a different schedule
@@ -145,6 +246,22 @@ shape; optimizer tensors and step counts are unaffected.
 Setting `optimizer.lr_scheduler=null` removes scheduling: training continues
 at the learning rate stored in the checkpoint, held fixed (combine with
 `optimizer.optimizer.kwargs.lr=<value>` to pin a different rate).
+`param_groups`, `precision` and `accumulate_steps` cannot change on extension.
+`clip_gradients.*` and `freeze_gradients.*` can, including for a stage that
+was never configured.
+
+#### Migrating from the `optimizer` hook (before 0.4.0)
+
+`optimizer` used to be a hook that ran backward, step and schedule itself.
+
+- **Configs:** the `optimizer:` block is unchanged. Add the `loss` binding --
+  `component_bindings: {loss: <your loss step>}` -- or name that step `loss`.
+  A config without it fails at start-up with an error naming the binding.
+- **Checkpoints** written by the hook cannot be resumed: restoring one fails
+  with "stored as a Hook, but is now registered as a Resource".
+- **Code** that looked the hook up (`session.get_all_hooks()`) reads the
+  resource instead; its `get_state()` keeps the same keys and adds
+  `grad_scaler_state`.
 
 For the operator's view of what `--extend-session` accepts, see
 [Extend](../guide/04-checkpoints-and-resume.md#extend); for the contract a

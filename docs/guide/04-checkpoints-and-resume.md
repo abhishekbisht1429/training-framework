@@ -121,7 +121,8 @@ python -m my_project.train \
 ```
 
 The built-in mutable settings are `session_config.max_iterations`, optimizer
-constructor values under `optimizer.optimizer.kwargs`, `logger.log_every`,
+constructor values under `optimizer.optimizer.kwargs`, `optimizer.lr_scheduler`,
+the `clip_gradients` and `freeze_gradients` settings, `logger.log_every`,
 and `checkpointer.checkpoint_every` / `checkpoint_first`. Optimizer state such
 as momentum buffers and step counters is retained; only explicitly overridden
 parameter-group values are replaced. The optimizer class cannot change, and

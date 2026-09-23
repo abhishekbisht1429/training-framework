@@ -48,6 +48,7 @@ def _session_config(tmp_path, output_dir, *, world_size: int):
         "component_bindings": {
             "model": "integration_ddp_model",
             "dataset": "integration_dataset",
+            "loss": "integration_loss",
         },
         "integration_ddp_model": {"initial_weight": 0.0},
         # Large enough that two iterations leave half the epoch unconsumed,

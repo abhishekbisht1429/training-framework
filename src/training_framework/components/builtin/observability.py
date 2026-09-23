@@ -17,7 +17,6 @@ from training_framework.components import (
     hook,
     rank_zero_only,
     resource,
-    wraps,
 )
 from training_framework.util import format_execution_time
 
@@ -56,22 +55,30 @@ class Logger(LifecycleHook, ExtendableComponent):
             f"Iteration {session.iteration}/"
             f"{session.session_config.max_iterations}"
         )
-        lrs = self._current_lrs(session)
+        lrs = self._reported(session, "current_lrs")
         if lrs is not None:
             line += " | lr: " + ", ".join(f"{lr:.3e}" for lr in lrs)
+        grad_norm = self._reported(session, "grad_norm")
+        if grad_norm is not None:
+            line += f" | grad_norm: {grad_norm:.3e}"
         self.print(line)
 
     @staticmethod
-    def _current_lrs(session: Session) -> list[float] | None:
-        # Duck-typed so any hook exposing `current_lrs` (e.g. OptimizerHook,
-        # whatever name it is bound under) is picked up.
-        get_all_hooks = getattr(session, "get_all_hooks", None)
-        if get_all_hooks is None:
-            return None
-        for session_hook in get_all_hooks():
-            lrs = getattr(session_hook, "current_lrs", None)
-            if lrs is not None:
-                return lrs
+    def _reported(session: Session, attribute: str) -> Any:
+        """The first non-None `attribute` any hook or resource exposes.
+
+        Duck-typed so the value is found whatever the component is called or
+        bound as -- `current_lrs` and `grad_norm` come from the optimizer
+        resource, and a hook may expose them too.
+        """
+        for listing in ("get_all_hooks", "get_all_resources"):
+            get_all = getattr(session, listing, None)
+            if get_all is None:
+                continue
+            for component in get_all():
+                value = getattr(component, attribute, None)
+                if value is not None:
+                    return value
         return None
 
     def post_iteration_callback(self, session: Session) -> None:
@@ -163,7 +170,6 @@ class Tensorboard(Resource):
 
 
 @rank_zero_only
-@wraps("optimizer")
 @hook("timer", session_type="training")
 class Timer(LifecycleHook):
 

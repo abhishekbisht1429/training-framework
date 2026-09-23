@@ -86,6 +86,7 @@ def _ddp_session_config(
         "component_bindings": {
             "model": "integration_ddp_model",
             "dataset": "integration_dataset",
+            "loss": "integration_loss",
         },
         "integration_ddp_model": {
             "initial_weight": 0.0,

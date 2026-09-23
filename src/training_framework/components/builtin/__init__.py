@@ -17,7 +17,15 @@ from training_framework.components.builtin.observability import (
     Tensorboard,
     Timer,
 )
-from training_framework.components.builtin.optimization import OptimizerHook
+from training_framework.components.builtin.optimization import (
+    Backward,
+    ClipGradients,
+    ForwardContext,
+    FreezeGradients,
+    GradientProcessor,
+    OptimizerResource,
+    OptimizerStep,
+)
 from training_framework.components.builtin.transformer import (
     PatchTransformer,
     PooledPatchTransformer,
@@ -26,13 +34,19 @@ from training_framework.components.builtin.transformer import (
 __all__ = [
     "AnalysisDataManager",
     "AnalysisLogger",
+    "Backward",
     "Checkpointer",
+    "ClipGradients",
     "DataManager",
     "DDPResource",
+    "ForwardContext",
+    "FreezeGradients",
+    "GradientProcessor",
     "LayerCapture",
     "LayerInspector",
     "Logger",
-    "OptimizerHook",
+    "OptimizerResource",
+    "OptimizerStep",
     "PatchTransformer",
     "PooledPatchTransformer",
     "Tensorboard",

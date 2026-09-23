@@ -218,8 +218,8 @@ configuration after the method succeeds so later checkpoints reconstruct it
 with the effective values.
 
 The built-in logger and checkpointer use the contract for safe cadence changes.
-The built-in optimizer uses it to retain optimizer tensors and step counters
-while changing explicitly overridden parameter-group values — see the
+The built-in `optimizer` resource uses it to retain optimizer tensors and step
+counters while changing explicitly overridden parameter-group values — see the
 [`optimizer` reference](../reference/builtin-components.md#optimizer) for
 exactly what it allows. Model, DDP, data-manager, and all custom components
 that do not opt in remain immutable.

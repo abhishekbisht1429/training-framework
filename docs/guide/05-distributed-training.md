@@ -121,8 +121,8 @@ already, so a default configuration keeps logging and checkpointing on rank 0
 without being told to.
 
 The two declarations are not treated alike. A class-level mark is its author's
-settled decision and is taken at face value — `timer` reaches `ddp` through
-`optimizer` and is rank-zero-only on purpose. A name in `rank_zero_components`
+settled decision and is taken at face value — a reporter may reach `ddp`
+through what it requires and still be rank-zero-only on purpose. A name in `rank_zero_components`
 is a per-run override, so naming a component whose prerequisites include `ddp`
 warns: that is the shape of a component that takes part in the collectives,
 and excluding one leaves the other ranks waiting. Every name is resolved

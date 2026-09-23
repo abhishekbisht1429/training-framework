@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-from training_framework.components.builtin import OptimizerHook, Timer
+from training_framework.components.builtin import OptimizerResource, Timer
 from training_framework.components.builtin import distributed, observability
 from training_framework.components import (
     Resource,
@@ -89,6 +89,7 @@ def _training_config(tmp_path, *, max_iterations=3):
         ),
         "component_bindings": {
             "model": "public_test_model",
+            "loss": "public_test_loss",
         },
         "public_test_model": {"initial_weight": 1.0},
         "ddp": {
@@ -162,12 +163,8 @@ def _remove_default_hooks(session):
     session.unregister_hook("checkpointer")
 
 
-def _optimizer_hook(session):
-    return next(
-        hook
-        for hook in session.get_all_hooks()
-        if hook.name == "optimizer"
-    )
+def _optimizer(session):
+    return resource_named(session, "optimizer")
 
 
 def test_pickled_timer_formats_iteration_and_elapsed_durations(
@@ -314,12 +311,12 @@ def test_pickled_ddp_resource_and_optimizer_run_through_public_session_api(
     session.unregister_resource("ddp")
     session.register_resource(ddp)
     model = resource_named(session, "model")
-    optimizer = _optimizer_hook(session)
+    optimizer = _optimizer(session)
     graph = session.execution_graph()
 
     ddp_setup = graph.index("Resource.ddp.setup()")
     assert graph.index("Resource.public_test_model.setup()") < ddp_setup
-    assert ddp_setup < graph.index("Hook.optimizer.pre_session()")
+    assert ddp_setup < graph.index("Resource.optimizer.setup()")
     assert "requires: Resource.public_test_model" in graph
     assert "requires: Resource.ddp" in graph
 
@@ -468,11 +465,12 @@ def test_pickled_optimizer_state_matches_uninterrupted_training(
         assert next(paused) == 1
 
     restored_optimizer = pickle.loads(pickle.dumps(
-        _optimizer_hook(paused)
+        _optimizer(paused)
     ))
     restored = TrainingSession.from_state(paused.get_state())
-    restored.unregister_hook("optimizer")
-    restored.register_hook(restored_optimizer)
+    # The steps of the optimization chain hold the restored session's own
+    # optimizer, so the one pickled on its own hands over its state.
+    _optimizer(restored).set_state(restored_optimizer.get_state())
 
     with restored:
         assert list(restored) == [2, 3]
@@ -482,10 +480,10 @@ def test_pickled_optimizer_state_matches_uninterrupted_training(
         resource_named(uninterrupted, "model").weight,
     )
     assert (
-        _optimizer_hook(restored).get_state()["lr_scheduler_state"][
+        _optimizer(restored).get_state()["lr_scheduler_state"][
             "last_epoch"
         ]
-        == _optimizer_hook(uninterrupted).get_state()[
+        == _optimizer(uninterrupted).get_state()[
             "lr_scheduler_state"
         ]["last_epoch"]
         == 3
@@ -495,39 +493,55 @@ def test_pickled_optimizer_state_matches_uninterrupted_training(
 def _optimizer_test_session(model, *, max_iterations, iteration_context=None):
     ddp = SimpleNamespace(wrapped_model=model)
     return SimpleNamespace(
-        # Injects the ddp stub into the hook, as a real session would.
-        serve=lambda hook: inject_dependencies(hook, ddp=ddp),
+        # Injects the ddp stub into the resource, as a real session would.
+        serve=lambda resource: inject_dependencies(resource, ddp=ddp),
         session_config=SimpleNamespace(max_iterations=max_iterations),
+        device=torch.device("cpu"),
+        iteration=0,
         iteration_context=(iteration_context or {}),
+    )
+
+
+def _start_iteration(optimizer_resource, session):
+    """What `forward_context` does before the forward pass."""
+    session.iteration += 1
+    optimizer_resource.begin_iteration(session.iteration)
+
+
+def _finish_iteration(optimizer_resource, session):
+    """What the `backward` and `optimizer_step` steps do after the loss."""
+    optimizer_resource.backward(session.iteration_context["loss"])
+    optimizer_resource.step(
+        optimizer_resource.scheduler_metric(session.iteration_context)
     )
 
 
 def test_optimizer_can_be_configured_without_a_scheduler():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {
             "name": "SGD",
             "kwargs": {"lr": 0.25},
         },
     })
     session = _optimizer_test_session(model, max_iterations=1)
-    session.serve(hook)
+    session.serve(optimizer_resource)
     initial_weight = model.weight.detach().clone()
 
-    hook.pre_session(session)
-    hook.pre_iteration_callback(session)
+    optimizer_resource.setup(session)
+    _start_iteration(optimizer_resource, session)
     session.iteration_context["loss"] = (
         model(torch.ones(1, 1)).square().sum()
     )
-    hook.post_iteration_callback(session)
+    _finish_iteration(optimizer_resource, session)
 
     assert not torch.equal(model.weight.detach(), initial_weight)
-    state = hook.get_state()
+    state = optimizer_resource.get_state()
     assert state["optimizer_state"]["param_groups"][0]["lr"] == 0.25
     assert state["lr_scheduler_state"] is None
 
-    hook.post_session(session)
-    restored = pickle.loads(pickle.dumps(hook))
+    optimizer_resource.teardown(session)
+    restored = pickle.loads(pickle.dumps(optimizer_resource))
     restored_state = restored.get_state()
     assert restored_state["optimizer_state"]["param_groups"][0]["lr"] == 0.25
     assert restored_state["lr_scheduler_state"] is None
@@ -535,7 +549,7 @@ def test_optimizer_can_be_configured_without_a_scheduler():
 
 def test_optimizer_current_lrs_tracks_scheduler_while_active():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}},
         "lr_scheduler": {
             "stages": [{
@@ -545,23 +559,23 @@ def test_optimizer_current_lrs_tracks_scheduler_while_active():
         },
     })
     session = _optimizer_test_session(model, max_iterations=2)
-    session.serve(hook)
-    assert hook.current_lrs is None
+    session.serve(optimizer_resource)
+    assert optimizer_resource.current_lrs is None
 
-    hook.pre_session(session)
-    assert hook.current_lrs == [1.0]
-    hook.pre_iteration_callback(session)
+    optimizer_resource.setup(session)
+    assert optimizer_resource.current_lrs == [1.0]
+    _start_iteration(optimizer_resource, session)
     session.iteration_context["loss"] = model(torch.ones(1, 1)).sum()
-    hook.post_iteration_callback(session)
-    assert hook.current_lrs == [0.5]
+    _finish_iteration(optimizer_resource, session)
+    assert optimizer_resource.current_lrs == [0.5]
 
-    hook.post_session(session)
-    assert hook.current_lrs is None
+    optimizer_resource.teardown(session)
+    assert optimizer_resource.current_lrs is None
 
 
 def test_scheduler_pipeline_resolves_runtime_stage_lengths():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {
             "name": "SGD",
             "kwargs": {"lr": 0.2},
@@ -584,22 +598,22 @@ def test_scheduler_pipeline_resolves_runtime_stage_lengths():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
-    session.serve(hook)
-    hook.pre_session(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
 
     for _ in range(5):
-        hook.pre_iteration_callback(session)
+        _start_iteration(optimizer_resource, session)
         session.iteration_context["loss"] = (
             model(torch.ones(1, 1)).square().sum()
         )
-        hook.post_iteration_callback(session)
+        _finish_iteration(optimizer_resource, session)
 
-    assert hook.get_state()["lr_scheduler_state"]["last_epoch"] == 5
+    assert optimizer_resource.get_state()["lr_scheduler_state"]["last_epoch"] == 5
 
 
 def test_metric_scheduler_reads_the_configured_iteration_value():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {
             "name": "SGD",
             "kwargs": {"lr": 0.2},
@@ -617,26 +631,26 @@ def test_metric_scheduler_reads_the_configured_iteration_value():
         },
     })
     session = _optimizer_test_session(model, max_iterations=2)
-    session.serve(hook)
-    hook.pre_session(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
 
     for metric in (1.0, 2.0):
-        hook.pre_iteration_callback(session)
+        _start_iteration(optimizer_resource, session)
         session.iteration_context.update({
             "loss": model(torch.ones(1, 1)).square().sum(),
             "validation_loss": metric,
         })
-        hook.post_iteration_callback(session)
+        _finish_iteration(optimizer_resource, session)
 
     assert (
-        hook.get_state()["optimizer_state"]["param_groups"][0]["lr"]
+        optimizer_resource.get_state()["optimizer_state"]["param_groups"][0]["lr"]
         == 0.1
     )
 
 
 def test_metric_scheduler_reports_a_missing_iteration_value():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
         "lr_scheduler": {
             "stages": [{"name": "ReduceLROnPlateau"}],
@@ -644,19 +658,19 @@ def test_metric_scheduler_reports_a_missing_iteration_value():
         },
     })
     session = _optimizer_test_session(model, max_iterations=1)
-    session.serve(hook)
-    hook.pre_session(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
     session.iteration_context["loss"] = (
         model(torch.ones(1, 1)).square().sum()
     )
 
     with pytest.raises(KeyError, match="validation_loss"):
-        hook.post_iteration_callback(session)
+        _finish_iteration(optimizer_resource, session)
 
 
 def test_scheduler_milestones_are_bounded_by_the_session():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
         "lr_scheduler": {
             "stages": [
@@ -667,10 +681,10 @@ def test_scheduler_milestones_are_bounded_by_the_session():
         },
     })
     session = _optimizer_test_session(model, max_iterations=2)
-    session.serve(hook)
+    session.serve(optimizer_resource)
 
     with pytest.raises(ValueError, match="less than"):
-        hook.pre_session(session)
+        optimizer_resource.setup(session)
 
 
 def test_optimizer_extension_preserves_state_and_replaces_hyperparameters():
@@ -680,19 +694,19 @@ def test_optimizer_extension_preserves_state_and_replaces_hyperparameters():
     optimizer.step()
     optimizer_state = optimizer.state_dict()
 
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {
             "name": "SGD",
             "kwargs": {"lr": 0.2, "momentum": 0.9},
         },
     })
-    hook.set_state({
+    optimizer_resource.set_state({
         "optimizer_state": optimizer_state,
         "lr_scheduler_state": None,
     })
     original_momentum = optimizer_state["state"][0]["momentum_buffer"].clone()
 
-    hook.apply_extension_config(
+    optimizer_resource.apply_extension_config(
         {
             "optimizer": {
                 "name": "SGD",
@@ -704,7 +718,7 @@ def test_optimizer_extension_preserves_state_and_replaces_hyperparameters():
             ("optimizer", "kwargs", "momentum"),
         }),
     )
-    extended_state = pickle.loads(pickle.dumps(hook)).get_state()
+    extended_state = pickle.loads(pickle.dumps(optimizer_resource)).get_state()
 
     assert extended_state["optimizer_state"]["param_groups"][0]["lr"] == 0.05
     assert extended_state["optimizer_state"]["param_groups"][0]["momentum"] == 0.8
@@ -716,7 +730,7 @@ def test_optimizer_extension_preserves_state_and_replaces_hyperparameters():
 
 def test_optimizer_extension_rebase_scales_base_lr_by_current_multiplier():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
         "lr_scheduler": {
             "stages": [{
@@ -726,19 +740,19 @@ def test_optimizer_extension_rebase_scales_base_lr_by_current_multiplier():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
-    session.serve(hook)
-    hook.pre_session(session)
-    hook.pre_iteration_callback(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
+    _start_iteration(optimizer_resource, session)
     session.iteration_context["loss"] = model(torch.ones(1, 1)).square().sum()
-    hook.post_iteration_callback(session)
+    _finish_iteration(optimizer_resource, session)
     # Still inside the constant phase: current lr is base(0.2) * factor(0.5).
     assert (
-        hook.get_state()["optimizer_state"]["param_groups"][0]["lr"]
+        optimizer_resource.get_state()["optimizer_state"]["param_groups"][0]["lr"]
         == pytest.approx(0.1)
     )
-    hook.post_session(session)
+    optimizer_resource.teardown(session)
 
-    hook.apply_extension_config(
+    optimizer_resource.apply_extension_config(
         {
             "optimizer": {"name": "SGD", "kwargs": {"lr": 0.05}},
             "lr_scheduler": {
@@ -754,7 +768,7 @@ def test_optimizer_extension_rebase_scales_base_lr_by_current_multiplier():
     # The override (0.05) is the desired *current* effective lr, so the
     # rebased base must be 0.1 (0.05 / factor 0.5), not a flat 0.05 that
     # would ignore the factor the schedule is currently applying.
-    assert hook.get_state()["lr_scheduler_state"]["base_lrs"] == pytest.approx(
+    assert optimizer_resource.get_state()["lr_scheduler_state"]["base_lrs"] == pytest.approx(
         [0.1]
     )
 
@@ -778,44 +792,44 @@ def test_optimizer_extension_lr_rebase_does_not_leak_into_a_later_scheduler_stag
             "milestones": [4],
         },
     }
-    hook = OptimizerHook(config)
+    optimizer_resource = OptimizerResource(config)
     session = _optimizer_test_session(model, max_iterations=8)
-    session.serve(hook)
-    hook.pre_session(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
     for _ in range(2):
-        hook.pre_iteration_callback(session)
+        _start_iteration(optimizer_resource, session)
         session.iteration_context["loss"] = (
             model(torch.ones(1, 1)).square().sum()
         )
-        hook.post_iteration_callback(session)
-    hook.post_session(session)
+        _finish_iteration(optimizer_resource, session)
+    optimizer_resource.teardown(session)
 
     # Override lr mid-warmup (still stage 0); lr_scheduler is unchanged.
-    hook.apply_extension_config(
+    optimizer_resource.apply_extension_config(
         {**config, "optimizer": {"name": "SGD", "kwargs": {"lr": 0.05}}},
         frozenset({("optimizer", "kwargs", "lr")}),
     )
 
     new_session = _optimizer_test_session(model, max_iterations=8)
-    hook.pre_session(new_session)
+    optimizer_resource.setup(new_session)
     for _ in range(2):  # reaches the milestone (stage 1 activates).
-        hook.pre_iteration_callback(new_session)
+        _start_iteration(optimizer_resource, new_session)
         new_session.iteration_context["loss"] = (
             model(torch.ones(1, 1)).square().sum()
         )
-        hook.post_iteration_callback(new_session)
+        _finish_iteration(optimizer_resource, new_session)
 
     # At the transition, CosineAnnealingLR uses its own base (0.2), not
     # something derived from the warmup-stage override.
     assert (
-        hook.get_state()["optimizer_state"]["param_groups"][0]["lr"]
+        optimizer_resource.get_state()["optimizer_state"]["param_groups"][0]["lr"]
         == pytest.approx(0.2)
     )
 
 
 def test_optimizer_extension_allows_scheduler_replacement_and_resets_progress():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2, "momentum": 0.9}},
         "lr_scheduler": {
             "stages": [{
@@ -825,21 +839,21 @@ def test_optimizer_extension_allows_scheduler_replacement_and_resets_progress():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
-    session.serve(hook)
-    hook.pre_session(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
     for _ in range(3):
-        hook.pre_iteration_callback(session)
+        _start_iteration(optimizer_resource, session)
         session.iteration_context["loss"] = (
             model(torch.ones(1, 1)).square().sum()
         )
-        hook.post_iteration_callback(session)
-    momentum_buffer = hook.get_state()["optimizer_state"]["state"][0][
+        _finish_iteration(optimizer_resource, session)
+    momentum_buffer = optimizer_resource.get_state()["optimizer_state"]["state"][0][
         "momentum_buffer"
     ].clone()
-    assert hook.get_state()["lr_scheduler_state"]["last_epoch"] == 3
-    hook.post_session(session)
+    assert optimizer_resource.get_state()["lr_scheduler_state"]["last_epoch"] == 3
+    optimizer_resource.teardown(session)
 
-    hook.apply_extension_config(
+    optimizer_resource.apply_extension_config(
         {
             "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2, "momentum": 0.9}},
             "lr_scheduler": {
@@ -855,7 +869,7 @@ def test_optimizer_extension_allows_scheduler_replacement_and_resets_progress():
         frozenset({("lr_scheduler", "stages")}),
     )
 
-    reset_state = hook.get_state()
+    reset_state = optimizer_resource.get_state()
     assert reset_state["lr_scheduler_state"] is None
     torch.testing.assert_close(
         reset_state["optimizer_state"]["state"][0]["momentum_buffer"],
@@ -863,8 +877,8 @@ def test_optimizer_extension_allows_scheduler_replacement_and_resets_progress():
     )
 
     new_session = _optimizer_test_session(model, max_iterations=5)
-    hook.pre_session(new_session)
-    state = hook.get_state()
+    optimizer_resource.setup(new_session)
+    state = optimizer_resource.get_state()
     assert state["lr_scheduler_state"]["last_epoch"] == 0
     # Clean restart: LinearLR's start_factor must scale the configured base
     # lr (0.2), not wherever the discarded CosineAnnealingLR schedule had
@@ -884,7 +898,7 @@ def test_optimizer_extension_lr_override_survives_scheduler_replacement():
     # constructed scheduler would otherwise setdefault onto it and silently
     # revert the override on its first step.
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
         "lr_scheduler": {
             "stages": [{
@@ -894,11 +908,11 @@ def test_optimizer_extension_lr_override_survives_scheduler_replacement():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
-    session.serve(hook)
-    hook.pre_session(session)
-    hook.post_session(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
+    optimizer_resource.teardown(session)
 
-    hook.apply_extension_config(
+    optimizer_resource.apply_extension_config(
         {
             "optimizer": {"name": "SGD", "kwargs": {"lr": 0.05}},
             "lr_scheduler": {
@@ -915,9 +929,9 @@ def test_optimizer_extension_lr_override_survives_scheduler_replacement():
     )
 
     new_session = _optimizer_test_session(model, max_iterations=5)
-    hook.pre_session(new_session)
+    optimizer_resource.setup(new_session)
 
-    state = hook.get_state()
+    state = optimizer_resource.get_state()
     assert (
         state["optimizer_state"]["param_groups"][0]["lr"]
         == pytest.approx(0.05)
@@ -935,7 +949,7 @@ def test_optimizer_extension_clean_restart_uses_optimizer_default_lr():
     # the base from that resolved default, not merely skip the reset
     # because no explicit `lr` kwarg exists in the config.
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "AdamW", "kwargs": {}},
         "lr_scheduler": {
             "stages": [{
@@ -945,17 +959,17 @@ def test_optimizer_extension_clean_restart_uses_optimizer_default_lr():
         },
     })
     session = _optimizer_test_session(model, max_iterations=5)
-    session.serve(hook)
-    hook.pre_session(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
     for _ in range(3):
-        hook.pre_iteration_callback(session)
+        _start_iteration(optimizer_resource, session)
         session.iteration_context["loss"] = (
             model(torch.ones(1, 1)).square().sum()
         )
-        hook.post_iteration_callback(session)
-    hook.post_session(session)
+        _finish_iteration(optimizer_resource, session)
+    optimizer_resource.teardown(session)
 
-    hook.apply_extension_config(
+    optimizer_resource.apply_extension_config(
         {
             "optimizer": {"name": "AdamW", "kwargs": {}},
             "lr_scheduler": {
@@ -972,8 +986,8 @@ def test_optimizer_extension_clean_restart_uses_optimizer_default_lr():
     )
 
     new_session = _optimizer_test_session(model, max_iterations=5)
-    hook.pre_session(new_session)
-    state = hook.get_state()
+    optimizer_resource.setup(new_session)
+    state = optimizer_resource.get_state()
     assert state["optimizer_state"]["param_groups"][0]["lr"] == pytest.approx(
         0.0001
     )
@@ -982,18 +996,18 @@ def test_optimizer_extension_clean_restart_uses_optimizer_default_lr():
 
 def test_optimizer_extension_can_add_or_remove_a_scheduler():
     model = nn.Linear(1, 1, bias=False)
-    hook = OptimizerHook({
+    optimizer_resource = OptimizerResource({
         "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
     })
     session = _optimizer_test_session(model, max_iterations=5)
-    session.serve(hook)
-    hook.pre_session(session)
-    hook.pre_iteration_callback(session)
+    session.serve(optimizer_resource)
+    optimizer_resource.setup(session)
+    _start_iteration(optimizer_resource, session)
     session.iteration_context["loss"] = model(torch.ones(1, 1)).square().sum()
-    hook.post_iteration_callback(session)
-    hook.post_session(session)
+    _finish_iteration(optimizer_resource, session)
+    optimizer_resource.teardown(session)
 
-    hook.apply_extension_config(
+    optimizer_resource.apply_extension_config(
         {
             "optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}},
             "lr_scheduler": {
@@ -1007,17 +1021,17 @@ def test_optimizer_extension_can_add_or_remove_a_scheduler():
     )
 
     new_session = _optimizer_test_session(model, max_iterations=5)
-    hook.pre_session(new_session)
-    assert hook.get_state()["lr_scheduler_state"] is not None
+    optimizer_resource.setup(new_session)
+    assert optimizer_resource.get_state()["lr_scheduler_state"] is not None
 
-    hook.post_session(new_session)
-    hook.apply_extension_config(
+    optimizer_resource.teardown(new_session)
+    optimizer_resource.apply_extension_config(
         {"optimizer": {"name": "SGD", "kwargs": {"lr": 0.2}}},
         frozenset({("lr_scheduler",)}),
     )
     another_session = _optimizer_test_session(model, max_iterations=5)
-    hook.pre_session(another_session)
-    assert hook.get_state()["lr_scheduler_state"] is None
+    optimizer_resource.setup(another_session)
+    assert optimizer_resource.get_state()["lr_scheduler_state"] is None
 
 
 @pytest.mark.parametrize(
@@ -1062,4 +1076,4 @@ def test_optimizer_extension_can_add_or_remove_a_scheduler():
 )
 def test_optimizer_configuration_errors_are_actionable(config, message):
     with pytest.raises((TypeError, ValueError), match=message):
-        OptimizerHook(config)
+        OptimizerResource(config)
