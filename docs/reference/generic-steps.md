@@ -146,11 +146,26 @@ found nowhere is an error listing the modules searched.
 `init: {}` and no `init` therefore differ for a class that is not a module.
 Constructor arguments that do not fit are reported when the session is built.
 
-`compute` holds no state across iterations and nothing of it is checkpointed
-beyond its configuration; a module built from `init` is rebuilt from it. State
-that must survive a checkpoint -- a running centre, a queue of negatives --
-belongs in a [`StatefulStep`](../guide/01-resources-hooks-steps.md#stateful-components)
-that declares what it reads and writes.
+`compute` is meant for **stateless** callables: a function, or a class whose
+output depends only on its inputs (`nn.CrossEntropyLoss`, `nn.MSELoss`). A
+class instance is built once and called on every run, so anything it changes
+on itself -- a counter, a running statistic, a module buffer such as a
+`BatchNorm` running mean -- carries over from one iteration to the next. None
+of it is checkpointed: only `compute`'s configuration is, so a restore rebuilds
+the instance from `init`, that state starts over, and a resumed run quietly
+differs from an uninterrupted one. Parameters of a module built here are not
+trained either: the optimizer takes its parameters from the `model` resource,
+and DDP does not synchronise them.
+
+Put such state where the framework manages it:
+
+- **learnable weights** (a projection head, a learned temperature) in the
+  model, or in a [`ModuleResource`](../concepts/module-resource.md) attached to
+  it, so the optimizer updates them, DDP synchronises them and the checkpoint
+  saves them;
+- **state that is not learned** (a running centre, a queue of negatives) in a
+  [`StatefulStep`](../guide/01-resources-hooks-steps.md#stateful-components)
+  that declares what it reads and writes.
 
 ### `training_framework.functions`
 

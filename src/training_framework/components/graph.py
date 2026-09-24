@@ -14,6 +14,7 @@ from training_framework.components.edges import (
     EdgeKind,
     context_keys_of,
     declared_edges,
+    given_instance,
     is_valid_cadence,
     iteration_cadence,
     resolve_component_name,
@@ -53,11 +54,18 @@ def _missing_role_message(
 def _resolve_to_node(binding_resolver, nodes_by_name, consumer, name):
     """Return the node satisfying `name` for `consumer`, and the name tried.
 
-    Resolution is `resolve_component_name`, the one the session uses: the
-    consumer's own wiring first, then the sole node the name can mean, and an
-    error naming the candidates when several could. The node is None when
-    nothing active answers to the name, for the caller to report.
+    A live consumer that was already handed an instance for `name` is
+    answered with that instance: what it holds is what it uses, whatever the
+    bindings would say now -- a hand-registered sibling, or a checkpoint
+    restored with the wiring it recorded, must not make it ambiguous.
+    Otherwise resolution is `resolve_component_name`, the one the session
+    uses: the consumer's own wiring first, then the sole node the name can
+    mean, and an error naming the candidates when several could. The node is
+    None when nothing active answers to the name, for the caller to report.
     """
+    given = given_instance(consumer, name)
+    if given is not None:
+        return given, nodes_by_name.get(given)
     resolved_name = resolve_component_name(
         binding_resolver,
         name,

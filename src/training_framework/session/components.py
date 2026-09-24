@@ -20,6 +20,7 @@ from training_framework.components.edges import (
     Edge,
     context_keys_of,
     declared_edges,
+    wiring_of,
     resolve_component_name,
     resolve_edges,
     writers_of,
@@ -181,9 +182,11 @@ class SessionComponents:
         `on_mismatch` decides what happens to a component whose saved state
         this version cannot take -- written by a newer `state_version`, or an
         older one with no `migrate_state`: "raise" (the default) refuses the
-        whole restore; "reinit" keeps every such component as freshly built,
-        with a warning naming them; a collection of instance names does that
-        for those only. Whatever cannot be built at all always raises.
+        whole restore; "reinit" keeps every such component as freshly built
+        (from its constructor arguments, migrated if they changed), with a
+        warning naming them; a collection of instance names does that for
+        those only. Whatever cannot be built at all -- including constructor
+        arguments `migrate_init_args` cannot bring forward -- always raises.
 
         `partial` says the state holds a chosen subset of a session's
         components (each with what it depends on), not a whole session.
@@ -368,6 +371,27 @@ class SessionComponents:
             recorded_version = component_info.get("state_version")
             current_version = component_class.state_version
             if recorded_version is not None and recorded_version != current_version:
+                def described(error: Exception) -> str:
+                    message = str(error)
+                    if f"'{name}'" not in message:
+                        message = f"Checkpoint component '{name}': {message}"
+                    return message
+
+                # The constructor first: without arguments it takes, the
+                # component cannot be built at all, so a failure here is never
+                # something `on_mismatch` can start fresh from.
+                if recorded_version < current_version:
+                    try:
+                        init_args = component_class.migrate_init_args(
+                            recorded_version, init_args,
+                        )
+                    except Exception as error:
+                        problems.append(described(error))
+                        continue
+
+                # Then the state, which a fresh component can do without. A
+                # newer version has nothing to migrate back; its recorded
+                # constructor arguments are the best there is.
                 try:
                     if recorded_version > current_version:
                         raise ValueError(
@@ -375,24 +399,15 @@ class SessionComponents:
                             f"state_version {recorded_version}, newer than "
                             f"this version of it ({current_version})"
                         )
-                    init_args = component_class.migrate_init_args(
-                        recorded_version, init_args,
-                    )
                     if state is not None:
                         state = component_class.migrate_state(
                             recorded_version, state,
                         )
                 except Exception as error:
-                    message = str(error)
-                    if f"'{name}'" not in message:
-                        message = f"Checkpoint component '{name}': {message}"
                     if reinit_all or name in reinit_names:
-                        reinitialized = message
-                        # Rebuilt from what the checkpoint recorded, as far as
-                        # the constructor still takes it.
-                        init_args = component_info["init_args"]
+                        reinitialized = described(error)
                     else:
-                        problems.append(message)
+                        problems.append(described(error))
                         continue
 
             plans[name] = _RestorePlan(
@@ -798,12 +813,15 @@ class SessionComponents:
             active: Iterable[str],
             *,
             context_keys=None,
+            wiring=None,
     ) -> list[Edge]:
         """The shared edges of `component`, resolved for `consumer` here.
 
         `context_keys` (name -> (reads, writes)) adds the edges from the keys
         the component reads to their writers; without it only named edges
         are listed, which is all activation can know before anything exists.
+        `wiring` (name -> asked -> instance) is what each component was
+        given; an injected edge follows it rather than the bindings.
         """
         reads = ()
         writers = None
@@ -817,6 +835,7 @@ class SessionComponents:
             active=active,
             context_reads=reads,
             writers=writers,
+            given=(wiring or {}).get(consumer),
         )
 
     def _activate_all(
@@ -1030,6 +1049,7 @@ class SessionComponents:
             *,
             active_names: Iterable[str] | None = None,
             context_keys=None,
+            wiring=None,
     ) -> set[str]:
         """Return `names` plus everything they need active, transitively.
 
@@ -1042,6 +1062,9 @@ class SessionComponents:
         first. `context_keys` (name -> (reads, writes)) supplies the keys
         when the components are not live -- a worker deciding from a
         checkpoint's record; with live components they are read from them.
+        `wiring` likewise gives what each component was handed, so an
+        injected edge leads to the instance it holds; with live components
+        it is read from them.
         """
         active = (
             set(self.components)
@@ -1050,6 +1073,11 @@ class SessionComponents:
         )
         if context_keys is None:
             context_keys = context_keys_of(
+                component for name, component in self.components.items()
+                if name in active
+            )
+        if wiring is None:
+            wiring = wiring_of(
                 component for name, component in self.components.items()
                 if name in active
             )
@@ -1077,6 +1105,7 @@ class SessionComponents:
             for edge in self._resolved_edges(
                     component_class, resolved_name, active,
                     context_keys=context_keys,
+                    wiring=wiring,
             ):
                 if not edge.kept_with_source or edge.target is None:
                     # A read nobody writes is the sort's error to report.
@@ -1098,6 +1127,7 @@ class SessionComponents:
             target_name: str,
             active: set[str],
             context_keys=None,
+            wiring=None,
     ) -> set[str]:
         """Return the active components that reach `target_name` transitively."""
         dependents = set()
@@ -1105,6 +1135,7 @@ class SessionComponents:
             try:
                 closure = self.dependency_closure(
                     [name], active_names=active, context_keys=context_keys,
+                    wiring=wiring,
                 )
             except (RuntimeError, KeyError):
                 # A component whose graph cannot be resolved is not this
@@ -1156,6 +1187,7 @@ class SessionComponents:
             active_names: Iterable[str] | None = None,
             declared: Iterable[str] | None = None,
             context_keys=None,
+            wiring=None,
     ) -> set[str]:
         """Return the active components a secondary rank does not build.
 
@@ -1193,6 +1225,7 @@ class SessionComponents:
             name for name in declared_names - {ddp_name}
             if ddp_name in self.dependency_closure(
                 [name], active_names=active, context_keys=context_keys,
+                wiring=wiring,
             )
         )
         if using_ddp:
@@ -1213,6 +1246,7 @@ class SessionComponents:
             parallel_components: Iterable[str] | None = None,
             rank_zero_components: Iterable[str] | None = None,
             context_keys=None,
+            wiring=None,
     ) -> set[str]:
         """Return the component names a secondary rank builds.
 
@@ -1234,7 +1268,9 @@ class SessionComponents:
         What a component needs is every edge of the shared model, the writers
         of the keys it reads included. `context_keys` gives those keys when
         the components are not live -- a worker deciding from a checkpoint's
-        record. With live components the reduced set is also sorted before it
+        record, and `wiring` what each component was given (see
+        `dependency_closure`). With live components the reduced set is also
+        sorted before it
         is returned, so a rank that could not run is rejected here, in the
         parent, rather than in a worker the others are waiting for.
         """
@@ -1248,8 +1284,14 @@ class SessionComponents:
                 component for name, component in self.components.items()
                 if name in active
             )
+        if wiring is None:
+            wiring = wiring_of(
+                component for name, component in self.components.items()
+                if name in active
+            )
         keep = self._rank_names(
             active, parallel_components, rank_zero_components, context_keys,
+            wiring,
         )
         self._check_rank_graph(keep)
         return keep
@@ -1260,6 +1302,7 @@ class SessionComponents:
             parallel_components,
             rank_zero_components,
             context_keys,
+            wiring,
     ) -> set[str]:
         ddp_name = self.resolve_name("ddp")
 
@@ -1268,9 +1311,12 @@ class SessionComponents:
                 list(parallel_components) + ["ddp"],
                 active_names=active,
                 context_keys=context_keys,
+                wiring=wiring,
             )
             pruned = sorted(
-                self._names_depending_on(ddp_name, active, context_keys) - keep
+                self._names_depending_on(
+                    ddp_name, active, context_keys, wiring,
+                ) - keep
             )
             if pruned:
                 # The classic mistake the opt-in list invites: a component
@@ -1291,11 +1337,13 @@ class SessionComponents:
             active_names=active,
             declared=rank_zero_components,
             context_keys=context_keys,
+            wiring=wiring,
         )
         keep = self.dependency_closure(
             active - rank_zero,
             active_names=active,
             context_keys=context_keys,
+            wiring=wiring,
         )
         keep.add(ddp_name)
 

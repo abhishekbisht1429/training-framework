@@ -466,6 +466,11 @@ class Compute(_CallStep):
     path. An `nn.Module` class, or any class given `init` (even `{}`), is
     constructed once and the instance is called (a module is moved to the
     session's device); any other class is called directly, like a function.
+
+    Meant for stateless callables. The instance persists across iterations
+    but is not checkpointed, and a module's parameters are not trained: keep
+    learnable weights in the model or a `ModuleResource`, and other state in
+    a `StatefulStep`.
     """
 
     config_schema = ComputeConfig

@@ -8,7 +8,10 @@ import torch
 from torch import distributed, multiprocessing
 
 from training_framework.components.config import component_bindings_from_config
-from training_framework.components.edges import recorded_context_keys
+from training_framework.components.edges import (
+    recorded_context_keys,
+    recorded_wiring,
+)
 from training_framework.engine.topology import (
     LaunchTopology,
     pin_process_device,
@@ -87,6 +90,7 @@ def prepare_worker_state(
             parallel_components=ddp_config.get("parallel_components"),
             rank_zero_components=ddp_config.get("rank_zero_components"),
             context_keys=recorded_context_keys(components_state),
+            wiring=recorded_wiring(components_state),
         )
         for name in list(components_state):
             if name not in keep:

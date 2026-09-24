@@ -249,7 +249,7 @@ def read_manifest(path) -> dict[str, Any]:
             f"{directory} is an unfinished checkpoint: its save was "
             "interrupted"
         )
-    manifest_path = os.path.join(directory, MANIFEST_FILE)
+    manifest_path = _contained_file(directory, MANIFEST_FILE, "manifest")
     if not os.path.isfile(manifest_path):
         raise CheckpointFormatError(
             f"{directory} is not a checkpoint: it has no {MANIFEST_FILE}"
@@ -279,7 +279,9 @@ def read_checkpoint(
     """
     directory = os.fspath(path)
     read_manifest(directory)
-    session_part = _load(os.path.join(directory, SESSION_FILE), map_location)
+    session_part = _load(
+        _contained_file(directory, SESSION_FILE, "session"), map_location,
+    )
     records = session_part.pop("components")
     wanted = None if components is None else set(components)
     if wanted is not None:
@@ -306,7 +308,9 @@ def read_session_record(path, *, map_location="cpu") -> dict[str, Any]:
     it is, how it was built and wired -- without any component's state."""
     directory = os.fspath(path)
     read_manifest(directory)
-    return _load(os.path.join(directory, SESSION_FILE), map_location)
+    return _load(
+        _contained_file(directory, SESSION_FILE, "session"), map_location,
+    )
 
 
 def read_component_state(path, name: str, *, map_location="cpu") -> Any:
@@ -329,9 +333,18 @@ def _component_info(
         map_location,
 ) -> dict[str, Any]:
     info = dict(record)
-    file = info.pop("file")
+    # Where a component's state lives follows from its name alone. The
+    # recorded path is only cross-checked, never followed: a checkpoint is
+    # not trusted to say which file to open.
+    file = component_file(name)
+    recorded_file = info.pop("file", None)
+    if recorded_file != file:
+        raise CheckpointFormatError(
+            f"Checkpoint {directory} records the state of component "
+            f"'{name}' at {recorded_file!r}; it can only be at {file!r}"
+        )
     expected = info.pop("sha256", None)
-    file_path = os.path.join(directory, file)
+    file_path = _contained_file(directory, file, f"component '{name}'")
     if expected is not None and os.path.isfile(file_path):
         if _sha256(file_path) != expected:
             raise CheckpointFormatError(
@@ -340,6 +353,32 @@ def _component_info(
             )
     info["state"] = _load(file_path, map_location, owner=f"component '{name}'")
     return info
+
+
+def _contained_file(directory: str, relative: str, owner: str) -> str:
+    """Return `relative` inside the checkpoint `directory`, refusing any
+    path that leaves it -- through a symlink or otherwise.
+
+    The checkpoint directory itself may be reached through a symlink; what
+    it contains may not point elsewhere.
+    """
+    path = os.path.join(directory, relative)
+    current = directory
+    for part in relative.split("/"):
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            raise CheckpointFormatError(
+                f"Checkpoint {directory}: the {owner} file {relative} goes "
+                f"through a symlink ({current}); a checkpoint's files must be "
+                "inside it"
+            )
+    root = os.path.realpath(directory)
+    if os.path.realpath(path) != os.path.join(root, *relative.split("/")):
+        raise CheckpointFormatError(
+            f"Checkpoint {directory}: the {owner} file {relative} is not "
+            "inside the checkpoint"
+        )
+    return path
 
 
 def _load(path: str, map_location, owner: str = "session") -> Any:

@@ -213,24 +213,76 @@ def resolve_edges(
         active: Iterable[str],
         context_reads: Iterable[str] = (),
         writers: Mapping[str, str] | None = None,
+        given: Mapping[str, str] | None = None,
 ) -> list[Edge]:
     """`declared_edges`, each resolved for `consumer` in this session.
 
-    Names resolve through the bindings; a read resolves to its key's writer
-    in `writers` (None when there is none, for the caller to report).
+    An injected edge the consumer was already handed an instance for
+    (`given`: asked name -> instance) resolves to that instance. Other names
+    resolve through the bindings; a read resolves to its key's writer in
+    `writers` (None when there is none, for the caller to report).
     """
     active = set(active)
     writers = writers or {}
-    return [
-        edge.resolved(
-            writers.get(edge.asked)
-            if edge.kind is EdgeKind.READS
-            else resolve_component_name(
-                bindings, edge.asked, consumer=consumer, active=active,
-            )
+    given = given or {}
+
+    def target(edge: Edge) -> str | None:
+        if edge.kind is EdgeKind.READS:
+            return writers.get(edge.asked)
+        if edge.injects and edge.asked in given:
+            return given[edge.asked]
+        return resolve_component_name(
+            bindings, edge.asked, consumer=consumer, active=active,
         )
+
+    return [
+        edge.resolved(target(edge))
         for edge in declared_edges(component, context_reads)
     ]
+
+
+# -- the wiring components were given --------------------------------------------
+
+
+Wiring = Mapping[str, Mapping[str, str]]
+"""Component name -> (asked name -> the instance it was given)."""
+
+
+def given_instance(consumer: Any, name: str) -> str | None:
+    """The instance a live `consumer` was handed for `name`, if any.
+
+    A class, or an instance given nothing under that name, answers None.
+    """
+    if isinstance(consumer, type):
+        return None
+    injected = getattr(consumer, "__dict__", {}).get(Component.DEPENDENCIES_ATTR)
+    if not injected or name not in injected:
+        return None
+    dependency = injected[name]
+    return getattr(dependency, "name", type(dependency).__name__)
+
+
+def wiring_of(components: Iterable[Component]) -> dict:
+    """What each live component was given, by asked name."""
+    return {
+        component.name: {
+            asked: getattr(dependency, "name", type(dependency).__name__)
+            for asked, dependency in component._dependencies.items()
+        }
+        for component in components
+        if component._dependencies
+    }
+
+
+def recorded_wiring(components_state: Mapping[str, Mapping]) -> dict:
+    """The wiring a checkpoint recorded for each component, for deciding
+    what a rank keeps before anything is rebuilt. A state written before
+    wiring was recorded holds none, and is resolved from its bindings."""
+    return {
+        name: dict(info["dependencies"])
+        for name, info in components_state.items()
+        if info.get("dependencies")
+    }
 
 
 # -- iteration_context keys ------------------------------------------------------
@@ -337,14 +389,18 @@ __all__ = [
     "ContextKeys",
     "Edge",
     "EdgeKind",
+    "Wiring",
     "context_keys_of",
     "declared_edges",
+    "given_instance",
     "instances_of",
     "is_valid_cadence",
     "iteration_cadence",
     "recorded_context_keys",
+    "recorded_wiring",
     "resolve_component_name",
     "resolve_edges",
     "takes_part_in_iterations",
+    "wiring_of",
     "writers_of",
 ]

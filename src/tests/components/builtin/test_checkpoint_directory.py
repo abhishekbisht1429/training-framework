@@ -6,6 +6,8 @@ without the rest, and a class change breaks only what it touches.
 """
 
 import json
+import os
+import shutil
 
 import pytest
 import torch
@@ -21,6 +23,7 @@ from training_framework.components.builtin import Checkpointer
 from training_framework.session import TrainingSession
 
 REBUILD_FAILS = {"fragile": False}
+CONSTRUCTOR_NEEDS_SCALE = {"scaled": False}
 
 
 class Weights(Resource, Stateful):
@@ -59,6 +62,16 @@ class Fragile(Weights):
         super().__init__(config)
 
 
+class Scaled(Weights):
+    """Stands for a component whose constructor gained a required argument."""
+
+    def __init__(self, config=None, *, scale=None):
+        if CONSTRUCTOR_NEEDS_SCALE["scaled"] and scale is None:
+            raise TypeError("Scaled() needs a scale")
+        super().__init__(config)
+        self.scale = scale
+
+
 class Opaque(Weights):
     def get_state(self):
         return {"value": self.value.clone(), "callback": object()}
@@ -70,6 +83,7 @@ def build(tmp_path, bindings=None, **components):
             ("head", Head),
             ("fragile", Fragile),
             ("opaque", Opaque),
+            ("scaled", Scaled),
     ):
         resource(name)(component_class)
     config = make_config(tmp_path / "source")
@@ -367,3 +381,107 @@ def test_every_component_that_cannot_be_built_is_reported(tmp_path, monkeypatch)
     message = str(raised.value)
     assert "'backbone' requires 'tokenizer'" in message
     assert "'fragile' requires 'tokenizer'" in message
+
+
+def test_a_failed_state_migration_keeps_the_migrated_constructor_arguments(
+        tmp_path, monkeypatch,
+):
+    path = save(tmp_path, scaled={"value": 1.0})
+    monkeypatch.setitem(CONSTRUCTOR_NEEDS_SCALE, "scaled", True)
+    monkeypatch.setattr(Scaled, "state_version", 2)
+    monkeypatch.setattr(
+        Scaled,
+        "migrate_init_args",
+        classmethod(lambda cls, version, init_args: {
+            "args": init_args["args"],
+            "kwargs": {**init_args["kwargs"], "scale": 3.0},
+        }),
+    )
+
+    with pytest.warns(RuntimeWarning, match="scaled"):
+        restored = Checkpointer.load_checkpoint(path, on_mismatch="reinit")
+
+    assert resource_named(restored, "scaled").scale == 3.0
+
+
+def test_constructor_arguments_that_cannot_migrate_are_never_reinitialized(
+        tmp_path, monkeypatch,
+):
+    path = save(tmp_path, scaled={"value": 1.0})
+    monkeypatch.setattr(Scaled, "state_version", 2)
+
+    def refuse(cls, version, init_args):
+        raise ValueError("no way to rebuild scaled's arguments")
+
+    monkeypatch.setattr(Scaled, "migrate_init_args", classmethod(refuse))
+
+    with pytest.raises(ValueError, match="no way to rebuild"):
+        Checkpointer.load_checkpoint(path, on_mismatch="reinit")
+
+
+# -- a checkpoint says what it holds, not where to read it from ---------------------
+
+
+def point_record_at(path, name, file, *, in_session_record=False):
+    if in_session_record:
+        record = torch.load(f"{path}/session.pt", weights_only=True)
+        record["components"][name]["file"] = file
+        torch.save(record, f"{path}/session.pt")
+        return
+    with open(f"{path}/manifest.json") as manifest_file:
+        manifest = json.load(manifest_file)
+    manifest["components"][name]["file"] = file
+    with open(f"{path}/manifest.json", "w") as manifest_file:
+        json.dump(manifest, manifest_file)
+
+
+@pytest.mark.parametrize("outside", ["absolute", "relative"])
+def test_a_recorded_file_outside_the_checkpoint_is_never_read(tmp_path, outside):
+    path = save(tmp_path, backbone={"value": 1.0})
+    torch.save({"value": torch.tensor([42.0])}, tmp_path / "elsewhere.pt")
+    file = (
+        str(tmp_path / "elsewhere.pt")
+        if outside == "absolute"
+        else "components/../../elsewhere.pt"
+    )
+
+    point_record_at(path, "backbone", file)
+    with pytest.raises(ValueError, match="can only be at 'components/backbone.pt'"):
+        Checkpointer.load_component_state(path, "backbone")
+
+    point_record_at(path, "backbone", file, in_session_record=True)
+    with pytest.raises(ValueError, match="can only be at 'components/backbone.pt'"):
+        Checkpointer.load_checkpoint(path)
+
+
+def test_a_symlinked_component_file_is_never_read(tmp_path):
+    path = save(tmp_path, backbone={"value": 1.0})
+    component = tmp_path / "checkpoint" / "components" / "backbone.pt"
+    shutil.move(component, tmp_path / "moved.pt")
+    os.symlink(tmp_path / "moved.pt", component)
+
+    with pytest.raises(ValueError, match="symlink"):
+        Checkpointer.load_checkpoint(path)
+    with pytest.raises(ValueError, match="symlink"):
+        Checkpointer.load_component_state(path, "backbone")
+
+
+# -- a consumer keeps the instance it was given --------------------------------------
+
+
+def test_a_later_sibling_does_not_make_a_given_instance_ambiguous(tmp_path):
+    session = build(tmp_path, **{"backbone#b": {"value": 2.0}, "head": {}})
+    # Activated after head was given backbone#b: `backbone` now has two
+    # instances, but head holds, and uses, the one it was given.
+    session.activate_component("backbone#a", {"value": 1.0})
+
+    assert "Resource.backbone#b" in session.execution_graph()
+    assert {"head", "backbone#b"} <= session.rank_parallel_names()
+
+    restored = Checkpointer.load_checkpoint(save(tmp_path, session))
+
+    head = resource_named(restored, "head")
+    assert head.get_dependency("backbone").name == "backbone#b"
+    assert "Resource.backbone#b" in restored.execution_graph()
+    with restored:
+        assert list(restored) == [1, 2]

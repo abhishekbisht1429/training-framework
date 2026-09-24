@@ -73,7 +73,10 @@ the object's state, or the arguments that rebuild it, instead.
 A checkpoint is written under a temporary name (`<timestamp>.tmp`) and renamed
 into place only when complete, so a save interrupted by a crash never looks
 like a checkpoint, and loading one is refused. A component file that no longer
-matches its checksum is reported by component name.
+matches its checksum is reported by component name. Where a component's state
+lives follows from its name alone: a recorded path other than
+`components/<name>.pt`, or any file inside the checkpoint that is a symlink,
+is refused rather than followed.
 
 To write a checkpoint yourself, call
 `Checkpointer.save_checkpoint(session, path)`.
@@ -166,10 +169,12 @@ session = Checkpointer.load_checkpoint(path, on_mismatch="reinit")
 session = Checkpointer.load_checkpoint(path, on_mismatch={"encoder"})
 ```
 
-`"reinit"` keeps every such component as freshly built from its recorded
-constructor arguments, and a collection of instance names does that for those
-only; both warn with the names and reasons. Nothing that cannot be *built* --
-an unregistered component, a missing prerequisite -- is ever skipped.
+`"reinit"` keeps every such component as freshly built from its constructor
+arguments -- brought forward by `migrate_init_args` when the constructor
+changed -- and a collection of instance names does that for those only; both
+warn with the names and reasons. Nothing that cannot be *built* -- an
+unregistered component, a missing prerequisite, constructor arguments
+`migrate_init_args` cannot bring forward -- is ever skipped.
 
 ## What a checkpoint does not record
 

@@ -119,6 +119,12 @@ of it, so it cannot name one. The session decides, in this order:
    pick one: wiring a component to something the session never chose gives a
    run that works and is quietly wrong.
 
+This is decided once, when the consumer is built. From then on the instance it
+was given is the answer wherever the session needs one -- ordering, the
+execution graph, which components a rank keeps, and a restored checkpoint --
+so an instance added later (`activate_component("data_manager#b")`) does not
+make an already-wired consumer ambiguous or move it to another instance.
+
 ### Naming the instance a component should use
 
 Wiring for one consumer is a nested entry in `component_bindings`, keyed by the
