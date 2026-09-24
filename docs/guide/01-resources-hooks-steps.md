@@ -65,6 +65,11 @@ An iteration hook must expose a positive `call_every` integer. An iteration hook
 
 The first and final iterations therefore invoke every iteration hook, regardless of `call_every`.
 
+An iteration hook that declares `iteration_context` keys with `@reads` /
+`@writes` receives its reads as keyword arguments of `post_iteration_callback`
+and returns its writes from `pre_iteration_callback` (see
+[Ordering by dataflow](02-wiring-components.md#ordering-by-dataflow)).
+
 If a session hook's own `pre_session()` raises, the framework calls its
 `rollback_pre_session()`. This method also has a no-op default for backward
 compatibility and should reverse only effects created by the incomplete
@@ -94,6 +99,22 @@ class TrainStep(Step):
 Steps are executed in dependency order: after the steps they require, and
 after the steps that write the `iteration_context` keys they declare reading
 (see [Ordering by dataflow](02-wiring-components.md#ordering-by-dataflow)).
+A step's declared reads arrive as keyword arguments of `run`, and its declared
+writes are what `run` returns:
+
+```python
+import torch
+
+from training_framework.components import Step, reads, step, writes
+
+
+@reads("logits", "targets")
+@writes("loss")
+@step("my_loss")
+class MyLoss(Step):
+    def run(self, session: TrainingSession, logits, targets):
+        return torch.nn.functional.cross_entropy(logits, targets)
+```
 
 For the common work -- taking a batch, calling a model, computing a loss --
 you do not need to write a step: the built-in `load_batch`, `forward` and

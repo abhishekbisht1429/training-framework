@@ -91,9 +91,11 @@ from training_framework.components import (
     StatefulResource,
     Step,
     hook,
+    reads,
     requires_resource,
     resource,
     step,
+    writes,
 )
 from training_framework.session import TrainingSession
 
@@ -118,18 +120,19 @@ class CounterResource(StatefulResource):
 
 @step("increment")
 @requires_resource("counter")
+@writes("counter_value")
 class IncrementStep(Step):
     def __init__(self, config: dict):
         self.amount = int(config.get("amount", 1))
 
-    def run(self, session: TrainingSession) -> None:
+    def run(self, session: TrainingSession) -> int:
         counter = self.get_dependency("counter")
         counter.value += self.amount
-        session.iteration_context["counter_value"] = counter.value
+        return counter.value
 
 
 @hook("progress")
-@requires_resource("counter")
+@reads("counter_value")
 class ProgressHook(LifecycleHook):
     def __init__(self, config: dict):
         self.call_every = int(config.get("call_every", 1))
@@ -143,12 +146,17 @@ class ProgressHook(LifecycleHook):
     def pre_iteration_callback(self, session: TrainingSession) -> None:
         pass
 
-    def post_iteration_callback(self, session: TrainingSession) -> None:
-        value = session.iteration_context["counter_value"]
-        print(f"iteration={session.iteration}, counter={value}")
+    def post_iteration_callback(
+        self, session: TrainingSession, counter_value: int
+    ) -> None:
+        print(f"iteration={session.iteration}, counter={counter_value}")
 ```
 
 Each configured component class receives its YAML mapping as one `config` argument.
+The step and the hook share a value through the iteration's context: `@writes`
+stores what `run` returns under `counter_value`, and `@reads` passes it to
+`post_iteration_callback` as the `counter_value` argument (see
+[Ordering by dataflow](docs/guide/02-wiring-components.md#ordering-by-dataflow)).
 
 ### 3. Create the YAML configuration
 

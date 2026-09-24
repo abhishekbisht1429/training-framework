@@ -256,12 +256,13 @@ or `max_iterations`. The partial final iteration is not counted.
 ```python
 @requires_resource("data_manager")
 @requires_resource("trained_model")
+@writes("embeddings")
 @step("embed_batches", session_type="analysis")
 class EmbedBatches(Step):
     def run(self, session):
         batch = next(self.get_dependency("data_manager").data_iter)
         model = self.get_dependency("trained_model").model
-        session.iteration_context["embeddings"] = model(batch)
+        return model(batch)
 ```
 
 ### `layer_inspector`
