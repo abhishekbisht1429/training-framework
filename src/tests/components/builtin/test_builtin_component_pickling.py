@@ -64,13 +64,7 @@ def test_pickled_checkpointer_creates_a_loadable_checkpoint(tmp_path):
         "checkpoint_every": 1,
         "checkpoints_dir": str(checkpoints_dir),
     })))
-    session = SimpleNamespace(
-        iteration=2,
-        session_config=SimpleNamespace(
-            max_iterations=3,
-            session_dir=str(tmp_path),
-        ),
-    )
+    session = TrainingSession({"session_config": _session_config(tmp_path)})
 
     checkpointer.pre_session(session)
     checkpointer.post_iteration_callback(session)
@@ -79,7 +73,7 @@ def test_pickled_checkpointer_creates_a_loadable_checkpoint(tmp_path):
     checkpoint_paths = list(checkpoints_dir.iterdir())
     assert len(checkpoint_paths) == 1
     loaded = Checkpointer.load_checkpoint(checkpoint_paths[0])
-    assert loaded.iteration == 2
+    assert loaded.iteration == session.iteration
 
 
 @pytest.mark.parametrize(

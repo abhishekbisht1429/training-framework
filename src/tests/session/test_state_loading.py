@@ -1,5 +1,6 @@
 import pickle
 import random
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -385,7 +386,7 @@ def test_session_state_uses_clean_session_type_and_config_keys(tmp_path):
     assert state["config"]["session_config"] == (
         session.full_config["session_config"]
     )
-    assert state["session_config"] == session.session_config
+    assert state["session_config"] == asdict(session.session_config)
     assert "base_config" not in state
     assert "mode" not in state
 

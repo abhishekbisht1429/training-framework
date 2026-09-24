@@ -407,8 +407,10 @@ directory under the session directory. A [second instance](../guide/02-wiring-co
 writes to `checkpoints_<suffix>` instead, so two checkpointers do not
 interleave their files; an explicit `checkpoints_dir` still wins.
 
-The checkpointer uses `torch.save(session, path)`. Because it is an iteration
-hook, it saves on:
+Each checkpoint is a directory named after its timestamp, written with
+`Checkpointer.save_checkpoint(session, path)`; see
+[a checkpoint on disk](../guide/04-checkpoints-and-resume.md#a-checkpoint-on-disk).
+Because it is an iteration hook, it saves on:
 
 - iterations divisible by `checkpoint_every`;
 - the final configured iteration; and
@@ -416,7 +418,9 @@ hook, it saves on:
   `checkpoint_first: true`.
 
 A component that needs something another run produced reads it with
-`Checkpointer.load_component(path, name, session_type=None)`. The name is
+`Checkpointer.load_component(path, name, *, with_dependencies=True,
+session_type=None)`, which rebuilds only that resource and the instances it
+was wired to. The name is
 resolved through the *checkpoint's* bindings -- `model` finds whatever that
 run bound it to -- and the checkpoint's RNG is not adopted. The caller's RNG
 is left exactly as it was, even when the rebuilt components draw from it, so
@@ -424,6 +428,10 @@ the caller's seed still decides what comes next. It raises `KeyError` when the c
 has no such resource and `ComponentDependencyError` when several instances
 answer; `session_type="training"` also rejects a checkpoint of another kind.
 This is how the analysis `trained_model` gets its model.
+`Checkpointer.load_component_state(path, name)` returns a component's saved
+state without building anything, and `Checkpointer.read_manifest(path)`
+describes the checkpoint; see
+[reading part of a checkpoint](../guide/04-checkpoints-and-resume.md#reading-part-of-a-checkpoint).
 
 ### `tensorboard`
 

@@ -182,7 +182,10 @@ For reliable spawn and checkpoint behavior:
 - return the original class from custom decorators;
 - avoid registration that depends on process ID, rank, or other process-specific state;
 - make the component package importable from a fresh Python interpreter; and
-- keep component names stable across checkpoint save and restore.
+- keep component names stable across checkpoint save and restore; and
+- raise a component's `state_version` when what it checkpoints changes, with a
+  `migrate_state` for older checkpoints (see
+  [when a component changes](04-checkpoints-and-resume.md#when-a-component-changes)).
 
 ---
 

@@ -105,8 +105,10 @@ tensors (heatmaps or anything else) to the `Step`. See [`layer_inspector` in the
 built-in component reference](../reference/builtin-components.md#layer_inspector)
 for its configuration and API.
 
-Only load trusted checkpoints because session loading uses unrestricted Python
-deserialization.
+`trained_model` rebuilds only the model and what it was wired to, so a
+component of the training run that no longer builds does not block analysis.
+A single-file checkpoint from before 0.5.0 is read with unrestricted Python
+deserialization; load one only from a trusted source.
 
 ---
 

@@ -15,7 +15,7 @@ Every `sessions[]` entry contributes worker wrappers to the run; the engine does
 
 ### Spawn requires importable and serializable definitions
 
-Define worker targets and component classes at module scope. Constructor arguments, state returned by `get_state()`, and checkpointed session-context values must be serializable.
+Define worker targets and component classes at module scope. Constructor arguments, state returned by `get_state()`, and checkpointed session-context values must be plain data -- tensors, dicts, lists, tuples, sets, numbers, strings and `None` -- or the checkpoint is refused when it is written.
 
 ### Progress is detected between framework stages
 
@@ -82,9 +82,9 @@ Resource, hook, and step names share one namespace within each shared or session
 
 ## Checkpoints and data
 
-### Checkpoint files are trusted-code artifacts
+### Single-file checkpoints are trusted-code artifacts
 
-The built-in loader uses unrestricted Python deserialization. Never load an untrusted checkpoint.
+Checkpoint directories are read with `weights_only=True`. A single-file checkpoint from before 0.5.0 is still read, for 0.5.0 only, with unrestricted Python deserialization: never load an untrusted one, and convert trusted ones (see [single-file checkpoints](../guide/04-checkpoints-and-resume.md#single-file-checkpoints-from-before-050)).
 
 ### Exact data-pipeline replay is application-dependent
 

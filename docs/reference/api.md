@@ -141,7 +141,12 @@ The engine monitors workers while leaving the context.
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
 | `Stateful.get_state()` / `set_state(state)` | Capture and restore a component's own state |
 | `GradientProcessor.process(session, named_parameters)` | Base class (`training_framework.components.builtin`) for a step that edits gradients between `backward` and `optimizer_step`; see [custom gradient stages](builtin-components.md#optimizer) |
-| `Checkpointer.load_component(path, name, session_type=None)` | Read one resource out of a checkpoint, resolved through the checkpoint's own bindings, without adopting its RNG |
+| `Checkpointer.save_checkpoint(session, path)` | Write `session` as a checkpoint directory of plain data |
+| `Checkpointer.load_checkpoint(path, map_location="cpu", restore_rng=True, *, on_mismatch="raise")` | Load a checkpointed session; `on_mismatch` (`"raise"`, `"reinit"` or instance names) decides what happens to a component whose saved state this version cannot take |
+| `Checkpointer.load_component(path, name, *, with_dependencies=True, session_type=None)` | Rebuild one resource and the instances it was wired to, resolved through the checkpoint's own bindings, without adopting its RNG |
+| `Checkpointer.load_component_state(path, name)` | Return one component's saved state without building anything |
+| `Checkpointer.read_manifest(path)` | Return a checkpoint's `manifest.json` |
+| `Component.state_version` / `migrate_state(from_version, state)` / `migrate_init_args(from_version, init_args)` | Version what a component checkpoints, and bring an older checkpoint forward |
 
 `get_dependency` is the one way a component takes a prerequisite, whether in
 `__init__` or at run time; see

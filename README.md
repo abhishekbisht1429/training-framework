@@ -1,7 +1,7 @@
 # Training Framework
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
-[![Package version](https://img.shields.io/badge/version-0.4.0-blue.svg)](./pyproject.toml)
+[![Package version](https://img.shields.io/badge/version-0.5.0-blue.svg)](./pyproject.toml)
 [![Python tests](https://github.com/abhishekbisht1429/training-framework/actions/workflows/python-tests.yaml/badge.svg)](https://github.com/abhishekbisht1429/training-framework/actions/workflows/python-tests.yaml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 

@@ -4,6 +4,7 @@ import warnings
 from abc import abstractmethod
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any, cast, override
 
@@ -172,7 +173,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             "checkpoint_version": CHECKPOINT_VERSION,
             "session_type": self._session_type,
             "config": deepcopy(self._config),
-            "session_config": self._session_config,
+            "session_config": asdict(self._session_config),
             "iteration": self._iteration,
             "components_state": self._components.get_state(),
             "session_context": deepcopy(self._session_context),
@@ -191,6 +192,9 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     @override
     def set_state(self, state):
+        self._apply_state(state)
+
+    def _apply_state(self, state, *, on_mismatch="raise"):
         if "components_state" not in state:
             raise ValueError(
                 "Checkpoint uses an unsupported component state schema; "
@@ -213,7 +217,10 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             component_bindings=component_bindings_from_config(self._config),
             session_type=self._session_type,
         )
-        restored_components.set_state(state["components_state"])
+        restored_components.set_state(
+            state["components_state"],
+            on_mismatch=on_mismatch,
+        )
         self._components = restored_components
 
         self._session_context = state["session_context"]
@@ -241,7 +248,12 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self.set_state(state)
 
     @classmethod
-    def from_state(cls, session_state):
+    def from_state(cls, session_state, *, on_mismatch="raise"):
+        """Rebuild a session from `get_state()`'s result.
+
+        `on_mismatch` is `SessionComponents.set_state`'s: what to do with a
+        component whose saved state this version cannot take.
+        """
         if "session_type" not in session_state:
             raise ValueError(
                 "Checkpoint does not contain the required 'session_type'"
@@ -258,7 +270,8 @@ class Session(Stateful, metaclass=CaptureInitMeta):
                 f"{session_type} session-type state"
             )
         obj = target_cls.__new__(target_cls)
-        obj.__setstate__(session_state)
+        obj._prepare_for_state_restore(session_state)
+        obj._apply_state(session_state, on_mismatch=on_mismatch)
         return obj
 
     @property

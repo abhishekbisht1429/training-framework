@@ -41,7 +41,7 @@ class TrainedModel(Resource):
                 "trained_model.model_checkpoint_path must resolve to a "
                 "string path"
             )
-        if not os.path.isfile(normalized_path):
+        if not os.path.exists(normalized_path):
             raise FileNotFoundError(
                 f"Model checkpoint does not exist: {normalized_path}"
             )

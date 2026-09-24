@@ -273,7 +273,7 @@ def test_builtin_checkpointer_loads_mid_run_checkpoint_and_resumes_exactly(tmp_p
     expected_final_state = step_obj.get_state()
 
     checkpoint_paths = sorted(
-        path for path in checkpoints_dir.iterdir() if path.is_file()
+        path for path in checkpoints_dir.iterdir() if path.is_dir()
     )
 
     loaded_by_iteration = {

@@ -56,11 +56,25 @@ class _PlannedComponent:
     edges: list[Edge]
 
 
+@dataclass(frozen=True)
+class _RestorePlan:
+    component_class: type[Component]
+    dependencies: dict[str, str]
+    init_args: dict
+    state: Any
+    #: Why the saved state is not restored, when it is not.
+    reinitialized: str | None = None
+
+
 class ComponentNotFoundError(KeyError):
     """A KeyError whose message keeps its line breaks when printed."""
 
     def __str__(self) -> str:
         return str(self.args[0]) if self.args else ""
+
+
+class CheckpointMismatchError(ValueError):
+    """Several checkpointed components cannot be restored; lists them all."""
 
 
 class SessionComponents:
@@ -143,11 +157,37 @@ class SessionComponents:
                 # keeps before anything is rebuilt from this state.
                 "context_reads": list(component.context_reads()),
                 "context_writes": list(component.context_writes()),
+                # The wiring this instance was actually given, so a restore
+                # rebuilds it as it was rather than re-deriving it, and one
+                # component can be restored with only what it was given.
+                "dependencies": {
+                    asked: getattr(dependency, "name", type(dependency).__name__)
+                    for asked, dependency in component._dependencies.items()
+                },
+                "state_version": type(component).state_version,
             }
             for name, component in self.components.items()
         }
 
-    def set_state(self, component_states: dict[str, dict[str, Any]]) -> None:
+    def set_state(
+            self,
+            component_states: dict[str, dict[str, Any]],
+            *,
+            on_mismatch: str | Iterable[str] = "raise",
+            partial: bool = False,
+    ) -> None:
+        """Rebuild the components a state holds and restore their state.
+
+        `on_mismatch` decides what happens to a component whose saved state
+        this version cannot take -- written by a newer `state_version`, or an
+        older one with no `migrate_state`: "raise" (the default) refuses the
+        whole restore; "reinit" keeps every such component as freshly built,
+        with a warning naming them; a collection of instance names does that
+        for those only. Whatever cannot be built at all always raises.
+
+        `partial` says the state holds a chosen subset of a session's
+        components (each with what it depends on), not a whole session.
+        """
         restored_components: dict[str, Component] = {}
         # Components are rebuilt into a fresh mapping, but a component being
         # constructed must see the ones already rebuilt, so the view reads
@@ -155,7 +195,12 @@ class SessionComponents:
         previous_components = self.components
         self.components = restored_components
         try:
-            self._restore_components(component_states, restored_components)
+            self._restore_components(
+                component_states,
+                restored_components,
+                on_mismatch=on_mismatch,
+                partial=partial,
+            )
         except BaseException:
             self.components = previous_components
             raise
@@ -164,11 +209,18 @@ class SessionComponents:
             self,
             component_states: dict[str, dict[str, Any]],
             restored_components: dict[str, Component],
+            *,
+            on_mismatch: str | Iterable[str] = "raise",
+            partial: bool = False,
     ) -> None:
         # A checkpoint is not a trusted plan: it may predate a component being
         # marked @singleton, or have been edited. Checked before anything is
         # built; set_state restores the previous components if it raises.
         self._check_instance_limits(component_states)
+
+        # Every component is checked before any is built, and every problem
+        # is reported at once rather than the first one only.
+        plans = self._plan_restore(component_states, on_mismatch)
 
         # Pass 1: rebuild every component from its constructor arguments,
         # prerequisites first. The stored order is usually already
@@ -178,6 +230,7 @@ class SessionComponents:
         # it. Each component is handed its prerequisites as it is built, so
         # they are built first here rather than trusted to come first.
         building: list[str] = []
+        build_order: list[str] = []
 
         def build(name: str) -> None:
             if name in restored_components:
@@ -188,38 +241,116 @@ class SessionComponents:
                     f"Checkpoint components depend on each other in a "
                     f"cycle: {chain}"
                 )
-            component_info = component_states[name]
-            implementation, _ = parse_instance_name(name)
-            component_class = self.registry.get(implementation)
-            if component_class is None:
-                raise ValueError(
-                    f"Checkpoint component '{name}' is not registered"
-                )
-            self._check_recorded_implementation(
-                name,
-                implementation,
-                component_info,
-            )
-
-            component_type = _component_type(component_class)
-            stored_type = component_info["component_type"]
-            if component_type.__name__ != stored_type:
-                raise ValueError(
-                    f"Checkpoint component '{name}' is stored as a "
-                    f"{stored_type}, but is now registered as a "
-                    f"{component_type.__name__}"
-                )
-
-            # Resolved against every name in the checkpoint, not just the ones
-            # rebuilt so far, so a sibling instance not yet rebuilt cannot make
-            # this one look like the only one.
-            dependencies = self._resource_dependencies(
-                component_class,
-                name,
-                active=set(component_states),
-            )
+            plan = plans[name]
             building.append(name)
             try:
+                for target in plan.dependencies.values():
+                    build(target)
+            finally:
+                building.pop()
+
+            restored_components[name] = self._construct(
+                plan.component_class,
+                name,
+                *plan.init_args["args"],
+                dependencies=plan.dependencies,
+                **plan.init_args["kwargs"],
+            )
+            build_order.append(name)
+
+        for name in component_states:
+            build(name)
+
+        # Pass 2: restore state in prerequisite-first order, so a component
+        # that inspects a dependency sees it already restored. A partial
+        # state is not a session, so it is not sorted as one; the build
+        # order is prerequisite-first by construction.
+        order = (
+            build_order
+            if partial
+            else self._state_restore_order(component_states)
+        )
+        failures = []
+        for name in order:
+            component = self.components[name]
+            plan = plans[name]
+            if not isinstance(component, Stateful) or plan.reinitialized:
+                continue
+            try:
+                component.set_state(plan.state)
+            except Exception as error:
+                failures.append((name, error))
+        if len(failures) == 1:
+            raise failures[0][1]
+        if failures:
+            raise CheckpointMismatchError(
+                "Checkpoint state could not be restored into "
+                f"{len(failures)} components:\n"
+                + "\n".join(
+                    f"  - '{name}': {type(error).__name__}: {error}"
+                    for name, error in failures
+                )
+            ) from failures[0][1]
+
+        reinitialized = sorted(
+            name for name, plan in plans.items() if plan.reinitialized
+        )
+        if reinitialized:
+            warnings.warn(
+                "Checkpoint restored without the saved state of "
+                f"{reinitialized}, which is kept as freshly built: "
+                + "; ".join(
+                    plans[name].reinitialized for name in reinitialized
+                ),
+                RuntimeWarning,
+                stacklevel=4,
+            )
+
+    def _plan_restore(
+            self,
+            component_states: Mapping[str, Mapping[str, Any]],
+            on_mismatch: str | Iterable[str],
+    ) -> dict[str, "_RestorePlan"]:
+        """Check every checkpointed component and decide how to rebuild it.
+
+        Nothing is constructed here. What cannot be built at all -- a
+        component no longer registered, registered as another kind, or
+        missing a prerequisite -- is always an error; a saved state this
+        version cannot take is one unless `on_mismatch` lets that component
+        start fresh. All problems are reported together.
+        """
+        reinit_all = on_mismatch == "reinit"
+        if isinstance(on_mismatch, str):
+            if on_mismatch not in ("raise", "reinit"):
+                raise ValueError(
+                    "on_mismatch must be 'raise', 'reinit' or a collection "
+                    f"of component names; got {on_mismatch!r}"
+                )
+            reinit_names: set[str] = set()
+        else:
+            reinit_names = set(on_mismatch)
+            unknown = sorted(reinit_names - set(component_states))
+            if unknown:
+                raise ValueError(
+                    f"on_mismatch names {unknown}, which the checkpoint does "
+                    f"not hold; it holds {sorted(component_states)}"
+                )
+
+        plans: dict[str, _RestorePlan] = {}
+        problems: list[str] = []
+        active = set(component_states)
+        for name, component_info in component_states.items():
+            try:
+                component_class = self._restorable_class(name, component_info)
+                # Resolved against every name in the checkpoint, not just the
+                # ones rebuilt so far, so a sibling instance not yet rebuilt
+                # cannot make this one look like the only one.
+                dependencies = self._resource_dependencies(
+                    component_class,
+                    name,
+                    active=active,
+                    recorded=component_info.get("dependencies"),
+                )
                 for asked, target in dependencies.items():
                     if target not in component_states:
                         raise ValueError(
@@ -227,28 +358,83 @@ class SessionComponents:
                             f"'{asked}', which resolves to '{target}', but the "
                             "checkpoint does not contain it"
                         )
-                    build(target)
-            finally:
-                building.pop()
+            except (ValueError, ComponentDependencyError) as error:
+                problems.append(str(error))
+                continue
 
             init_args = component_info["init_args"]
-            restored_components[name] = self._construct(
-                component_class,
-                name,
-                *init_args["args"],
+            state = component_info.get("state")
+            reinitialized = None
+            recorded_version = component_info.get("state_version")
+            current_version = component_class.state_version
+            if recorded_version is not None and recorded_version != current_version:
+                try:
+                    if recorded_version > current_version:
+                        raise ValueError(
+                            f"Checkpoint component '{name}' was written at "
+                            f"state_version {recorded_version}, newer than "
+                            f"this version of it ({current_version})"
+                        )
+                    init_args = component_class.migrate_init_args(
+                        recorded_version, init_args,
+                    )
+                    if state is not None:
+                        state = component_class.migrate_state(
+                            recorded_version, state,
+                        )
+                except Exception as error:
+                    message = str(error)
+                    if f"'{name}'" not in message:
+                        message = f"Checkpoint component '{name}': {message}"
+                    if reinit_all or name in reinit_names:
+                        reinitialized = message
+                        # Rebuilt from what the checkpoint recorded, as far as
+                        # the constructor still takes it.
+                        init_args = component_info["init_args"]
+                    else:
+                        problems.append(message)
+                        continue
+
+            plans[name] = _RestorePlan(
+                component_class=component_class,
                 dependencies=dependencies,
-                **init_args["kwargs"],
+                init_args=init_args,
+                state=state,
+                reinitialized=reinitialized,
             )
 
-        for name in component_states:
-            build(name)
+        if len(problems) == 1:
+            raise ValueError(problems[0])
+        if problems:
+            raise CheckpointMismatchError(
+                f"Checkpoint cannot be restored ({len(problems)} problems):\n"
+                + "\n".join(f"  - {problem}" for problem in problems)
+            )
+        return plans
 
-        # Pass 2: restore state in prerequisite-first order, so a component
-        # that inspects a dependency sees it already restored.
-        for name in self._state_restore_order(component_states):
-            component = self.components[name]
-            if isinstance(component, Stateful):
-                component.set_state(component_states[name]["state"])
+    def _restorable_class(
+            self,
+            name: str,
+            component_info: Mapping[str, Any],
+    ) -> type[Component]:
+        implementation, _ = parse_instance_name(name)
+        component_class = self.registry.get(implementation)
+        if component_class is None:
+            raise ValueError(f"Checkpoint component '{name}' is not registered")
+        self._check_recorded_implementation(
+            name,
+            implementation,
+            component_info,
+        )
+        component_type = _component_type(component_class)
+        stored_type = component_info["component_type"]
+        if component_type.__name__ != stored_type:
+            raise ValueError(
+                f"Checkpoint component '{name}' is stored as a "
+                f"{stored_type}, but is now registered as a "
+                f"{component_type.__name__}"
+            )
+        return component_class
 
     @staticmethod
     def _check_recorded_implementation(
@@ -280,18 +466,30 @@ class SessionComponents:
             component_class: type[Component],
             consumer: str,
             active: Iterable[str] | None = None,
+            recorded: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         """Resolve a consumer's declared resources to instance names.
 
         Only resources are injected: `required_hooks` / `required_steps` and
         `@wraps` targets are ordering declarations, and a hook or step is not
         servable through `get_dependency`.
+
+        `recorded` is the wiring a checkpoint says the consumer was given:
+        a declared name it records is restored to the same instance rather
+        than resolved again. What the class declares decides what is
+        injected, so a name it no longer declares is dropped, and one it has
+        declared since is resolved as usual.
         """
+        recorded = recorded or {}
         return {
-            edge.asked: self.resolve_dependency(
-                edge.asked,
-                consumer=consumer,
-                active=active,
+            edge.asked: (
+                recorded[edge.asked]
+                if edge.asked in recorded
+                else self.resolve_dependency(
+                    edge.asked,
+                    consumer=consumer,
+                    active=active,
+                )
             )
             for edge in declared_edges(component_class)
             if edge.injects

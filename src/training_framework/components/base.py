@@ -93,6 +93,38 @@ class Component(ABC, metaclass=ComponentMeta):
     declared_writes: ClassVar[tuple[str, ...]] = ()
     """`iteration_context` keys this component writes; set by `@writes`."""
 
+    state_version: ClassVar[int] = 1
+    """The version of what this component checkpoints.
+
+    Recorded with every checkpoint. Raise it when `get_state()` or the
+    constructor arguments change shape, and implement `migrate_state` (and
+    `migrate_init_args`, if the constructor changed) so checkpoints written
+    by an earlier version still restore.
+    """
+
+    @classmethod
+    def migrate_state(cls, from_version: int, state: Any) -> Any:
+        """Return `state`, written at `from_version`, in the current shape.
+
+        Called before `set_state` when a checkpoint was written by an older
+        `state_version`. The default has no migration to offer.
+        """
+        raise ValueError(
+            f"{cls._component_name()} was checkpointed at state_version "
+            f"{from_version}, and is now at {cls.state_version} with no "
+            "migrate_state to bring the old state forward"
+        )
+
+    @classmethod
+    def migrate_init_args(cls, from_version: int, init_args: dict) -> dict:
+        """Return constructor arguments recorded at `from_version`, updated.
+
+        `init_args` is `{"args": tuple, "kwargs": dict}`. Called before the
+        component is rebuilt from an older checkpoint; the default keeps
+        them, for a version change that touched only the state.
+        """
+        return init_args
+
     def __init__(self, config: Mapping | None = None) -> None:
         """Initialize a component that does not require configuration."""
         self._parse_config_schema(config)

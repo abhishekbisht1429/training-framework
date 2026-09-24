@@ -8,7 +8,10 @@ from typing import Any
 import numpy as np
 import torch
 
-from training_framework.session.config import normalize_session_config
+from training_framework.session.config import (
+    SessionConfig,
+    normalize_session_config,
+)
 
 
 #: Bumped when the shape of a captured session state changes. Version 2
@@ -64,8 +67,18 @@ def capture_rng_state(carried_cuda_state: Any = None) -> dict[str, Any]:
         "torch_rng_state": torch.get_rng_state(),
         "python_rng_state": random.getstate(),
         "cuda_rng_state": _capture_cuda_rng_state(carried_cuda_state),
-        "np_rng_state": np.random.get_state(),
+        "np_rng_state": _capture_numpy_rng_state(),
     }
+
+
+def _capture_numpy_rng_state() -> tuple:
+    """numpy's state with its key as a list rather than an ndarray.
+
+    A checkpoint holds plain data only, so it loads with
+    `torch.load(weights_only=True)`; `np.random.set_state` takes either.
+    """
+    kind, key, *rest = np.random.get_state()
+    return (kind, key.tolist(), *rest)
 
 
 def _capture_cuda_rng_state(carried: Any) -> Any:
@@ -154,4 +167,9 @@ def configuration_from_state(
         )
     session_settings = normalize_session_config(config["session_config"])
     config["session_config"] = deepcopy(session_settings)
-    return config, session_settings, state["session_config"]
+    session_config = state["session_config"]
+    if isinstance(session_config, Mapping):
+        # Stored as a mapping so a checkpoint holds no framework class; a
+        # state written before that holds the dataclass itself.
+        session_config = SessionConfig(**session_config)
+    return config, session_settings, session_config
