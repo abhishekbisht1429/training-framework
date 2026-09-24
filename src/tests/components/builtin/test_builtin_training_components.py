@@ -78,9 +78,7 @@ def _register_training_components():
         def run(self, session):
             wrapped_model = self.get_dependency("ddp").wrapped_model
             prediction = wrapped_model(torch.tensor(1.0))
-            session.iteration_context["loss"] = (
-                prediction - self.target
-            ).square()
+            return (prediction - self.target).square()
 
 
 def _training_config(tmp_path, *, max_iterations=3):

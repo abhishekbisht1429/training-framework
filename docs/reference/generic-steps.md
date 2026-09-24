@@ -77,6 +77,10 @@ and `constants`, and parameter names must be non-empty strings.
 | A list of keys, `[reconstruction, mu, logvar]` | A tuple or list of the same length | Element *i* is stored under the *i*-th key |
 | A mapping `{context key: field}`, `{logits: logits, hidden: last_hidden_state}` | A dict, or an object with those attributes | `result["last_hidden_state"]` (or `result.last_hidden_state`) is stored under `hidden`, and so on |
 
+A value to be stored that is `None` is an error naming the key: every key a
+step declares is written on every iteration it runs, and its readers rely on
+that.
+
 ## `forward`
 
 Calls a model on context keys.

@@ -150,8 +150,8 @@ def _recorder(*keys):
     @reads(*keys)
     @step("cmp_recorder", overwrite=True)
     class Recorder(Step):
-        def run(self, session):
-            seen.append({key: session.iteration_context[key] for key in keys})
+        def run(self, session, **values):
+            seen.append(values)
 
     return seen
 
@@ -191,6 +191,25 @@ def test_supervised_regression_from_configuration_alone(tmp_path):
     )
     torch.testing.assert_close(_trained_linear(session).weight, expected.weight)
     torch.testing.assert_close(_trained_linear(session).bias, expected.bias)
+
+
+def test_keys_named_like_the_step_parameters_are_ordinary_keys(tmp_path):
+    _register()
+    session = _train(
+        tmp_path,
+        load_batch={"fields": ["session", "self"]},
+        forward={"args": ["session"], "outputs": "prediction"},
+        **{"compute#loss": {
+            "function": "mse_loss",
+            "args": ["prediction", "self"],
+            "outputs": "loss",
+        }},
+    )
+
+    expected = _reference(
+        lambda linear: nn.functional.mse_loss(linear(INPUTS), TARGETS)
+    )
+    torch.testing.assert_close(_trained_linear(session).weight, expected.weight)
 
 
 def test_classification_with_a_loss_class_and_labels_collated_by_default(tmp_path):
@@ -516,8 +535,8 @@ def test_a_call_declares_what_it_reads_and_writes():
         "kwargs": {"x": "d", "y": "a"},
         "outputs": {"total": "sum"},
     })
-    assert compute.context_reads() == ("a", "b", "c", "d")
-    assert compute.context_writes() == ("total",)
+    assert compute.context_reads() == {"a": "a", "b": "b", "c": "c", "d": "d"}
+    assert compute.context_writes() == {"total": "total"}
 
 
 def test_weighted_sum_defaults_weights_and_rejects_unknown_ones():
@@ -545,8 +564,8 @@ def test_analysis_forward_runs_the_trained_model_without_gradients(tmp_path):
     @reads("prediction")
     @step("cmp_probe", session_type="analysis")
     class Probe(Step):
-        def run(self, session):
-            seen.append(session.iteration_context["prediction"])
+        def run(self, session, prediction):
+            seen.append(prediction)
 
     config = make_config(tmp_path, max_iterations=1)
     config["session_config"]["show_execution_graph"] = False
@@ -678,8 +697,8 @@ def test_a_pickled_analysis_forward_still_runs_without_gradients(tmp_path):
     @reads("prediction")
     @step("cmp_probe", session_type="analysis")
     class Probe(Step):
-        def run(self, session):
-            seen.append(session.iteration_context["prediction"])
+        def run(self, session, prediction):
+            seen.append(prediction)
 
     config = make_config(tmp_path, max_iterations=1)
     config["session_config"]["show_execution_graph"] = False

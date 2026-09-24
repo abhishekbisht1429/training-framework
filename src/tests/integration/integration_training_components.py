@@ -203,10 +203,10 @@ class MeanSquaredLossStep(Step):
         pass
 
     @override
-    def run(self, session: TrainingSession) -> None:
+    def run(self, session: TrainingSession) -> torch.Tensor:
         prediction = session.iteration_context["prediction"]
         target = session.iteration_context["targets"]
-        session.iteration_context["loss"] = torch.nn.functional.mse_loss(
+        return torch.nn.functional.mse_loss(
             prediction,
             target,
         )

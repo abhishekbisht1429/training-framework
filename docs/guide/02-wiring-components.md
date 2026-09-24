@@ -337,15 +337,44 @@ from training_framework.components import Step, reads, step, writes
 @writes("loss")
 @step("my_loss")
 class MyLoss(Step):
-    def run(self, session):
-        context = session.iteration_context
-        context["loss"] = loss_fn(context["logits"], context["targets"])
+    def run(self, session, logits, targets):
+        return loss_fn(logits, targets)
 ```
 
+The declarations drive the values:
+
+- **Reads arrive as keyword arguments** of `run` (a step) or
+  `post_iteration_callback` (a hook), one per declared key, named after it.
+  The callback must take every declared read -- by name, or through
+  `**kwargs` for a key that is not a Python identifier -- and must not have
+  any other parameter without a default. A read may not share its name with
+  `self` or the session parameter, which the session passes positionally,
+  unless they are positional-only (`def run(self, session, /, **values)`, as
+  the generic steps do). All of this is checked when the session is built, so
+  a renamed parameter is an error rather than a read of some other key.
+- **Writes are returned**, from `run` or `pre_iteration_callback`. One
+  declared key: the return value itself, never unpacked, so a step may write
+  a tuple or a dict. Several: a tuple in declaration order, or a mapping with
+  exactly the declared names. A declared output may not be `None` (that is
+  what a forgotten `return` gives), and a component that declares no writes
+  must return `None`. Returning is the only way to write a declared key:
+  storing it in `session.iteration_context` yourself is refused.
+
 A component whose keys come from its configuration overrides
-`context_reads()` / `context_writes()` instead; the built-in
-[generic steps](../reference/generic-steps.md) do, which is
-how several `compute#...` instances of one class are ordered.
+`context_reads()` / `context_writes()`, returning a mapping of *name* ->
+*key*: the name is the parameter (or output) the code uses, the key is where
+it lives in the context. The built-in `backward` does this for `loss_key`:
+
+```python
+def context_reads(self):
+    return {"loss": self._cfg.loss_key}
+
+def run(self, session, loss): ...
+```
+
+The [generic steps](../reference/generic-steps.md) do it too, which is how
+several `compute#...` instances of one class are ordered. The execution graph
+shows such a read as `reads: total_loss (as loss)`.
 
 - **Order.** A step that reads a key runs after the step that writes it. These
   edges join the ones from `@requires_*` and `@wraps`; a contradiction is a
@@ -375,13 +404,15 @@ how several `compute#...` instances of one class are ordered.
 These checks run when a session is built from configuration -- with the
 engine, in the parent process, before any worker starts -- and again when a
 session is entered, which covers components registered by hand. While a
-session runs, a step or hook that did not write a key it declared fails right
-after the callback that should have written it. A rank of a distributed run
+session runs, a step or hook that returns something other than what it
+declared fails right after that callback, naming what it declared and what
+came back. A rank of a distributed run
 keeps the writer of every key its components read -- see
 [What each rank builds](06-distributed-training.md#what-each-rank-builds).
 
 Declaring is optional: a component that declares nothing is neither ordered
-nor checked by keys, exactly as before. The built-in `backward` does
+nor checked by keys, and may still use `session.iteration_context` directly
+(it must return `None`). The built-in `backward` does
 declare a read of `loss`, so a step of yours that produces the loss has to
 declare `@writes("loss")`.
 

@@ -67,6 +67,11 @@ session.iteration_context["batch"] = batch
 loss = session.iteration_context["loss"]
 ```
 
+A step or iteration hook that declares its keys with `@reads` / `@writes`
+does not touch it for them: the session passes the reads in as arguments and
+stores what the callback returns (see
+[Ordering by dataflow](../guide/02-wiring-components.md#ordering-by-dataflow)).
+
 It is:
 
 - available only while the session context is active;

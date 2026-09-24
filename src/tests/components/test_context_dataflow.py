@@ -36,12 +36,10 @@ class _Hook(LifecycleHook):
         pass
 
     def pre_iteration_callback(self, session):
-        for key in self.context_writes():
-            session.iteration_context[key] = 1.0
+        return _placeholder_outputs(self)
 
-    def post_iteration_callback(self, session):
-        for key in self.context_reads():
-            session.iteration_context[key]
+    def post_iteration_callback(self, session, **values):
+        pass
 
 
 class _InertModel(StatefulResource):
@@ -58,13 +56,21 @@ class _InertModel(StatefulResource):
         pass
 
 
+def _placeholder_outputs(component):
+    """1.0 for each key `component` declares writing, returned as declared
+    writes are: one as the value, several as a mapping by name."""
+    names = list(component.context_writes())
+    if not names:
+        return None
+    if len(names) == 1:
+        return 1.0
+    return {name: 1.0 for name in names}
+
+
 def _recording_step(name, ran, *, read=(), write=()):
-    def run(self, session):
-        for key in self.context_reads():
-            session.iteration_context[key]
-        for key in self.context_writes():
-            session.iteration_context[key] = 1.0
+    def run(self, session, **values):
         ran.append(name)
+        return _placeholder_outputs(self)
 
     cls = type(name, (Step,), {"run": run})
     if read:
@@ -201,7 +207,7 @@ def test_a_cycle_mixing_requirements_and_keys_names_both_reasons(tmp_path):
     @writes("feedback")
     class Consumer(Step):
         def run(self, session):
-            pass
+            return 1.0
 
     _recording_step("df_producer", [], read=["feedback"])
 
@@ -280,7 +286,7 @@ def test_a_session_hook_overriding_its_keys_is_rejected_when_sorted(tmp_path):
     @hook("df_session_writer")
     class Pretender(_SessionOnlyHook):
         def context_writes(self):
-            return ("x",)
+            return {"x": "x"}
 
     _recording_step("df_reader", [], read=["x"])
 
@@ -392,8 +398,8 @@ def test_a_hook_reading_on_a_multiple_of_its_writer_cadence_always_finds_the_key
     class EveryFour(_Hook):
         call_every = 4
 
-        def post_iteration_callback(self, session):
-            seen.append((session.iteration, session.iteration_context["tick"]))
+        def post_iteration_callback(self, session, tick):
+            seen.append((session.iteration, tick))
 
     session = build_session(
         tmp_path, {"df_every_two": {}, "df_every_four": {}},
@@ -432,7 +438,7 @@ def test_a_hook_without_a_cadence_is_reported_when_the_session_is_built(tmp_path
             pass
 
         def pre_iteration_callback(self, session):
-            session.iteration_context["tick"] = 1.0
+            return 1.0
 
         def post_iteration_callback(self, session):
             pass
@@ -450,3 +456,243 @@ def test_an_invalid_cadence_is_reported_for_a_hook_that_neither_wraps_nor_reads(
 
     with pytest.raises(RuntimeError, match="Hook.df_lonely call_every must be a positive integer; got 0"):
         build_session(tmp_path, {"df_lonely": {}})
+
+
+# -- values passed in and returned --------------------------------------------------
+
+
+def _writer(name, keys, value):
+    """A step declaring `keys` whose `run` returns `value`."""
+    return step(name)(writes(*keys)(
+        type(name, (Step,), {"run": lambda self, session: value})
+    ))
+
+
+def _capture(name, keys):
+    """A step reading `keys`; returns the list its `run` appends them to."""
+    seen = []
+    step(name)(reads(*keys)(type(name, (Step,), {
+        "run": lambda self, session, **values: seen.append(values),
+    })))
+    return seen
+
+
+def test_declared_reads_arrive_as_keyword_arguments(tmp_path):
+    seen = []
+    _writer("df_head", ["logits"], 3.0)
+
+    @step("df_loss")
+    @reads("logits")
+    class Loss(Step):
+        def run(self, session, logits):
+            seen.append(logits)
+
+    _run_one(build_session(tmp_path, {"df_loss": {}, "df_head": {}}))
+
+    assert seen == [3.0]
+
+
+def test_a_key_from_configuration_reaches_a_fixed_parameter_name(tmp_path):
+    seen = []
+    _writer("df_head", ["total_loss"], 2.0)
+
+    @step("df_backward")
+    class Backward(Step):
+        def __init__(self, config=None):
+            self.key = config["key"]
+
+        def context_reads(self):
+            return {"loss": self.key}
+
+        def run(self, session, loss):
+            seen.append(loss)
+
+    session = build_session(
+        tmp_path, {"df_backward": {"key": "total_loss"}, "df_head": {}},
+    )
+    _run_one(session)
+
+    assert seen == [2.0]
+    assert "reads: total_loss (as loss)" in session.execution_graph()
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [(1.0, 2.0), {"b": 2.0, "a": 1.0}],
+    ids=["tuple in declaration order", "mapping by name"],
+)
+def test_several_writes_are_returned_as_a_tuple_or_a_mapping(tmp_path, returned):
+    _writer("df_pair", ["a", "b"], returned)
+    seen = _capture("df_reader", ["a", "b"])
+
+    _run_one(build_session(tmp_path, {"df_pair": {}, "df_reader": {}}))
+
+    assert seen == [{"a": 1.0, "b": 2.0}]
+
+
+@pytest.mark.parametrize(
+    "value", [(1.0, 2.0), {"x": 1.0}], ids=["tuple", "mapping"],
+)
+def test_a_single_write_stores_the_returned_value_whole(tmp_path, value):
+    _writer("df_single", ["x"], value)
+    seen = _capture("df_reader", ["x"])
+
+    _run_one(build_session(tmp_path, {"df_single": {}, "df_reader": {}}))
+
+    assert seen == [{"x": value}]
+
+
+@pytest.mark.parametrize(
+    "returned, shown",
+    [
+        ([1.0, 2.0], "a list"),
+        ((1.0,), "a tuple of 1"),
+        ({"a": 1.0}, r"a mapping of \['a'\]"),
+        ({"a": 1.0, "b": 2.0, "c": 3.0}, r"a mapping of \['a', 'b', 'c'\]"),
+    ],
+)
+def test_several_writes_returned_in_another_shape_are_refused(
+        tmp_path, returned, shown,
+):
+    _writer("df_pair", ["a", "b"], returned)
+
+    session = build_session(tmp_path, {"df_pair": {}})
+
+    with pytest.raises(
+            RuntimeError,
+            match=rf"Step.df_pair.run declares writing \['a', 'b'\].* "
+                  rf"it returned {shown}",
+    ):
+        _run_one(session)
+
+
+def test_a_declared_output_returned_as_none_is_refused(tmp_path):
+    _writer("df_pair", ["a", "b"], (1.0, None))
+
+    session = build_session(tmp_path, {"df_pair": {}})
+
+    with pytest.raises(RuntimeError, match=r"returned None for \['b'\]"):
+        _run_one(session)
+
+
+def test_a_declared_key_written_directly_is_refused(tmp_path):
+    @step("df_direct")
+    @writes("x")
+    class Direct(Step):
+        def run(self, session):
+            session.iteration_context["x"] = 1.0
+            return 1.0
+
+    session = build_session(tmp_path, {"df_direct": {}})
+
+    with pytest.raises(RuntimeError, match="'x'.*already written.*return the value"):
+        _run_one(session)
+
+
+def test_a_value_returned_without_declared_writes_is_refused(tmp_path):
+    @step("df_forgetful")
+    class Forgetful(Step):
+        def run(self, session):
+            return 1.0
+
+    session = build_session(tmp_path, {"df_forgetful": {}})
+
+    with pytest.raises(RuntimeError, match="declares no iteration_context writes"):
+        _run_one(session)
+
+
+def test_a_hook_post_callback_returning_a_value_is_refused(tmp_path):
+    @hook("df_chatty")
+    class Chatty(_Hook):
+        def post_iteration_callback(self, session, **values):
+            return 1.0
+
+    session = build_session(tmp_path, {"df_chatty": {}})
+
+    with pytest.raises(RuntimeError, match="post_iteration_callback returned a float"):
+        _run_one(session)
+
+
+def test_a_read_the_callback_does_not_take_is_reported_when_built(tmp_path):
+    _writer("df_head", ["logits"], 1.0)
+
+    @step("df_loss")
+    @reads("logits")
+    class Loss(Step):
+        def run(self, session, logit):
+            pass
+
+    with pytest.raises(TypeError, match=r"reads \['logits'\], but does not take it"):
+        build_session(tmp_path, {"df_loss": {}, "df_head": {}})
+
+
+def test_a_parameter_nothing_fills_is_reported_when_built(tmp_path):
+    @step("df_loss")
+    class Loss(Step):
+        def run(self, session, logits):
+            pass
+
+    with pytest.raises(TypeError, match=r"parameters \['logits'\] that nothing fills"):
+        build_session(tmp_path, {"df_loss": {}})
+
+
+def test_a_key_that_is_not_an_identifier_needs_keyword_arguments(tmp_path):
+    _writer("df_head", ["head/out"], 1.0)
+    seen = _capture("df_reader", ["head/out"])
+
+    @step("df_strict")
+    @reads("head/out")
+    class Strict(Step):
+        def run(self, session):
+            pass
+
+    _run_one(build_session(tmp_path, {"df_head": {}, "df_reader": {}}))
+    assert seen == [{"head/out": 1.0}]
+
+    with pytest.raises(TypeError, match="or \\*\\*kwargs"):
+        build_session(tmp_path, {"df_head": {}, "df_strict": {}})
+
+
+def test_keys_from_configuration_must_be_a_mapping(tmp_path):
+    @step("df_old_style")
+    class OldStyle(Step):
+        def context_reads(self):
+            return ("x",)
+
+        def run(self, session, **values):
+            pass
+
+    with pytest.raises(TypeError, match="must return a mapping of name"):
+        build_session(tmp_path, {"df_old_style": {}})
+
+
+@pytest.mark.parametrize("key", ["session", "self"])
+def test_a_read_named_like_a_parameter_the_session_fills_is_reported(
+        tmp_path, key,
+):
+    _writer("df_head", [key], 1.0)
+    step("df_reader")(reads(key)(type("Reader", (Step,), {
+        "run": lambda self, session, **values: None,
+    })))
+
+    with pytest.raises(
+            TypeError,
+            match=rf"reads \['{key}'\], which is also the name of a "
+                  "parameter the session fills positionally",
+    ):
+        build_session(tmp_path, {"df_head": {}, "df_reader": {}})
+
+
+def test_a_read_named_like_a_positional_only_parameter_is_passed(tmp_path):
+    seen = []
+    _writer("df_head", ["session"], 1.0)
+
+    @step("df_reader")
+    @reads("session")
+    class Reader(Step):
+        def run(self, session, /, **values):
+            seen.append(values)
+
+    _run_one(build_session(tmp_path, {"df_head": {}, "df_reader": {}}))
+
+    assert seen == [{"session": 1.0}]

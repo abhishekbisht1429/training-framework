@@ -12,7 +12,9 @@ from training_framework.components.base import (
 )
 from training_framework.components.edges import (
     EdgeKind,
+    context_keys,
     context_keys_of,
+    context_mapping,
     declared_edges,
     given_instance,
     is_valid_cadence,
@@ -674,11 +676,11 @@ def _append_execution_calls(
         if companions:
             annotations.append(f"activates: {', '.join(companions)}")
         if method_name in {"run", "pre_iteration_callback"}:
-            written = component.context_writes()
+            written = _key_labels(context_mapping(component, "writes"))
             if written:
                 annotations.append(f"writes: {', '.join(written)}")
         if method_name in {"run", "post_iteration_callback"}:
-            read = component.context_reads()
+            read = _key_labels(context_mapping(component, "reads"))
             if read:
                 annotations.append(f"reads: {', '.join(read)}")
         if method_name in {
@@ -736,14 +738,24 @@ def _component_wrapped_hooks(
     ]
 
 
+def _key_labels(mapping: Mapping[str, str]) -> list[str]:
+    """Each key, followed by the name the component knows it by when the
+    two differ."""
+    return [
+        key if name == key else f"{key} (as {name})"
+        for name, key in mapping.items()
+    ]
+
+
 def _dataflow_lines(components) -> list[str]:
     """`key: writer -> readers` for every declared iteration_context key."""
     writers: dict[str, str] = {}
     readers: dict[str, list[str]] = {}
     for component in components:
-        for key in component.context_writes():
+        reads, writes = context_keys(component)
+        for key in writes:
             writers[key] = component.id
-        for key in component.context_reads():
+        for key in reads:
             readers.setdefault(key, []).append(component.id)
     return [
         f"  {key}: {writers.get(key, '(no writer)')} -> "

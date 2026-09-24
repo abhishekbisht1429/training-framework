@@ -1,7 +1,9 @@
 import os
 import traceback
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
+from training_framework.components.edges import context_mapping
 from training_framework.session.config import SessionPhase
 
 if TYPE_CHECKING:
@@ -12,19 +14,90 @@ def clear_iteration_state(session: "Session") -> None:
     session._shared_state.clear()
 
 
-def _check_declared_writes(session: "Session", writer) -> None:
-    """Hold a step or iteration hook to the keys it declared writing, right
-    after the callback that writes them: the order and the checks made when
-    the session was built rely on that promise."""
-    missing = [
-        key for key in writer.context_writes()
-        if key not in session._shared_state
-    ]
-    if missing:
+def _reads_for(session: "Session", reader) -> dict[str, Any]:
+    """The values `reader` declared reading, by the name it takes them as."""
+    context = session._shared_state
+    values = {}
+    for name, key in context_mapping(reader, "reads").items():
+        try:
+            values[name] = context[key]
+        except KeyError:
+            raise RuntimeError(
+                f"{reader.id} reads iteration_context '{key}' (as '{name}'), "
+                "which has not been written this iteration."
+            ) from None
+    return values
+
+
+def _describe_result(result: Any) -> str:
+    if isinstance(result, tuple):
+        return f"a tuple of {len(result)}"
+    if isinstance(result, Mapping):
+        return f"a mapping of {sorted(map(str, result))}"
+    return f"a {type(result).__name__}"
+
+
+def _store_writes(session: "Session", writer, result: Any, callback: str) -> None:
+    """Put what `writer` returned from `callback` under the keys it declared.
+
+    One declared output is the returned value itself, never unpacked, so a
+    step can write a tuple or a dict. Several are a tuple in declaration
+    order or a mapping by output name, exactly; nothing to write means None.
+    No declared output may be None, which is what a forgotten `return`
+    produces.
+    Returning is the only way a declared key is written: finding it already
+    in the context means something wrote it directly, which is refused.
+    """
+    outputs = context_mapping(writer, "writes")
+    shown = f"{writer.id}.{callback}"
+    if not outputs:
+        if result is not None:
+            raise RuntimeError(
+                f"{shown} returned {_describe_result(result)}, but declares "
+                "no iteration_context writes. Declare them with "
+                "@writes(...) (or in context_writes()), or return None."
+            )
+        return
+    names = list(outputs)
+    if len(names) == 1:
+        values = {names[0]: result}
+    elif isinstance(result, tuple) and len(result) == len(names):
+        values = dict(zip(names, result))
+    elif isinstance(result, Mapping) and set(result) == set(names):
+        values = {name: result[name] for name in names}
+    else:
         raise RuntimeError(
-            f"{writer.id} declares it writes iteration_context {missing} but "
-            "did not write them; its readers are ordered and checked on that "
-            "promise."
+            f"{shown} declares writing {names}, so it must return a tuple of "
+            f"{len(names)} in that order or a mapping with exactly those "
+            f"names; it returned {_describe_result(result)}."
+        )
+    unset = [name for name in names if values[name] is None]
+    if unset:
+        raise RuntimeError(
+            f"{writer.id} declares it writes iteration_context {names}, but "
+            f"{callback} returned None for {unset}. Its readers are ordered "
+            "and checked on that promise; return a value for each (a "
+            "forgotten `return` looks like this)."
+        )
+    context = session._shared_state
+    for name, key in outputs.items():
+        if key in context:
+            raise RuntimeError(
+                f"iteration_context '{key}', which {writer.id} declares "
+                f"writing, was already written when {shown} returned. A "
+                "declared key is written only by returning it: return the "
+                "value instead of storing it in session.iteration_context."
+            )
+    for name, key in outputs.items():
+        context[key] = values[name]
+
+
+def _nothing_returned(component, result: Any, callback: str) -> None:
+    if result is not None:
+        raise RuntimeError(
+            f"{component.id}.{callback} returned {_describe_result(result)}; "
+            "it must return None. An iteration hook writes in its "
+            "pre-iteration callback."
         )
 
 
@@ -45,13 +118,21 @@ def run_iteration(session: "Session") -> int:
                     or session._iteration % iteration_hook.call_every == 0
             ):
                 session.send_heartbeat(f"Running {iteration_hook.id}")
-                iteration_hook.pre_iteration_callback(session)
-                _check_declared_writes(session, iteration_hook)
+                _store_writes(
+                    session,
+                    iteration_hook,
+                    iteration_hook.pre_iteration_callback(session),
+                    "pre_iteration_callback",
+                )
 
         for step in session._sorted_steps:
             session.send_heartbeat(f"Running {step.id}")
-            step.run(session)
-            _check_declared_writes(session, step)
+            _store_writes(
+                session,
+                step,
+                step.run(session, **_reads_for(session, step)),
+                "run",
+            )
 
         for iteration_hook in reversed(session._iteration_hooks):
             if (
@@ -60,7 +141,13 @@ def run_iteration(session: "Session") -> int:
                     or session._iteration % iteration_hook.call_every == 0
             ):
                 session.send_heartbeat(f"Running {iteration_hook.id}")
-                iteration_hook.post_iteration_callback(session)
+                _nothing_returned(
+                    iteration_hook,
+                    iteration_hook.post_iteration_callback(
+                        session, **_reads_for(session, iteration_hook),
+                    ),
+                    "post_iteration_callback",
+                )
 
         iteration_complete = True
     finally:

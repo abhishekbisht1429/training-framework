@@ -18,6 +18,7 @@ from training_framework.components.base import _DEPENDENCIES_KEYWORD
 from training_framework.components.config_schema import has_all_defaults
 from training_framework.components.edges import (
     Edge,
+    context_keys,
     context_keys_of,
     declared_edges,
     wiring_of,
@@ -156,8 +157,8 @@ class SessionComponents:
                 "init_args": getattr(component, "_init_args"),
                 # What a worker needs to decide which components its rank
                 # keeps before anything is rebuilt from this state.
-                "context_reads": list(component.context_reads()),
-                "context_writes": list(component.context_writes()),
+                "context_reads": list(context_keys(component)[0]),
+                "context_writes": list(context_keys(component)[1]),
                 # The wiring this instance was actually given, so a restore
                 # rebuilds it as it was rather than re-deriving it, and one
                 # component can be restored with only what it was given.

@@ -666,9 +666,11 @@ def _context_keys(attribute: str, decorator: str, keys: tuple):
 def reads(*keys: str):
     """Declare the `iteration_context` keys a step or hook reads.
 
-    A step reading a key runs after the step that writes it, and every key
-    read must have exactly one writer in the session -- checked when the
-    session is built. A hook reads in its post-iteration callback.
+    Each value is passed as the keyword argument of the key's name: to `run`
+    for a step, to `post_iteration_callback` for a hook. The callback must
+    take each one (or `**kwargs`), and nothing else without a default --
+    checked when the session is built. A step reading a key runs after the
+    step that writes it, and every key read must have exactly one writer.
     """
     return _context_keys("declared_reads", "reads", keys)
 
@@ -676,8 +678,10 @@ def reads(*keys: str):
 def writes(*keys: str):
     """Declare the `iteration_context` keys a step or hook writes.
 
-    A step must write them in `run` (checked each iteration); a hook in its
-    pre-iteration callback. Each key has one writer per session.
+    A step returns them from `run`, a hook from its pre-iteration callback:
+    one key's value as is (never unpacked), several as a tuple in
+    declaration order or a mapping by key. Returning is the only way to
+    write a declared key. Each key has one writer per session.
     """
     return _context_keys("declared_writes", "writes", keys)
 

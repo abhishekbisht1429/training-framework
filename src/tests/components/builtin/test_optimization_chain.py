@@ -108,9 +108,7 @@ def _register_components(records: dict):
                     torch.is_autocast_enabled("cpu")
                 )
             )
-            session.iteration_context["loss"] = (
-                (prediction.float() - y) ** 2
-            ).mean()
+            return ((prediction.float() - y) ** 2).mean()
 
 
 def _config(tmp_path, *, max_iterations=3, optimizer=None, loss=None, **extra):

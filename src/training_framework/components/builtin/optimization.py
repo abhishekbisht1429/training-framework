@@ -10,8 +10,8 @@ Per-iteration work is done by steps, ordered by the steps they require:
 `forward_context` is the one hook: autocast and DDP's `no_sync` have to be
 entered before the forward pass, which a step cannot guarantee to precede.
 Configuring `optimizer` activates `optimizer_step`, which brings in the rest
-of the chain; `backward` reads `iteration_context["loss"]`, so it runs after
-whichever step declares writing it.
+of the chain; `backward` reads `iteration_context["loss"]` (its `loss_key`)
+as its `loss` argument, so it runs after whichever step declares writing it.
 """
 
 from __future__ import annotations
@@ -1097,14 +1097,12 @@ class Backward(Step):
     config_schema = BackwardConfig
 
     @override
-    def context_reads(self) -> tuple[str, ...]:
-        return (self._cfg.loss_key,)
+    def context_reads(self) -> dict[str, str]:
+        return {"loss": self._cfg.loss_key}
 
     @override
-    def run(self, session: Session) -> None:
-        self.get_dependency("optimizer").backward(
-            session.iteration_context[self._cfg.loss_key]
-        )
+    def run(self, session: Session, loss: Any) -> None:
+        self.get_dependency("optimizer").backward(loss)
 
 
 @requires_resource("optimizer")
@@ -1290,16 +1288,16 @@ class OptimizerStep(Step):
     """Step the optimizer and its schedule on iterations that end a group."""
 
     @override
-    def context_reads(self) -> tuple[str, ...]:
+    def context_reads(self) -> dict[str, str]:
         # A metric-driven schedule reads its metric here, so a session that
         # never writes it is rejected when it is built.
         if not self.has_dependency("optimizer"):
-            return ()
+            return {}
         metric_key = self.get_dependency("optimizer").metric_key
-        return () if metric_key is None else (metric_key,)
+        return {} if metric_key is None else {"metric": metric_key}
 
     @override
-    def run(self, session: Session) -> None:
+    def run(self, session: Session, metric: Any = None) -> None:
         optimizer = self.get_dependency("optimizer")
         if not optimizer.is_boundary:
             return
@@ -1309,7 +1307,7 @@ class OptimizerStep(Step):
             and processor.has_dependency("optimizer")
             and processor.get_dependency("optimizer") is optimizer
         )
-        optimizer.step(optimizer.scheduler_metric(session.iteration_context))
+        optimizer.step(metric)
 
 
 __all__ = [

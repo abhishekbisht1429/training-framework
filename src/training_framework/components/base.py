@@ -129,23 +129,28 @@ class Component(ABC, metaclass=ComponentMeta):
         """Initialize a component that does not require configuration."""
         self._parse_config_schema(config)
 
-    def context_reads(self) -> tuple[str, ...]:
-        """Return the `iteration_context` keys this instance reads.
+    def context_reads(self) -> dict[str, str]:
+        """Return the `iteration_context` values this instance reads, as
+        parameter name -> context key.
 
-        A step runs after the step that writes each of them; a hook reads
-        them in its post-iteration callback. Override when the keys come from
-        the configuration rather than the class.
+        Each is passed to `run` (a step) or `post_iteration_callback` (a
+        hook) as the keyword argument of that name. A step runs after the
+        step that writes each key. Override when a key comes from the
+        configuration rather than the class: the parameter name stays fixed
+        while the key it is filled from changes.
         """
-        return tuple(type(self).declared_reads)
+        return {key: key for key in type(self).declared_reads}
 
-    def context_writes(self) -> tuple[str, ...]:
-        """Return the `iteration_context` keys this instance writes.
+    def context_writes(self) -> dict[str, str]:
+        """Return the `iteration_context` values this instance writes, as
+        output name -> context key, in the order a tuple result lists them.
 
-        A step writes them in `run`; a hook in its pre-iteration callback, so
-        they are there before any step runs. Override when the keys come from
-        the configuration rather than the class.
+        A step returns them from `run`; a hook from its pre-iteration
+        callback, so they are there before any step runs. One output is the
+        return value itself; several are a tuple in this order or a mapping
+        by output name. Override when a key comes from the configuration.
         """
-        return tuple(type(self).declared_writes)
+        return {key: key for key in type(self).declared_writes}
 
     @classmethod
     def _component_name(cls) -> str:
@@ -421,11 +426,15 @@ class IterationHook(Hook, ABC):
     call_every: int
 
     @abstractmethod
-    def pre_iteration_callback(self, session: "Session") -> None:
+    def pre_iteration_callback(self, session: "Session") -> Any:
+        """Run before the iteration's steps; return what `@writes` declares
+        (None when it declares nothing)."""
         pass
 
     @abstractmethod
-    def post_iteration_callback(self, session: "Session") -> None:
+    def post_iteration_callback(self, session: "Session", **reads: Any) -> None:
+        """Run after the iteration's steps, given what `@reads` declares as
+        keyword arguments."""
         pass
 
 
@@ -466,7 +475,14 @@ class Step(Component, ABC):
         return "Step"
 
     @abstractmethod
-    def run(self, session: "Session") -> None:
+    def run(self, session: "Session", **reads: Any) -> Any:
+        """Run once per iteration.
+
+        What `@reads` declares arrives as keyword arguments, and what
+        `@writes` declares is returned: one value as is, several as a tuple
+        in declaration order or a mapping by name. A step declaring no
+        writes returns None.
+        """
         pass
 
 

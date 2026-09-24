@@ -302,16 +302,22 @@ need something else:
   @writes("centred_logits")
   @step("centre")
   class Centre(StatefulStep):
-      ...
+      def run(self, session, teacher_logits):
+          ...
+          return teacher_logits - self.centre
   ```
+
+  Declared reads arrive as arguments and declared writes are returned; see
+  [Ordering by dataflow](02-wiring-components.md#ordering-by-dataflow).
 
 - **Control flow** -- work that runs only on some iterations or chooses
   between paths.
 - **More than one optimizer** -- `optimizer` is one resource over the model's
   parameters, so GANs and similar setups need their own update steps.
 
-A step you write that produces the loss declares `@writes("loss")`, and
-`backward` picks it up exactly as it does a `compute`.
+A step you write that produces the loss declares `@writes("loss")` and
+returns the loss from `run`; `backward` picks it up exactly as it does a
+`compute`.
 
 ---
 

@@ -146,7 +146,7 @@ The engine monitors workers while leaving the context.
 | `Component.name` / `Component.id` | This instance's name (`logger#validation`) and its category-qualified id (`Hook.logger#validation`) |
 | `Component.implementation_name` | The name this component's class was registered under, shared by every instance of it |
 | `Component.instance_suffix` | The part after `#`, or `None` for the only instance of a component; use it to keep two instances' output apart |
-| `Component.context_reads()` / `context_writes()` | The keys this instance reads / writes; defaults to the `@reads` / `@writes` declarations, overridden when keys come from configuration |
+| `Component.context_reads()` / `context_writes()` | Mapping of name -> `iteration_context` key this instance reads / writes; the name is the callback parameter (or output) the key is passed as (or returned under). Defaults to the `@reads` / `@writes` declarations with name = key; overridden when keys come from configuration |
 | `Component.config_schema` | Optional dataclass; the configuration mapping is parsed into `self._cfg` |
 | `parse_component_config(cls, config)` | Parse a mapping against a `config_schema` directly |
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
@@ -189,7 +189,7 @@ documented in [`ModuleResource`](../concepts/module-resource.md#members).
 | `@requires_hook(name)` | Declare a Hook prerequisite for a Step |
 | `@requires_step(name)` | Declare a Step prerequisite for a Step |
 | `@wraps(name)` | Declare that a Hook wraps another Hook |
-| `@reads(*keys)` / `@writes(*keys)` | Declare the `iteration_context` keys a Step or IterationHook reads / writes; steps are [ordered and checked by them](../guide/02-wiring-components.md#ordering-by-dataflow) |
+| `@reads(*keys)` / `@writes(*keys)` | Declare the `iteration_context` keys a Step or IterationHook reads (passed to `run` / `post_iteration_callback` as keyword arguments) / writes (returned from `run` / `pre_iteration_callback`); steps are [ordered and checked by them](../guide/02-wiring-components.md#ordering-by-dataflow) |
 | `@activates(name)` | Declare a [companion](../guide/02-wiring-components.md#companions): activating this component activates `name` too, with no ordering or injection |
 | `@rank_zero_only` | Declare that a distributed session builds this component on rank 0 only |
 | `@singleton` | Declare that a session may hold only one instance of this component |

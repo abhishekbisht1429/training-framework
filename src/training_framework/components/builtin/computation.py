@@ -69,6 +69,14 @@ def _unique(keys: Sequence[str], path: str) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def _returned(values: dict[str, Any]) -> Any:
+    """`values` as a step returns them: one output is the value itself,
+    several a mapping by output name."""
+    if len(values) == 1:
+        return next(iter(values.values()))
+    return values
+
+
 def _to_device(value: Any, device: torch.device, non_blocking: bool) -> Any:
     """Move every tensor in a batch to `device`, leaving the rest alone."""
     if isinstance(value, torch.Tensor):
@@ -142,47 +150,45 @@ class LoadBatch(Step):
     config_schema = LoadBatchConfig
 
     @override
-    def context_writes(self) -> tuple[str, ...]:
+    def context_writes(self) -> dict[str, str]:
         fields = self._cfg.fields
-        if fields is None:
-            return (self._cfg.key,)
-        return tuple(fields)
+        keys = (self._cfg.key,) if fields is None else tuple(fields)
+        return {key: key for key in keys}
 
     @override
-    def run(self, session: Session) -> None:
+    def run(self, session: Session) -> Any:
         batch = _to_device(
             next(self.get_dependency("data_manager").data_iter),
             session.device,
             self._cfg.non_blocking,
         )
-        context = session.iteration_context
         fields = self._cfg.fields
         if fields is None:
-            context[self._cfg.key] = batch
-        elif isinstance(fields, Mapping):
+            return batch
+        if isinstance(fields, Mapping):
             if not isinstance(batch, Mapping):
                 raise TypeError(
                     f"{self.name}.fields picks fields of a dict batch, but "
                     f"the batch is a {type(batch).__name__}"
                 )
+            values = {}
             for key, batch_key in fields.items():
                 try:
-                    context[key] = batch[batch_key]
+                    values[key] = batch[batch_key]
                 except KeyError as error:
                     raise KeyError(
                         f"{self.name}: the batch has no field {batch_key!r}; "
                         f"it has {sorted(map(str, batch))}"
                     ) from error
-        else:
-            if not isinstance(batch, (list, tuple)) or len(batch) != len(fields):
-                size = len(batch) if isinstance(batch, (list, tuple)) else None
-                raise ValueError(
-                    f"{self.name}.fields names {len(fields)} parts, but the "
-                    f"batch is a {type(batch).__name__}"
-                    + (f" of {size}" if size is not None else "")
-                )
-            for key, value in zip(fields, batch):
-                context[key] = value
+            return _returned(values)
+        if not isinstance(batch, (list, tuple)) or len(batch) != len(fields):
+            size = len(batch) if isinstance(batch, (list, tuple)) else None
+            raise ValueError(
+                f"{self.name}.fields names {len(fields)} parts, but the "
+                f"batch is a {type(batch).__name__}"
+                + (f" of {size}" if size is not None else "")
+            )
+        return _returned(dict(zip(fields, batch)))
 
 
 # -- calling a model or a function --------------------------------------------------
@@ -247,40 +253,46 @@ class _CallStep(Step):
     """Calls something on keys of the iteration context and stores the
     result under other keys; its reads and writes come from that config."""
 
+    # Keys need not be identifiers, so reads arrive by key through **inputs;
+    # `self` and `session` are positional-only in `run`, so any key -- even
+    # one named `session` -- is free to be one of them.
     @override
-    def context_reads(self) -> tuple[str, ...]:
+    def context_reads(self) -> dict[str, str]:
         keys: list[str] = []
         for arg in self._cfg.args:
             keys.extend([arg] if isinstance(arg, str) else arg)
         keys.extend(self._cfg.kwargs.values())
-        return tuple(dict.fromkeys(keys))
+        return {key: key for key in dict.fromkeys(keys)}
 
     @override
-    def context_writes(self) -> tuple[str, ...]:
+    def context_writes(self) -> dict[str, str]:
         outputs = self._cfg.outputs
-        return (outputs,) if isinstance(outputs, str) else tuple(outputs)
+        keys = (outputs,) if isinstance(outputs, str) else tuple(outputs)
+        return {key: key for key in keys}
 
-    def _call(self, session: Session, target) -> None:
-        context = session.iteration_context
+    def _call(self, target, inputs: Mapping[str, Any]) -> Any:
         args = [
-            context[arg] if isinstance(arg, str) else [context[key] for key in arg]
+            inputs[arg] if isinstance(arg, str) else [inputs[key] for key in arg]
             for arg in self._cfg.args
         ]
         kwargs = {
-            parameter: context[key]
+            parameter: inputs[key]
             for parameter, key in self._cfg.kwargs.items()
         }
         kwargs.update(self._cfg.constants)
         grad_mode = torch.no_grad() if self._cfg.no_grad else contextlib.nullcontext()
         with grad_mode:
             result = target(*args, **kwargs)
-        self._store(context, result)
+        return self._outputs(result)
 
-    def _store(self, context, result) -> None:
+    def _outputs(self, result) -> Any:
+        """The call's result as this step returns it, picked or unpacked
+        into the configured `outputs`."""
         outputs = self._cfg.outputs
         if isinstance(outputs, str):
-            context[outputs] = result
-        elif isinstance(outputs, Mapping):
+            return result
+        values = {}
+        if isinstance(outputs, Mapping):
             for key, result_field in outputs.items():
                 if isinstance(result, Mapping):
                     if result_field not in result:
@@ -289,26 +301,25 @@ class _CallStep(Step):
                             f"the result does not have; it has "
                             f"{sorted(map(str, result))}"
                         )
-                    context[key] = result[result_field]
+                    values[key] = result[result_field]
                 elif isinstance(result_field, str) and hasattr(result, result_field):
-                    context[key] = getattr(result, result_field)
+                    values[key] = getattr(result, result_field)
                 else:
                     raise KeyError(
                         f"{self.name}.outputs picks {result_field!r}, which a "
                         f"{type(result).__name__} result does not have"
                     )
-        else:
-            if not isinstance(result, (list, tuple)) or len(result) != len(outputs):
-                raise ValueError(
-                    f"{self.name}.outputs unpacks {len(outputs)} values, but "
-                    f"the call returned a {type(result).__name__}"
-                    + (
-                        f" of {len(result)}"
-                        if isinstance(result, (list, tuple)) else ""
-                    )
+            return _returned(values)
+        if not isinstance(result, (list, tuple)) or len(result) != len(outputs):
+            raise ValueError(
+                f"{self.name}.outputs unpacks {len(outputs)} values, but "
+                f"the call returned a {type(result).__name__}"
+                + (
+                    f" of {len(result)}"
+                    if isinstance(result, (list, tuple)) else ""
                 )
-            for key, value in zip(outputs, result):
-                context[key] = value
+            )
+        return _returned(dict(zip(outputs, result)))
 
 
 def _bound_method(model, method: str, step_name: str):
@@ -352,8 +363,8 @@ class Forward(_CallStep):
     config_schema = ForwardConfig
 
     @override
-    def run(self, session: Session) -> None:
-        self._call(session, self._target())
+    def run(self, session: Session, /, **inputs: Any) -> Any:
+        return self._call(self._target(), inputs)
 
     def _target(self):
         model = self.get_dependency("model")
@@ -384,14 +395,14 @@ class AnalysisForward(_CallStep):
     config_schema = AnalysisForwardConfig
 
     @override
-    def run(self, session: Session) -> None:
+    def run(self, session: Session, /, **inputs: Any) -> Any:
         model = self.get_dependency("trained_model").model
         target = (
             model
             if self._cfg.method is None
             else _bound_method(model, self._cfg.method, self.name)
         )
-        self._call(session, target)
+        return self._call(target, inputs)
 
 
 # -- compute ------------------------------------------------------------------------
@@ -481,11 +492,11 @@ class Compute(_CallStep):
         self._device = None
 
     @override
-    def run(self, session: Session) -> None:
+    def run(self, session: Session, /, **inputs: Any) -> Any:
         if isinstance(self._function, nn.Module) and self._device != session.device:
             self._function.to(session.device)
             self._device = session.device
-        self._call(session, self._function)
+        return self._call(self._function, inputs)
 
 
 __all__ = [

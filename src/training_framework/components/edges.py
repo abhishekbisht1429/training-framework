@@ -9,6 +9,7 @@ another.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -330,24 +331,173 @@ def iteration_cadence(component: Any) -> int:
     return value
 
 
+def _describe(component: Any) -> str:
+    if isinstance(component, type):
+        return component.__name__
+    return getattr(component, "id", type(component).__name__)
+
+
+def context_mapping(component: Any, side: str) -> dict[str, str]:
+    """What `component` reads (`side="reads"`) or writes, as name -> key,
+    validated.
+
+    A class answers with its declarations, where the name is the key; an
+    instance with `context_reads()` / `context_writes()`, which
+    configuration can change.
+    """
+    if isinstance(component, type):
+        declared = getattr(component, f"declared_{side}", ())
+        return {key: key for key in declared}
+    mapping = getattr(component, f"context_{side}")()
+    method = f"context_{side}()"
+    if not isinstance(mapping, Mapping):
+        raise TypeError(
+            f"{_describe(component)}.{method} must return a mapping of "
+            f"name -> iteration_context key; got {mapping!r}"
+        )
+    for name, key in mapping.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"{_describe(component)}.{method} names must be non-empty "
+                f"strings; got {name!r}"
+            )
+        if not isinstance(key, str) or not key:
+            raise ValueError(
+                f"{_describe(component)}.{method} maps {name!r} to {key!r}; "
+                "a key must be a non-empty string"
+            )
+    repeated = sorted({
+        key for key in mapping.values()
+        if list(mapping.values()).count(key) > 1
+    })
+    if repeated:
+        raise ValueError(
+            f"{_describe(component)}.{method} names iteration_context "
+            f"{repeated} more than once"
+        )
+    return dict(mapping)
+
+
+def context_keys(component: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The keys `component` reads and writes, validated."""
+    return (
+        tuple(context_mapping(component, "reads").values()),
+        tuple(context_mapping(component, "writes").values()),
+    )
+
+
+def reading_callback(component: Any) -> str:
+    """The callback a participant is given its reads in: a step's `run`, an
+    iteration hook's `post_iteration_callback`."""
+    return "run" if _is_type(component, Step) else "post_iteration_callback"
+
+
+def check_callback_signature(component: Any, reads: Iterable[str]) -> None:
+    """Hold a step's `run`, or an iteration hook's post callback, to the
+    reads it declares.
+
+    The runtime calls it with the session and then each read as a keyword
+    argument, and nothing else. So every read must be a parameter (or
+    absorbed by `**kwargs`), and every other parameter must have a default;
+    a mismatch is reported now, when the session is built, rather than as a
+    TypeError mid-run -- or, worse, as a parameter quietly left at its
+    default.
+    """
+    callback_name = reading_callback(component)
+    # The function on the class, so `self` is visible for an instance too:
+    # a read may not land on it any more than on the session.
+    cls = component if isinstance(component, type) else type(component)
+    callback = getattr(cls, callback_name, None)
+    if callback is None:
+        return
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return
+    parameters = list(signature.parameters.values())
+    shown = f"{_describe(component)}.{callback_name}"
+    positional = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    )
+    # `self` and the session are passed positionally.
+    filled = []
+    while parameters and len(filled) < 2 and parameters[0].kind in positional:
+        filled.append(parameters.pop(0))
+    if len(filled) < 2 and not any(
+            p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters
+    ):
+        raise TypeError(
+            f"{shown} must take the session as its first parameter"
+        )
+    reads = list(reads)
+    taken = {
+        p.name: p for p in filled
+        if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    }
+    colliding = [name for name in reads if name in taken]
+    if colliding:
+        raise TypeError(
+            f"{shown} declares it reads {colliding}, which "
+            f"{'is' if len(colliding) == 1 else 'are'} also the name of "
+            f"a parameter the session fills positionally: {shown}{signature}. "
+            "Passing the read by keyword would give that parameter two "
+            "values. Take the read under another name (context_reads() "
+            "returning e.g. {'value': 'session'}), or make those parameters "
+            "positional-only: run(self, session, /, **values)."
+        )
+    by_keyword = {
+        p.name for p in parameters
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+    takes_any = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters
+    )
+    unaccepted = [name for name in reads if name not in by_keyword]
+    if unaccepted and not takes_any:
+        raise TypeError(
+            f"{shown} declares it reads {unaccepted}, but does not take "
+            f"{'it' if len(unaccepted) == 1 else 'them'} as keyword "
+            f"parameters: {shown}{inspect.signature(callback)}. Each read is "
+            "passed as the keyword argument of its name; add the parameter "
+            "(or **kwargs, for names that are not identifiers)."
+        )
+    undeclared = [
+        p.name for p in parameters
+        if p.default is inspect.Parameter.empty
+        and p.kind not in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+        and p.name not in reads
+    ]
+    if undeclared:
+        raise TypeError(
+            f"{shown} has parameters {undeclared} that nothing fills: only "
+            "declared reads are passed. Declare them with @reads(...) (or in "
+            f"context_reads()), or give them defaults. Declared reads: {reads}."
+        )
+
+
 def context_keys_of(components: Iterable[Component]) -> dict:
     """The keys each component reads and writes, validated.
 
     Only steps and iteration hooks take part in an iteration, so any other
     component declaring keys -- through `@reads`/`@writes` on a base class,
     or by overriding `context_reads()` -- is rejected here, where every
-    use of the keys starts.
+    use of the keys starts. A participant's callback is checked against the
+    reads it declares here too, so a mismatch surfaces when the session is
+    built.
     """
     keys = {}
     for component in components:
-        if isinstance(component, type):
-            # A class sorted on its own answers with its declarations; only
-            # an instance has configuration that can change them.
-            reads = tuple(getattr(component, "declared_reads", ()))
-            writes = tuple(getattr(component, "declared_writes", ()))
-        else:
-            reads = tuple(component.context_reads())
-            writes = tuple(component.context_writes())
+        read_names = list(context_mapping(component, "reads"))
+        reads, writes = context_keys(component)
+        if takes_part_in_iterations(component):
+            check_callback_signature(component, read_names)
         if not reads and not writes:
             continue
         if not takes_part_in_iterations(component):
@@ -390,13 +540,17 @@ __all__ = [
     "Edge",
     "EdgeKind",
     "Wiring",
+    "check_callback_signature",
+    "context_keys",
     "context_keys_of",
+    "context_mapping",
     "declared_edges",
     "given_instance",
     "instances_of",
     "is_valid_cadence",
     "iteration_cadence",
     "recorded_context_keys",
+    "reading_callback",
     "recorded_wiring",
     "resolve_component_name",
     "resolve_edges",
