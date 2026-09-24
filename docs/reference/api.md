@@ -46,6 +46,17 @@ which binds the topology's rendezvous port (a free one when none is set) and
 holds it in a `HostedRendezvous` until `close()`; the engine calls it for
 every multi-process launch.
 
+`training_framework.components.builtin` also exports the classes of the
+[generic steps](generic-steps.md) (`LoadBatch`, `Forward`, `AnalysisForward`,
+`Compute`) and of the [optimization chain](optimization.md)
+(`OptimizerResource`, `ForwardContext`, `Backward`, `FreezeGradients`,
+`ClipGradients`, `OptimizerStep`, `GradientProcessor`). They are configured by
+name in YAML; only `GradientProcessor` is meant to be subclassed.
+
+`training_framework.functions` holds the small functions `compute` finds by
+name: `weighted_sum(*, weights=None, **terms)`; see
+[`training_framework.functions`](generic-steps.md#training_frameworkfunctions).
+
 `training_framework.components.naming` holds the instance-name syntax:
 `INSTANCE_SEPARATOR`, `parse_instance_name(name)` (returning the component
 name and the suffix), `format_instance_name`, `is_instance_name` and
@@ -140,7 +151,7 @@ The engine monitors workers while leaving the context.
 | `parse_component_config(cls, config)` | Parse a mapping against a `config_schema` directly |
 | `ExtendableComponent.apply_extension_config(config, changed_paths)` | Opt into configuration changes during `--extend-session` |
 | `Stateful.get_state()` / `set_state(state)` | Capture and restore a component's own state |
-| `GradientProcessor.process(session, named_parameters)` | Base class (`training_framework.components.builtin`) for a step that edits gradients between `backward` and `optimizer_step`; see [custom gradient stages](builtin-components.md#optimizer) |
+| `GradientProcessor.process(session, named_parameters)` | Base class (`training_framework.components.builtin`) for a step that edits gradients between `backward` and `optimizer_step`; see [custom gradient stages](optimization.md#custom-gradient-stages) |
 | `Checkpointer.save_checkpoint(session, path)` | Write `session` as a checkpoint directory of plain data |
 | `Checkpointer.load_checkpoint(path, map_location="cpu", restore_rng=True, *, on_mismatch="raise")` | Load a checkpointed session; `on_mismatch` (`"raise"`, `"reinit"` or instance names) decides what happens to a component whose saved state this version cannot take |
 | `Checkpointer.load_component(path, name, *, with_dependencies=True, session_type=None)` | Rebuild one resource and the instances it was wired to, resolved through the checkpoint's own bindings, without adopting its RNG |

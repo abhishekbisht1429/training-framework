@@ -84,7 +84,7 @@ Resource, hook, and step names share one namespace within each shared or session
 
 ### Single-file checkpoints are trusted-code artifacts
 
-Checkpoint directories are read with `weights_only=True`. A single-file checkpoint from before 0.5.0 is still read, for 0.5.0 only, with unrestricted Python deserialization: never load an untrusted one, and convert trusted ones (see [single-file checkpoints](../guide/04-checkpoints-and-resume.md#single-file-checkpoints-from-before-050)).
+Checkpoint directories are read with `weights_only=True`. A single-file checkpoint from before 0.5.0 is still read, for 0.5.0 only, with unrestricted Python deserialization: never load an untrusted one, and convert trusted ones (see [single-file checkpoints](../guide/05-checkpoints-and-resume.md#single-file-checkpoints-from-before-050)).
 
 ### Exact data-pipeline replay is application-dependent
 

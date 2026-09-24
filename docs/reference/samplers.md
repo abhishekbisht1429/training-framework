@@ -61,4 +61,4 @@ The iterator is infinite even though `len(sampler)` reports one rank-local logic
 
 **See also:** the [`data_manager` reference](builtin-components.md#data_manager),
 which wraps `DistributedInfiniteSampler` and checkpoints its position, and
-[Resuming on a different number of GPUs](../guide/04-checkpoints-and-resume.md#resuming-on-a-different-number-of-gpus).
+[Resuming on a different number of GPUs](../guide/05-checkpoints-and-resume.md#resuming-on-a-different-number-of-gpus).

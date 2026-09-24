@@ -223,5 +223,5 @@ never claims a GPU.
 
 ---
 
-**Next:** [Analysis sessions](06-analysis-sessions.md) — driving a trained
+**Next:** [Analysis sessions](07-analysis-sessions.md) — driving a trained
 checkpoint through an analysis workflow.

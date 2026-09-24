@@ -7,7 +7,7 @@ covers that structure, the `session_config` fields each session must supply,
 and how to override values from the command line when starting a new session.
 
 Resuming or extending an existing checkpoint uses a different set of rules —
-see [Checkpoints, resume, and extend](04-checkpoints-and-resume.md). For the
+see [Checkpoints, resume, and extend](05-checkpoints-and-resume.md). For the
 complete flag list, see the [CLI reference](../reference/cli.md).
 
 ## YAML structure
@@ -76,9 +76,9 @@ definitions.
 The `ddp.world_size`, `ddp.master_addr` and `ddp.master_port` keys are an
 exception to everything on this page: they describe the machine a run is
 launched on rather than the run itself, and are resolved fresh on every launch.
-See [The launch decides the topology](05-distributed-training.md#the-launch-decides-the-topology).
+See [The launch decides the topology](06-distributed-training.md#the-launch-decides-the-topology).
 
 ---
 
-**Next:** [Checkpoints, resume, and extend](04-checkpoints-and-resume.md) —
+**Next:** [Checkpoints, resume, and extend](05-checkpoints-and-resume.md) —
 saving a session and continuing it later.

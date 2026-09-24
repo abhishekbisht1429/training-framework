@@ -278,7 +278,7 @@ configuration (see [Selecting components](#selecting-components)). Activation
 follows dependency edges outward: activating a wrapped hook alone does not
 activate hooks that wrap it. Under DDP, every rank activates the same
 components except those declared rank-zero-only — see
-[What each rank builds](05-distributed-training.md#what-each-rank-builds).
+[What each rank builds](06-distributed-training.md#what-each-rank-builds).
 
 ## Companions
 
@@ -319,7 +319,9 @@ shows the relationship as `activates: Step.optimizer_step`.
 
 Steps pass values through `session.iteration_context`. A step or an
 iteration hook can declare the keys it reads and writes, and the session then
-orders and checks steps by them:
+orders and checks steps by them. This section gives the rules for writing
+such a component; for the everyday case -- built-in steps configured in YAML
+-- see [Building an iteration](03-building-an-iteration.md).
 
 ```python
 from training_framework.components import Step, reads, step, writes
@@ -336,7 +338,7 @@ class MyLoss(Step):
 
 A component whose keys come from its configuration overrides
 `context_reads()` / `context_writes()` instead; the built-in
-[generic steps](../reference/builtin-components.md#generic-steps) do, which is
+[generic steps](../reference/generic-steps.md) do, which is
 how several `compute#...` instances of one class are ordered.
 
 - **Order.** A step that reads a key runs after the step that writes it. These
@@ -370,20 +372,20 @@ session is entered, which covers components registered by hand. While a
 session runs, a step or hook that did not write a key it declared fails right
 after the callback that should have written it. A rank of a distributed run
 keeps the writer of every key its components read -- see
-[What each rank builds](05-distributed-training.md#what-each-rank-builds).
+[What each rank builds](06-distributed-training.md#what-each-rank-builds).
 
 Declaring is optional: a component that declares nothing is neither ordered
-nor checked by keys, exactly as before. The built-in `backward` reads `loss`,
-so the step producing the loss has to declare `@writes("loss")` (or be a
-built-in `compute`).
+nor checked by keys, exactly as before. The built-in `backward` does
+declare a read of `loss`, so a step of yours that produces the loss has to
+declare `@writes("loss")`.
 
 The execution graph shows each component's `reads:` / `writes:` and a
 `DATAFLOW` section listing every key with its writer and readers.
 
 ---
 
-**Next:** [Configuration](03-configuration.md) — the full `sessions` YAML
-structure and `session_config` fields.
+**Next:** [Building an iteration](03-building-an-iteration.md) — a complete
+training run from the built-in steps, configured in YAML.
 
 **Going deeper:** [The component model](../concepts/component-model.md)
 explains what a component may do while it is being constructed, how to declare

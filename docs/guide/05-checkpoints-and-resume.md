@@ -303,7 +303,7 @@ checkpoint must contain a `TrainingSession`. Components reject configuration cha
 implement `ExtendableComponent` to opt in — see
 [Opting into extension](../concepts/component-model.md#opting-into-extension)
 for the author-side contract, and the
-[`optimizer` reference](../reference/builtin-components.md#optimizer) for
+[optimization reference](../reference/optimization.md#extending-a-session) for
 exactly how the built-in optimizer rescales its learning rate.
 
 ## Checkpoint safety
@@ -318,5 +318,5 @@ Exact training continuation also depends on application state. Persist model, op
 
 ---
 
-**Next:** [Distributed training](05-distributed-training.md) — running a
+**Next:** [Distributed training](06-distributed-training.md) — running a
 session across several GPUs.

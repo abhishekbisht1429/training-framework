@@ -17,19 +17,28 @@ A task-ordered path. It picks up where the
 2. [Wiring components together](guide/02-wiring-components.md) — activating
    components from YAML, binding a role to an implementation, declaring
    dependencies and wrapping.
-3. [Configuration](guide/03-configuration.md) — the `sessions` structure,
+3. [Building an iteration](guide/03-building-an-iteration.md) — a training
+   run from the built-in `load_batch`, `forward` and `compute` steps and the
+   optimizer, configured in YAML; recipes for several losses, a second model
+   and two views.
+4. [Configuration](guide/04-configuration.md) — the `sessions` structure,
    `session_config` fields, and command-line overrides.
-4. [Checkpoints, resume, and extend](guide/04-checkpoints-and-resume.md) — what
+5. [Checkpoints, resume, and extend](guide/05-checkpoints-and-resume.md) — what
    a checkpoint holds, continuing a run, and changing hyperparameters safely.
-5. [Distributed training](guide/05-distributed-training.md) — DDP configuration,
+6. [Distributed training](guide/06-distributed-training.md) — DDP configuration,
    how a launch decides its topology, and coordinated stopping.
-6. [Analysis sessions](guide/06-analysis-sessions.md) — driving a trained
+7. [Analysis sessions](guide/07-analysis-sessions.md) — driving a trained
    checkpoint through an analysis workflow.
 
 ## Look it up
 
 - [Built-in components](reference/builtin-components.md) — every component the
   framework ships with, and its configuration keys.
+- [Generic steps](reference/generic-steps.md) — `load_batch`, `forward` and
+  `compute`: every key, and how values go in and out of `iteration_context`.
+- [Optimization](reference/optimization.md) — `optimizer`, the steps from
+  `backward` to `optimizer_step`, accumulation, precision, custom gradient
+  stages.
 - [Transformer blocks](reference/transformer-blocks.md) — the swappable
   transformer building blocks and the two composite models.
 - [Infinite samplers](reference/samplers.md) — `InfiniteSampler` and

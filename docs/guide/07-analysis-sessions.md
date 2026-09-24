@@ -8,7 +8,7 @@ defaults. This page covers writing an analysis step, configuring the source
 checkpoint, and running the result.
 
 It assumes you have read [Resources, hooks, and steps](01-resources-hooks-steps.md)
-and [Configuration](03-configuration.md).
+and [Configuration](04-configuration.md).
 
 ## Writing an analysis step
 
@@ -32,8 +32,9 @@ class ReportStep(Step):
         ...
 ```
 
-The built-in [generic steps](../reference/builtin-components.md#generic-steps)
-work in analysis sessions too: `load_batch` names the batch, and `forward`
+The built-in [generic steps](../reference/generic-steps.md) work in analysis
+sessions too (see [Building an iteration](03-building-an-iteration.md) for how
+they fit together): `load_batch` names the batch, and `forward`
 calls `trained_model.model` without gradients, so a custom step can start
 from the model's outputs:
 

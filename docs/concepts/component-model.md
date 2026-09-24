@@ -126,7 +126,7 @@ That is stricter than the old lookup, not a rename of it: `get_dependency`
 serves only declared names, so a step or hook that fetched something it never
 declared must add `@requires_resource`. That adds an edge to the graph, which can change
 setup order and what a secondary DDP rank builds -- see
-[what each rank builds](../guide/05-distributed-training.md#what-each-rank-builds).
+[what each rank builds](../guide/06-distributed-training.md#what-each-rank-builds).
 
 [`ModuleResource`](module-resource.md) implements all of this for `nn.Module`
 resources, including the rules for owning another component's weights versus
@@ -220,12 +220,12 @@ with the effective values.
 The built-in logger and checkpointer use the contract for safe cadence changes.
 The built-in `optimizer` resource uses it to retain optimizer tensors and step
 counters while changing explicitly overridden parameter-group values — see the
-[`optimizer` reference](../reference/builtin-components.md#optimizer) for
+[optimization reference](../reference/optimization.md#extending-a-session) for
 exactly what it allows. Model, DDP, data-manager, and all custom components
 that do not opt in remain immutable.
 
 For the operator's view of what an extend may change, see
-[Checkpoints, resume, and extend](../guide/04-checkpoints-and-resume.md#extend).
+[Checkpoints, resume, and extend](../guide/05-checkpoints-and-resume.md#extend).
 
 ---
 

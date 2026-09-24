@@ -105,7 +105,7 @@ with session:
 ```
 
 Construct `AnalysisSession` in the same way shown in
-[Analysis sessions](../guide/06-analysis-sessions.md), then enter and iterate it
+[Analysis sessions](../guide/07-analysis-sessions.md), then enter and iterate it
 with the same pattern. Direct execution bypasses spawned-worker supervision, error pipes,
 heartbeat monitoring, and rank-specific DDP reconstruction. Use
 `TrainingEngine` for the normal managed execution path.

@@ -96,9 +96,10 @@ after the steps that write the `iteration_context` keys they declare reading
 (see [Ordering by dataflow](02-wiring-components.md#ordering-by-dataflow)).
 
 For the common work -- taking a batch, calling a model, computing a loss --
-the built-in [generic steps](../reference/builtin-components.md#generic-steps)
-`load_batch`, `forward` and `compute` need only configuration; write a step
-when you need something they do not do.
+you do not need to write a step: the built-in `load_batch`, `forward` and
+`compute` do it from configuration. [Building an
+iteration](03-building-an-iteration.md) shows how; write a step when you need
+something they do not do.
 
 A component that does not need constructor configuration or other initialization
 may omit `__init__` entirely:
@@ -185,7 +186,7 @@ For reliable spawn and checkpoint behavior:
 - keep component names stable across checkpoint save and restore; and
 - raise a component's `state_version` when what it checkpoints changes, with a
   `migrate_state` for older checkpoints (see
-  [when a component changes](04-checkpoints-and-resume.md#when-a-component-changes)).
+  [when a component changes](05-checkpoints-and-resume.md#when-a-component-changes)).
 
 ---
 

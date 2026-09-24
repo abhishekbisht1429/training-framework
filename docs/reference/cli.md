@@ -3,9 +3,9 @@
 [← Docs](../README.md) · [Project README](../../README.md)
 
 Every flag the entry point accepts. For how to write the configuration these
-flags load, see [Configuration](../guide/03-configuration.md); for what resume
+flags load, see [Configuration](../guide/04-configuration.md); for what resume
 and extend actually do, see
-[Checkpoints, resume, and extend](../guide/04-checkpoints-and-resume.md).
+[Checkpoints, resume, and extend](../guide/05-checkpoints-and-resume.md).
 
 ## Operations
 
@@ -16,14 +16,14 @@ type selection and constructor-specific arguments belong to each
 
 | Argument | Operation | Notes |
 |---|---|---|
-| `--config PATH` | Start new sessions from a YAML file | Overrides are addressed with a `sessions[i].` prefix; see [Configuration](../guide/03-configuration.md#omegaconf-overrides) |
-| `--resume-session PATH` | Continue a checkpoint unchanged | Accepts only the three launch-topology overrides; see [Resume](../guide/04-checkpoints-and-resume.md#resume) |
-| `--extend-session PATH` | Continue a checkpoint with changed, extension-safe settings | Overrides are session-relative, without a `sessions[0]` prefix; see [Extend](../guide/04-checkpoints-and-resume.md#extend) |
+| `--config PATH` | Start new sessions from a YAML file | Overrides are addressed with a `sessions[i].` prefix; see [Configuration](../guide/04-configuration.md#omegaconf-overrides) |
+| `--resume-session PATH` | Continue a checkpoint unchanged | Accepts only the three launch-topology overrides; see [Resume](../guide/05-checkpoints-and-resume.md#resume) |
+| `--extend-session PATH` | Continue a checkpoint with changed, extension-safe settings | Overrides are session-relative, without a `sessions[0]` prefix; see [Extend](../guide/05-checkpoints-and-resume.md#extend) |
 
 The launch-topology keys `ddp.world_size`, `ddp.master_addr` and
 `ddp.master_port` are accepted by every operation, because they describe the
 machine rather than the session — see
-[The launch decides the topology](../guide/05-distributed-training.md#the-launch-decides-the-topology).
+[The launch decides the topology](../guide/06-distributed-training.md#the-launch-decides-the-topology).
 
 ## Debugging
 
