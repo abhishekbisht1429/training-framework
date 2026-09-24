@@ -432,9 +432,16 @@ class IterationHook(Hook, ABC):
         pass
 
     @abstractmethod
-    def post_iteration_callback(self, session: "Session", **reads: Any) -> None:
+    def post_iteration_callback(
+        self, session: "Session", /, *args: Any, **reads: Any
+    ) -> None:
         """Run after the iteration's steps, given what `@reads` declares as
-        keyword arguments."""
+        keyword arguments.
+
+        Nothing is ever passed positionally; ``*args`` is here only so that
+        an override taking its reads by name type-checks. What an override
+        must take is set by `@reads` and checked when the session is built.
+        """
         pass
 
 
@@ -475,13 +482,17 @@ class Step(Component, ABC):
         return "Step"
 
     @abstractmethod
-    def run(self, session: "Session", **reads: Any) -> Any:
+    def run(self, session: "Session", /, *args: Any, **reads: Any) -> Any:
         """Run once per iteration.
 
         What `@reads` declares arrives as keyword arguments, and what
         `@writes` declares is returned: one value as is, several as a tuple
         in declaration order or a mapping by name. A step declaring no
         writes returns None.
+
+        Nothing is ever passed positionally; ``*args`` is here only so that
+        an override taking its reads by name type-checks. What an override
+        must take is set by `@reads` and checked when the session is built.
         """
         pass
 
