@@ -131,13 +131,52 @@ spawned, so a typo fails the launch rather than one rank — including on a
 single-rank launch, which has no ranks to prune for but would otherwise carry
 the mistake until the day the same configuration is scaled up.
 
-A rank-zero-only component that a component this rank *does* build needs is
-built anyway, with a warning: whatever a component requires, wraps, brings
-along with `@activates`, or reads from `iteration_context` (the writer of a
+A component that runs on every rank may not depend on a rank-zero-only one:
+whatever a component requires, wraps, brings along with `@activates`, or reads
+from `iteration_context` (the writer of a
 [declared key](02-wiring-components.md#ordering-by-dataflow)) has to exist
-wherever that component does. Nothing else is inferred — a component is left
-off a rank because it was declared rank-zero-only, never because the framework
-decided it was needed only there.
+wherever that component does, and a rank-zero-only component does not exist on
+the other ranks. The launch fails, naming each such dependency:
+
+```text
+RuntimeError: Components that run on every rank depend on rank-zero-only
+components, which the other ranks do not build: 'my_step' requires
+'tensorboard' (@rank_zero_only). ...
+```
+
+Declare the dependant rank-zero-only too, or remove the dependency. A step that
+has to run everywhere but also has something to report can write it to
+`iteration_context` and leave the reporting to a rank-zero-only hook that reads
+it -- a rank-zero-only component may depend on one that runs everywhere:
+
+```python
+@writes("train_loss")
+@step("my_step")
+class MyStep(Step):
+    def run(self, session):
+        ...
+        return loss.item()
+
+
+@rank_zero_only
+@reads("train_loss")
+@requires_resource("tensorboard")
+@hook("loss_reporter")
+class LossReporter(IterationHook):
+    call_every = 1
+
+    def pre_iteration_callback(self, session):
+        pass
+
+    def post_iteration_callback(self, session, train_loss):
+        writer = self.get_dependency("tensorboard").summary_writer
+        writer.add_scalar("train/loss", train_loss, session.iteration)
+```
+
+The check runs on a single-rank launch too, where it is harmless, so that the
+configuration does not fail only once it is scaled up. Nothing else is
+inferred — a component is left off a rank because it was declared
+rank-zero-only, never because the framework decided it was needed only there.
 
 The parent works this out from the live components before it spawns anything,
 and sorts the reduced set a secondary rank will build: a rank that could not

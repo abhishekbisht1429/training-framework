@@ -265,7 +265,7 @@ def test_construction_order_is_prerequisite_first_in_configured_order(tmp_path):
     ]
 
 
-def test_a_rank_keeps_what_its_components_activate(tmp_path):
+def test_a_rank_refuses_a_rank_zero_component_its_components_activate(tmp_path):
     @activates("act_reporter")
     @resource("act_owner")
     class Owner(_InertResource):
@@ -278,9 +278,8 @@ def test_a_rank_keeps_what_its_components_activate(tmp_path):
 
     session = build_session(tmp_path, {"act_owner": {}})
 
-    with pytest.warns(RuntimeWarning, match="act_reporter"):
-        keep = session.rank_parallel_names()
-    assert "act_reporter" in keep
+    with pytest.raises(RuntimeError, match="'act_owner' activates 'act_reporter'"):
+        session.rank_parallel_names()
 
 
 def test_a_session_missing_a_companion_is_rejected_when_ordered(tmp_path):

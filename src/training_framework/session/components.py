@@ -18,6 +18,7 @@ from training_framework.components.base import _DEPENDENCIES_KEYWORD
 from training_framework.components.config_schema import has_all_defaults
 from training_framework.components.edges import (
     Edge,
+    EdgeKind,
     context_keys,
     context_keys_of,
     declared_edges,
@@ -66,6 +67,15 @@ class _RestorePlan:
     state: Any
     #: Why the saved state is not restored, when it is not.
     reinitialized: str | None = None
+
+
+def _edge_description(edge: Edge) -> str:
+    """How an edge reads in the rank-zero dependency error."""
+    if edge.kind is EdgeKind.READS:
+        return f"reads '{edge.asked}', written by '{edge.target}'"
+    if edge.kind is EdgeKind.COMPANION:
+        return f"activates '{edge.target}'"
+    return f"{edge.kind.value} '{edge.target}'"
 
 
 class ComponentNotFoundError(KeyError):
@@ -1202,19 +1212,8 @@ class SessionComponents:
             if active_names is None
             else set(active_names)
         )
-        rank_zero = {
-            name for name in active
-            if getattr(self._registered_component_class(name)[1],
-                       "rank_zero_only", False)
-        }
         ddp_name = self.resolve_name("ddp")
-        declared_names = self.validate_component_names(
-            declared,
-            source="ddp.rank_zero_components",
-            active_names=active,
-        )
-        rank_zero |= declared_names
-        rank_zero.discard(ddp_name)
+        rank_zero, declared_names = self._rank_zero_names(active, declared)
 
         # Only the names this session wrote down are questioned. A class-level
         # @rank_zero_only is its author's settled decision -- a reporter may
@@ -1240,6 +1239,103 @@ class SessionComponents:
             )
         return rank_zero
 
+    def _rank_zero_names(
+            self,
+            active: set[str],
+            declared: Iterable[str] | None,
+    ) -> tuple[set[str], set[str]]:
+        """The rank-zero-only names among `active`, and those of them the
+        session declared in `ddp.rank_zero_components`."""
+        rank_zero = {
+            name for name in active
+            if getattr(self._registered_component_class(name)[1],
+                       "rank_zero_only", False)
+        }
+        declared_names = self.validate_component_names(
+            declared,
+            source="ddp.rank_zero_components",
+            active_names=active,
+        )
+        rank_zero |= declared_names
+        rank_zero.discard(self.resolve_name("ddp"))
+        return rank_zero, declared_names
+
+    def check_rank_zero_dependants(
+            self,
+            *,
+            rank_zero_components: Iterable[str] | None = None,
+    ) -> None:
+        """Refuse a component that runs on every rank but depends on a
+        rank-zero-only one.
+
+        `rank_parallel_names` does this while planning the secondary ranks;
+        this is the same check on its own, for a single-rank launch, which
+        has no ranks to plan for but would otherwise carry the mistake until
+        the same configuration is run on more than one.
+        """
+        active = set(self.components)
+        context_keys, wiring = self._live_edge_inputs(active)
+        rank_zero, declared_names = self._rank_zero_names(
+            active, rank_zero_components,
+        )
+        self._raise_for_rank_zero_dependants(
+            active, rank_zero, declared_names, context_keys, wiring,
+        )
+
+    def _live_edge_inputs(self, active: set[str]):
+        """The context keys and wiring of the live components in `active`."""
+        live = [
+            component for name, component in self.components.items()
+            if name in active
+        ]
+        return context_keys_of(live), wiring_of(live)
+
+    def _raise_for_rank_zero_dependants(
+            self,
+            active: set[str],
+            rank_zero: set[str],
+            declared_names: set[str],
+            context_keys,
+            wiring,
+    ) -> None:
+        """Raise when a component outside `rank_zero` has an edge into it.
+
+        A secondary rank does not build a rank-zero-only component, so
+        whatever needs it -- requires, wraps, brings along with
+        `@activates`, or reads a key it writes -- cannot run there. Building
+        it on every rank anyway would override its declaration, so the
+        dependant has to be declared rank-zero-only too, or the edge removed.
+        Only direct edges are listed: fixing those fixes the rest.
+        """
+        found = []
+        for name in sorted(active - rank_zero):
+            _, component_class = self._registered_component_class(name)
+            for edge in self._resolved_edges(
+                    component_class, name, active,
+                    context_keys=context_keys,
+                    wiring=wiring,
+            ):
+                if not edge.kept_with_source or edge.target not in rank_zero:
+                    continue
+                declared_by = (
+                    "ddp.rank_zero_components"
+                    if edge.target in declared_names
+                    else "@rank_zero_only"
+                )
+                found.append(
+                    f"'{name}' {_edge_description(edge)} ({declared_by})"
+                )
+        if found:
+            raise RuntimeError(
+                "Components that run on every rank depend on rank-zero-only "
+                "components, which the other ranks do not build: "
+                + "; ".join(found)
+                + ". Declare each dependant rank-zero-only too "
+                "(@rank_zero_only or ddp.rank_zero_components), or remove "
+                "the dependency -- for instance, write the value to "
+                "iteration_context and let a rank-zero-only hook read it."
+            )
+
     def rank_parallel_names(
             self,
             *,
@@ -1259,8 +1355,9 @@ class SessionComponents:
         dropping too much, and a resource kept for nothing costs one
         constructor call.
 
-        A rank-zero-only component that a kept one depends on is kept anyway,
-        with a warning: a prerequisite has to exist wherever its consumer does.
+        A rank-zero-only component that a kept one depends on is an error:
+        a prerequisite has to exist wherever its consumer does, and building
+        it there anyway would override its declaration.
 
         `parallel_components` is the deprecated opt-in list. When a session
         provides it (even empty) it decides the answer on its own: only those
@@ -1280,16 +1377,10 @@ class SessionComponents:
             if active_names is None
             else set(active_names)
         )
-        if context_keys is None:
-            context_keys = context_keys_of(
-                component for name, component in self.components.items()
-                if name in active
-            )
-        if wiring is None:
-            wiring = wiring_of(
-                component for name, component in self.components.items()
-                if name in active
-            )
+        if context_keys is None or wiring is None:
+            live_keys, live_wiring = self._live_edge_inputs(active)
+            context_keys = live_keys if context_keys is None else context_keys
+            wiring = live_wiring if wiring is None else wiring
         keep = self._rank_names(
             active, parallel_components, rank_zero_components, context_keys,
             wiring,
@@ -1340,6 +1431,10 @@ class SessionComponents:
             context_keys=context_keys,
             wiring=wiring,
         )
+        _, declared_names = self._rank_zero_names(active, rank_zero_components)
+        self._raise_for_rank_zero_dependants(
+            active, rank_zero, declared_names, context_keys, wiring,
+        )
         keep = self.dependency_closure(
             active - rank_zero,
             active_names=active,
@@ -1347,18 +1442,6 @@ class SessionComponents:
             wiring=wiring,
         )
         keep.add(ddp_name)
-
-        still_needed = sorted(rank_zero & keep)
-        if still_needed:
-            # Correctness wins over pruning: a prerequisite of a component
-            # this rank runs has to exist, whatever it is marked.
-            warnings.warn(
-                "Rank-zero-only components are built on every rank because "
-                "components this rank runs depend on them: "
-                f"{still_needed}.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
         return keep
 
     def _check_rank_graph(self, keep: set[str]) -> None:

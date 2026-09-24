@@ -130,7 +130,7 @@ class TrainingEngine:
         way into `init_process_group`: a name that does not resolve would
         abort one worker while the others wait out the join timeout. Doing it
         here turns that into a launch-time error, and surfaces the
-        rank-zero-only warnings where they can still be acted on.
+        rank-zero-only warnings and errors where they can still be acted on.
         """
         if not session._components.has_resource("ddp"):
             return
@@ -149,6 +149,12 @@ class TrainingEngine:
                      "ddp.parallel_components"),
             ):
                 session.validate_component_names(names, source=source)
+            if not ddp_resource.declares_parallel_components:
+                # Likewise a rank-zero-only prerequisite of a component that
+                # runs on every rank: harmless on one rank, an error on two.
+                session._components.check_rank_zero_dependants(
+                    rank_zero_components=ddp_resource.rank_zero_components,
+                )
             return
 
         session.rank_parallel_names(

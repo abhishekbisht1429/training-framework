@@ -337,22 +337,24 @@ def _rank_session(tmp_path):
     return TrainingSession(config)
 
 
-def test_a_rank_keeps_the_writer_of_what_it_reads(tmp_path):
+def test_a_rank_refuses_a_rank_zero_writer_of_what_it_reads(tmp_path):
     session = _rank_session(tmp_path)
 
-    with pytest.warns(RuntimeWarning, match="df_rank_zero_writer"):
-        keep = session.rank_parallel_names()
+    with pytest.raises(
+            RuntimeError,
+            match="'df_reader' reads 'x', written by 'df_rank_zero_writer'",
+    ):
+        session.rank_parallel_names()
 
-    assert {"df_reader", "df_rank_zero_writer"} <= keep
 
-
-def test_a_worker_keeps_the_writer_from_the_recorded_state(tmp_path):
+def test_a_worker_finds_the_writer_from_the_recorded_state(tmp_path):
     state = _rank_session(tmp_path).get_state()
 
-    with pytest.warns(RuntimeWarning, match="df_rank_zero_writer"):
-        worker = load_session_for_worker(state, 1)
-
-    assert {"df_reader", "df_rank_zero_writer"} <= component_names(worker)
+    with pytest.raises(
+            RuntimeError,
+            match="'df_reader' reads 'x', written by 'df_rank_zero_writer'",
+    ):
+        load_session_for_worker(state, 1)
 
 
 def test_a_rank_plan_that_would_not_run_is_rejected_in_the_parent(

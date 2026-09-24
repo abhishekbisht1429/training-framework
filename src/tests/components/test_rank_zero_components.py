@@ -18,12 +18,14 @@ from training_framework.components import (
     LifecycleHook,
     Resource,
     Step,
+    activates,
     component_registry,
     hook,
     rank_zero_only,
     requires_resource,
     resource,
     step,
+    wraps,
 )
 from tests.test_utils import build_session
 from training_framework.session import TRAINING_SESSION_TYPE
@@ -168,17 +170,97 @@ def test_a_dependency_a_parallel_component_shares_is_kept(tmp_path):
     assert keep == {"ddp", "rz_model", "rz_train", "rz_shared"}
 
 
-def test_a_rank_zero_component_a_parallel_one_needs_is_kept_with_a_warning(tmp_path):
-    """Correctness over pruning: a prerequisite has to exist on the rank."""
+def test_a_rank_zero_component_a_parallel_one_needs_is_an_error(tmp_path):
+    """A prerequisite has to exist on the rank, and a rank-zero-only one
+    does not: the dependant must be declared rank-zero-only too."""
     make_resource("rz_model")
     rank_zero_only(make_resource("rz_report_sink"))
     make_step("rz_train", requires="rz_report_sink")
     active = {"ddp", "rz_model", "rz_train", "rz_report_sink"}
 
-    with pytest.warns(RuntimeWarning, match="rz_report_sink"):
-        keep = session_for(tmp_path, active).rank_parallel_names()
+    with pytest.raises(
+            RuntimeError, match="'rz_train' requires 'rz_report_sink'",
+    ):
+        session_for(tmp_path, active).rank_parallel_names()
 
-    assert keep == {"ddp", "rz_model", "rz_train", "rz_report_sink"}
+
+def test_a_config_declared_rank_zero_prerequisite_is_an_error_too(tmp_path):
+    make_resource("rz_model")
+    make_resource("rz_report_sink")
+    make_step("rz_train", requires="rz_report_sink")
+    active = {"ddp", "rz_model", "rz_train", "rz_report_sink"}
+
+    with pytest.raises(
+            RuntimeError,
+            match=r"'rz_train' requires 'rz_report_sink' "
+                  r"\(ddp.rank_zero_components\)",
+    ):
+        session_for(tmp_path, active).rank_parallel_names(
+            rank_zero_components=["rz_report_sink"],
+        )
+
+
+def test_activating_a_rank_zero_component_from_every_rank_is_an_error(tmp_path):
+    make_resource("rz_model")
+    rank_zero_only(make_hook("rz_report"))
+    activates("rz_report")(make_step("rz_train"))
+    active = {"ddp", "rz_model", "rz_train", "rz_report"}
+
+    with pytest.raises(RuntimeError, match="'rz_train' activates 'rz_report'"):
+        session_for(tmp_path, active).rank_parallel_names()
+
+
+def test_wrapping_a_rank_zero_hook_from_every_rank_is_an_error(tmp_path):
+    make_resource("rz_model")
+    rank_zero_only(make_hook("rz_report"))
+    wraps("rz_report")(make_hook("rz_wrapper"))
+    active = {"ddp", "rz_model", "rz_wrapper", "rz_report"}
+
+    with pytest.raises(RuntimeError, match="'rz_wrapper' wraps 'rz_report'"):
+        session_for(tmp_path, active).rank_parallel_names()
+
+
+def test_every_dependant_is_named_in_one_error(tmp_path):
+    make_resource("rz_model")
+    rank_zero_only(make_resource("rz_report_sink"))
+    make_step("rz_train", requires="rz_report_sink")
+    make_hook("rz_progress", requires="rz_report_sink")
+    active = {"ddp", "rz_model", "rz_train", "rz_progress", "rz_report_sink"}
+
+    with pytest.raises(RuntimeError) as error:
+        session_for(tmp_path, active).rank_parallel_names()
+
+    assert "'rz_train' requires 'rz_report_sink'" in str(error.value)
+    assert "'rz_progress' requires 'rz_report_sink'" in str(error.value)
+
+
+def test_a_rank_zero_component_may_depend_on_another(tmp_path):
+    make_resource("rz_model")
+    make_step("rz_train", requires="ddp")
+    rank_zero_only(make_resource("rz_report_sink"))
+    rank_zero_only(make_hook("rz_report", requires="rz_report_sink"))
+    active = {"ddp", "rz_model", "rz_train", "rz_report", "rz_report_sink"}
+
+    keep = session_for(tmp_path, active).rank_parallel_names()
+
+    assert keep == {"ddp", "rz_model", "rz_train"}
+
+
+def test_only_the_edge_from_an_every_rank_component_is_reported(tmp_path):
+    """Declaring the direct dependant fixes the chain behind it."""
+    make_resource("rz_model")
+    rank_zero_only(make_resource("rz_report_sink"))
+    rank_zero_only(make_resource("rz_report_writer", requires="rz_report_sink"))
+    make_step("rz_train", requires="rz_report_writer")
+    active = {
+        "ddp", "rz_model", "rz_train", "rz_report_writer", "rz_report_sink",
+    }
+
+    with pytest.raises(RuntimeError) as error:
+        session_for(tmp_path, active).rank_parallel_names()
+
+    assert "'rz_train' requires 'rz_report_writer'" in str(error.value)
+    assert "'rz_report_writer' requires" not in str(error.value)
 
 
 def test_the_config_key_drops_a_component_that_is_not_marked(tmp_path):

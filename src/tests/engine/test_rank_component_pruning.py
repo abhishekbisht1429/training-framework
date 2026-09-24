@@ -13,8 +13,16 @@ from typing import Any
 
 import pytest
 
+from training_framework.components import (
+    Resource,
+    Step,
+    rank_zero_only,
+    requires_resource,
+    resource,
+    step,
+)
 from training_framework.engine import TrainingEngine, load_session_for_worker
-from training_framework.session import TrainingSession
+from training_framework.session import TRAINING_SESSION_TYPE, TrainingSession
 from tests.test_utils import (
     COMPONENTS_PACKAGE,
     component_names,
@@ -187,6 +195,34 @@ def test_a_single_process_launch_settles_no_rank_plan(tmp_path):
         str(warning.message) for warning in caught
         if issubclass(warning.category, RuntimeWarning)
     ] == []
+
+
+def test_a_single_process_launch_refuses_a_rank_zero_prerequisite(tmp_path):
+    """Harmless on one rank, an error on two: fail on it now."""
+    @requires_resource("it_3d45_rank0_sink")
+    @step("it_3d45_reporting_train", session_type=TRAINING_SESSION_TYPE)
+    class ReportingTrain(Step):
+        def run(self, session) -> None:
+            pass
+
+    @rank_zero_only
+    @resource("it_3d45_rank0_sink", session_type=TRAINING_SESSION_TYPE)
+    class Sink(Resource):
+        def setup(self, session) -> None:
+            pass
+
+        def teardown(self, session) -> None:
+            pass
+
+    engine = _engine()
+    config = _session_config(tmp_path, world_size=1)
+    config.update({"it_3d45_reporting_train": {}, "it_3d45_rank0_sink": {}})
+
+    with pytest.raises(
+            RuntimeError,
+            match="'it_3d45_reporting_train' requires 'it_3d45_rank0_sink'",
+    ):
+        engine.register_session(config)
 
 
 def test_rank_zero_components_must_be_a_list_of_names(tmp_path):
