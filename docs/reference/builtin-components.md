@@ -41,7 +41,8 @@ The training defaults are equivalent to:
 ```yaml
 logger:
   log_every: 10
-  # log_file: ./runs/train.log  # optional; stdout when omitted
+  # log_file: ./runs/train.log  # optional; stdout when omitted. Its directory
+  #   is created; a resumed or extended run appends to it.
 
 checkpointer:
   checkpoint_every: 100

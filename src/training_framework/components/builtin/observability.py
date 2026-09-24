@@ -31,21 +31,30 @@ class Logger(LifecycleHook, ExtendableComponent):
     def __init__(self, config: dict):
         self._config = config
         self.call_every = config["log_every"]
-        self._log_file = config.get("log_file", sys.stdout)
+        # The configured path (None: stdout), and the stream written to,
+        # which is stdout whenever no file is open.
+        self._log_path = config.get("log_file")
+        self._log_file = sys.stdout
 
     def pre_session(self, session: Session) -> Any:
-        if self._log_file is not sys.stdout:
-            try:
-                self._log_file = open(self._config["log_file"], "w")
-            except FileNotFoundError:
-                print(
-                    "Unable to open log file for writing to "
-                    f"{self._config['log_file']}"
-                )
+        if self._log_path is None:
+            return
+        # A session resumed from a checkpoint continues the log of the run
+        # it came from; a fresh one starts it clean.
+        mode = "a" if session.iteration > 0 else "w"
+        try:
+            os.makedirs(os.path.dirname(self._log_path) or ".", exist_ok=True)
+            self._log_file = open(self._log_path, mode)
+        except OSError as error:
+            raise OSError(
+                f"Logger cannot open log_file {self._log_path!r} for "
+                f"writing: {error}"
+            ) from error
 
     def post_session(self, session) -> None:
-        if self._log_file is not sys.stdout:
-            self._log_file.close()
+        log_file, self._log_file = self._log_file, sys.stdout
+        if log_file is not sys.stdout:
+            log_file.close()
 
     def print(self, *args, **kwargs):
         print(*args, **kwargs, file=self._log_file)
