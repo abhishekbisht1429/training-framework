@@ -102,12 +102,23 @@ def _to_device(value: Any, device: torch.device, non_blocking: bool) -> Any:
 
 @dataclass
 class LoadBatchConfig:
-    key: str = "batch"
+    """`key` stores the whole batch under one key (default `batch`);
+    `fields` names its parts instead. Setting both is refused: one of them
+    would be ignored."""
+
+    key: str | None = None
     fields: Any = None
     non_blocking: bool = False
 
     def __post_init__(self):
-        self.key = _key(self.key, "key")
+        if self.fields is None:
+            self.key = _key("batch" if self.key is None else self.key, "key")
+        elif self.key is not None:
+            raise ValueError(
+                "key names the whole batch and fields name its parts; set "
+                f"one of them, not both (key={self.key!r}, "
+                f"fields={self.fields!r})"
+            )
         if self.fields is None:
             pass
         elif isinstance(self.fields, Mapping):
@@ -183,10 +194,23 @@ class LoadBatch(Step):
             return _returned(values)
         if not isinstance(batch, (list, tuple)) or len(batch) != len(fields):
             size = len(batch) if isinstance(batch, (list, tuple)) else None
+            if isinstance(batch, Mapping):
+                hint = (
+                    " A dict batch is picked apart with a mapping of key to "
+                    "field, e.g. fields: {inputs: <field>}."
+                )
+            elif size is None:
+                hint = (
+                    " fields unpacks a tuple or list batch; to store this "
+                    f"batch whole, set key: {fields[0]} instead."
+                )
+            else:
+                hint = ""
             raise ValueError(
                 f"{self.name}.fields names {len(fields)} parts, but the "
                 f"batch is a {type(batch).__name__}"
                 + (f" of {size}" if size is not None else "")
+                + "." + hint
             )
         return _returned(dict(zip(fields, batch)))
 
@@ -322,6 +346,11 @@ class _CallStep(Step):
         return _returned(dict(zip(outputs, result)))
 
 
+def _shares_parameters(module: nn.Module, other: nn.Module) -> bool:
+    theirs = {id(parameter) for parameter in other.parameters()}
+    return any(id(parameter) in theirs for parameter in module.parameters())
+
+
 def _bound_method(model, method: str, step_name: str):
     target = getattr(model, method, None)
     if not callable(target):
@@ -362,20 +391,60 @@ class Forward(_CallStep):
 
     config_schema = ForwardConfig
 
+    def __init__(self, config=None):
+        super().__init__(config)
+        self._route_checked = False
+
     @override
     def run(self, session: Session, /, **inputs: Any) -> Any:
         return self._call(self._target(), inputs)
 
     def _target(self):
         model = self.get_dependency("model")
+        wrapped = self.get_dependency("ddp").wrapped_model
+        if not self._route_checked:
+            self._check_route(model, getattr(wrapped, "module", None))
+            self._route_checked = True
         if self._cfg.method is not None:
             return _bound_method(model, self._cfg.method, self.name)
-        wrapped = self.get_dependency("ddp").wrapped_model
         if getattr(wrapped, "module", None) is model:
             return wrapped
         if not callable(model):
             raise TypeError(f"{self.name}: {type(model).__name__} is not callable")
         return model
+
+    def _check_route(self, model, wrapped_module) -> None:
+        """Refuse a call that would run the parameters DDP wraps outside the
+        wrapper with gradients on.
+
+        DDP averages a gradient across ranks only for a forward pass it ran.
+        Called directly -- by `method`, or through a module bound here that
+        shares parameters with the wrapped one -- those gradients stay local
+        to each rank, so every rank trains its own copy, and nothing fails.
+        Refused on any world size: a configuration valid on one rank has to
+        be valid on eight. A bound object that is not a module but reaches
+        into the wrapped model itself cannot be seen here.
+        """
+        if self._cfg.no_grad or wrapped_module is None:
+            return
+        method = self._cfg.method
+        if model is wrapped_module:
+            if method is None:
+                return
+            called = f"{type(model).__name__}.{method}"
+        elif isinstance(model, nn.Module) and _shares_parameters(
+                model, wrapped_module,
+        ):
+            called = type(model).__name__ + (f".{method}" if method else "")
+        else:
+            return
+        raise RuntimeError(
+            f"{self.name} calls {called} directly, not through the DDP "
+            "wrapper, with gradients on: DDP would not average those "
+            "gradients across ranks, so each rank would train its own copy. "
+            "Call it through the wrapper (drop `method`, or bind the model "
+            "DDP wraps), or set no_grad: true for a path without gradients."
+        )
 
 
 @dataclass(kw_only=True)

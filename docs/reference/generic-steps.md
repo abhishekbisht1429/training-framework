@@ -34,7 +34,7 @@ anything else is left as it is -- and stores it.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `key` | string | `batch` | Store the whole batch under this key. Ignored when `fields` is given |
+| `key` | string | `batch` | Store the whole batch under this key. Not allowed together with `fields` |
 | `fields` | list or mapping | none | Name the parts of the batch instead; see below |
 | `non_blocking` | bool | `false` | Passed to `.to()` |
 
@@ -102,8 +102,16 @@ component_bindings:
 When the model is the one `ddp` wraps, `forward` calls it **through the DDP
 wrapper**, so its gradients are synchronised across ranks. Any other model --
 a teacher, a frozen encoder -- is called directly. `method` always calls the
-model directly, bypassing DDP, so use it only for paths without gradients
+model directly, bypassing DDP, so it is for paths without gradients
 (`method: encode` with `no_grad: true`).
+
+This is enforced. DDP averages a gradient across ranks only for a forward pass
+it ran, so a `forward` that would run the wrapped model's parameters outside
+the wrapper with gradients on -- through `method`, or through a bound module
+that shares parameters with it, such as a part of it -- fails on its first
+call, naming the step, on any number of ranks. Otherwise each rank would train
+its own copy without any error. Bind modules, not objects that call into the
+wrapped model: such an object cannot be checked.
 
 Calling the DDP-wrapped model more than once before one `backward` is
 fragile under DDP; to pass two inputs through it, concatenate them first (see

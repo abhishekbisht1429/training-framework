@@ -23,6 +23,7 @@ from training_framework.components import (
     StatefulResource,
     Step,
     reads,
+    requires_resource,
     resource,
     step,
 )
@@ -402,6 +403,7 @@ def test_the_trained_model_is_called_through_the_ddp_wrapper(tmp_path):
         **{
             "forward#encoded": {
                 "args": ["inputs"], "outputs": "encoded", "method": "encode",
+                "no_grad": True,
             },
             "compute#loss": {
                 "function": "mse_loss",
@@ -721,3 +723,145 @@ def test_a_pickled_analysis_forward_still_runs_without_gradients(tmp_path):
     assert not seen[0].requires_grad
     with torch.no_grad():
         torch.testing.assert_close(seen[0], model(INPUTS))
+
+
+# -- guards on how values reach and leave a call -----------------------------------------
+
+
+def test_load_batch_refuses_key_together_with_fields(tmp_path):
+    _register()
+    config = _config(
+        tmp_path, load_batch={"key": "batch", "fields": ["inputs", "targets"]},
+    )
+
+    with pytest.raises(ValueError, match="set one of them, not both"):
+        TrainingSession(config)
+
+
+def test_load_batch_stores_the_whole_batch_under_batch_by_default(tmp_path):
+    _register()
+    seen = _recorder("batch")
+    config = _config(tmp_path, max_iterations=1, load_batch={}, cmp_recorder={})
+    del config["optimizer"]
+    with _session(config) as session:
+        next(session)
+
+    inputs, targets = seen[0]["batch"]
+    assert inputs.shape == (4, 2) and targets.shape == (4, 1)
+
+
+@pytest.mark.parametrize(
+    ("sample", "hint"),
+    [
+        ("tensor", "to store this batch whole, set key: inputs instead"),
+        ("dict", "A dict batch is picked apart with a mapping"),
+    ],
+)
+def test_fields_over_a_batch_that_is_not_a_sequence_suggest_the_fix(
+        tmp_path, sample, hint,
+):
+    _register(sample="dict")
+    if sample == "tensor":
+        @resource("cmp_dataset", overwrite=True)
+        class TensorDataset(_InertResource):
+            def __len__(self):
+                return len(INPUTS)
+
+            def __getitem__(self, index):
+                return INPUTS[index]
+
+    config = _config(tmp_path, max_iterations=1, load_batch={"fields": ["inputs"]})
+    del config["optimizer"]
+    with _session(config) as session:
+        with pytest.raises(ValueError, match=hint):
+            next(session)
+
+
+def _gradient_config(tmp_path, **forward):
+    config = _config(
+        tmp_path,
+        max_iterations=1,
+        load_batch={"fields": ["inputs", "targets"]},
+        forward={"args": ["inputs"], "outputs": "prediction"},
+        cmp_recorder={},
+        **{
+            "forward#other": {"args": ["inputs"], "outputs": "other", **forward},
+            "compute#loss": {
+                "function": "mse_loss",
+                "args": ["prediction", "targets"],
+                "outputs": "loss",
+            },
+        },
+    )
+    return config
+
+
+def test_a_method_of_the_trained_model_with_gradients_is_refused(tmp_path):
+    _register()
+    _recorder("other")
+    session = _session(_gradient_config(tmp_path, method="encode"))
+
+    with session:
+        with pytest.raises(
+                RuntimeError,
+                match=r"forward#other calls Model\.encode directly, not "
+                      r"through the DDP wrapper, with gradients on",
+        ):
+            next(session)
+
+
+def _register_part():
+    """A module sharing the trained model's parameters -- a part of it."""
+
+    @requires_resource("cmp_model")
+    @resource("cmp_part", overwrite=True)
+    class Part(nn.Module, _InertResource):
+        def __init__(self, config=None):
+            nn.Module.__init__(self)
+            self.linear = self.get_dependency("cmp_model").linear
+
+        def forward(self, x):
+            return self.linear(x)
+
+
+@pytest.mark.parametrize(("no_grad", "refused"), [(False, True), (True, False)])
+def test_a_part_of_the_trained_model_runs_through_ddp_or_without_gradients(
+        tmp_path, no_grad, refused,
+):
+    _register()
+    _register_part()
+    seen = _recorder("other")
+    config = _gradient_config(tmp_path, no_grad=no_grad)
+    config["cmp_part"] = {}
+    config["component_bindings"]["forward#other"] = {"model": "cmp_part"}
+    session = _session(config)
+
+    with session:
+        if refused:
+            with pytest.raises(RuntimeError, match=r"forward#other calls Part directly"):
+                next(session)
+        else:
+            next(session)
+            assert not seen[0]["other"].requires_grad
+
+
+def test_a_separate_model_with_gradients_is_called_directly(tmp_path):
+    _register()
+
+    @resource("cmp_teacher", overwrite=True)
+    class Teacher(nn.Module, _InertResource):
+        def __init__(self, config=None):
+            nn.Module.__init__(self)
+            self.linear = nn.Linear(2, 1)
+
+        def forward(self, x):
+            return self.linear(x)
+
+    seen = _recorder("other")
+    config = _gradient_config(tmp_path)
+    config["cmp_teacher"] = {}
+    config["component_bindings"]["forward#other"] = {"model": "cmp_teacher"}
+    with _session(config) as session:
+        next(session)
+
+    assert seen[0]["other"].requires_grad
