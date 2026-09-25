@@ -22,8 +22,10 @@ from tests.test_utils import (
     stub_process_group,
 )
 from training_framework.components import (
+    IterationHook,
     StatefulResource,
     Step,
+    hook,
     requires_resource,
     requires_step,
     resource,
@@ -898,3 +900,56 @@ def test_the_gradient_norm_is_reported_only_for_an_iteration_that_stepped(tmp_pa
 
     assert norms[0] is None and norms[2] is None
     assert norms[1] is not None and norms[3] is not None
+
+
+# -- when gradients are cleared ----------------------------------------------------------
+
+
+def test_a_gradient_made_after_the_step_is_not_in_the_next_update(tmp_path):
+    @requires_step("optimizer_step")
+    @requires_resource("chain_model")
+    @step("chain_stray_backward", overwrite=True)
+    class StrayBackward(Step):
+        """Backpropagates something unrelated after the optimizer stepped."""
+
+        def run(self, session):
+            model = self.get_dependency("chain_model")
+            (sum(p.sum() for p in model.parameters()) * 100.0).backward()
+
+    session = _gradient_session(
+        tmp_path, [1.0, 1.0], max_iterations=2,
+        optimizer={"optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}}},
+        chain_stray_backward={},
+    )
+    _run(session)
+
+    torch.testing.assert_close(_weights(session), _initial_weights() - 2.0)
+
+
+def test_post_iteration_hooks_can_read_the_gradients_of_the_step(tmp_path):
+    seen = []
+
+    @requires_resource("chain_model")
+    @hook("chain_gradient_reader", overwrite=True)
+    class GradientReader(IterationHook):
+        call_every = 1
+
+        def pre_iteration_callback(self, session):
+            pass
+
+        def post_iteration_callback(self, session):
+            model = self.get_dependency("chain_model")
+            seen.append([None if p.grad is None else p.grad.clone()
+                         for p in model.parameters()])
+
+    session = _gradient_session(
+        tmp_path, [2.0, 3.0], max_iterations=2,
+        optimizer={"optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}}},
+        chain_gradient_reader={},
+    )
+    _run(session)
+
+    for gradients, expected in zip(seen, (2.0, 3.0)):
+        assert all(gradient is not None for gradient in gradients)
+        for gradient in gradients:
+            torch.testing.assert_close(gradient, torch.full_like(gradient, expected))

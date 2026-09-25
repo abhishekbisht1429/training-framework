@@ -33,11 +33,18 @@ want to configure one. Every post-iteration hook -- `checkpointer`, `logger`,
 | `backward` | Step | Leaves autocast and backpropagates the loss (averaged over its accumulation group, scaled for fp16); unscales fp16 gradients on an iteration that steps | [`backward`](#backward) |
 | `freeze_gradients` | Step | Sets matching parameters' gradients to None until an iteration | [`freeze_gradients`](#freeze_gradients) |
 | `clip_gradients` | Step | Clips, or only measures, the total gradient norm | [`clip_gradients`](#clip_gradients) |
-| `optimizer_step` | Step | Steps the optimizer and the schedule, then clears the gradients | none |
+| `optimizer_step` | Step | Steps the optimizer and the schedule; the gradients stay until the next iteration (group) begins | none |
 
 `freeze_gradients` and `clip_gradients` run, and edit gradients, only on
 iterations that step (see [gradient accumulation](#gradient-accumulation)),
 so they always see complete, unscaled gradients.
+
+Gradients are zeroed when an iteration begins -- in `forward_context`, before
+any step -- or, with gradient accumulation, when an accumulation group begins.
+So every step starts from clean gradients: anything backpropagated after
+`optimizer_step`, by a later step or a hook, never reaches the next update.
+The step's gradients stay readable until then, so a post-iteration hook can
+inspect them.
 
 ## `optimizer`
 

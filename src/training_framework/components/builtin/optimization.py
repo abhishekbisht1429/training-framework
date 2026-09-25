@@ -935,6 +935,12 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         self._group_size = max(1, group_end - self._group_start + 1)
         if self._backward_iteration == iteration:
             self._discard_failed_attempt(iteration)
+        if iteration == self._group_start:
+            # Every group starts from clean gradients, as every iteration
+            # does without accumulation: whatever ran after the last step --
+            # a later step, a hook, a failed attempt -- is not carried into
+            # this one. Mid-group the sum being accumulated is kept.
+            self._optimizer.zero_grad()
         self._iteration = iteration
         if not self._boundary:
             no_sync = getattr(
@@ -957,9 +963,10 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         same iteration can be run again. If the failed attempt got past
         `backward`, its gradients are still there, and at a boundary fp16
         gradients were already unscaled. At the start of a group only that
-        attempt contributed, so they are cleared and the scaler gets fresh
-        per-step bookkeeping (rebuilt from its own state, keeping its scale).
-        Mid-group they cannot be told apart from the micro-batches before it.
+        attempt contributed: `begin_iteration` clears them as it clears every
+        group's, and the scaler gets fresh per-step bookkeeping here (rebuilt
+        from its own state, keeping its scale). Mid-group they cannot be told
+        apart from the micro-batches before it.
         """
         if iteration != self._group_start:
             raise RuntimeError(
@@ -969,7 +976,6 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                 "iterations, so it cannot be run again. Resume from the last "
                 "checkpoint instead."
             )
-        self._optimizer.zero_grad()
         if self._grad_scaler is not None:
             fresh = torch.amp.GradScaler(self._device_type)
             fresh.load_state_dict(self._grad_scaler.state_dict())
@@ -1079,9 +1085,10 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             ) from error
 
     def step(self, metric: Any = None) -> None:
-        """Apply the gradients, advance the schedule, and clear them.
+        """Apply the gradients and advance the schedule.
 
-        Under fp16 the scaler skips a step whose gradients overflowed; the
+        The gradients are left in place, so post-iteration hooks can read
+        them; the next group clears them when it begins. Under fp16 the scaler skips a step whose gradients overflowed; the
         schedule then does not advance either, since no step was taken.
         """
         skipped = False
@@ -1107,7 +1114,6 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                 # wrap a cosine back up to its base lr, and OneCycleLR
                 # refuses outright.
                 self._lr_scheduler.step()
-        self._optimizer.zero_grad()
 
     def record_grad_norm(self, norm: float) -> None:
         self._grad_norm = float(norm)
