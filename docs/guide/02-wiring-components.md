@@ -397,7 +397,9 @@ shows such a read as `reads: total_loss (as loss)`.
   writer's: a step cannot read what a `call_every: 5` hook writes, and a hook
   reading it needs `call_every: 5`, `10`, ... Every iteration hook's
   `call_every` must be a positive integer; that is checked when the session
-  is built, for every hook. Only steps and iteration hooks take part in an
+  is built, for every hook. A step that sets `call_every` is rejected
+  (steps run every iteration), so a periodic writer is always a hook whose
+  readers are checked against its real cadence. Only steps and iteration hooks take part in an
   iteration: declaring keys on anything else -- a session hook, a resource --
   is rejected.
 

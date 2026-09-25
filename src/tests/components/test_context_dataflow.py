@@ -460,6 +460,68 @@ def test_an_invalid_cadence_is_reported_for_a_hook_that_neither_wraps_nor_reads(
         build_session(tmp_path, {"df_lonely": {}})
 
 
+def test_a_step_with_a_cadence_is_refused_rather_than_run_every_iteration(
+        tmp_path,
+):
+    # A periodic validation step: its call_every would be ignored, so the
+    # hook reading its result every 1000 iterations would pass a check made
+    # against a cadence of 1.
+    @rank_zero_only
+    @writes("validation_result")
+    @step("df_validation")
+    class Validation(Step):
+        def __init__(self, config):
+            self.call_every = config["validate_every"]
+
+        def run(self, session):
+            return 0.0
+
+    @rank_zero_only
+    @hook("df_validation_metrics")
+    @reads("validation_result")
+    class ValidationMetrics(_Hook):
+        call_every = 1000
+
+    with pytest.raises(
+            RuntimeError,
+            match=r"Step.df_validation is a Step but sets call_every=20000.*"
+                  r"make it an IterationHook",
+    ):
+        build_session(tmp_path, {
+            "df_validation": {"validate_every": 20000},
+            "df_validation_metrics": {},
+        })
+
+
+def test_a_step_class_with_a_cadence_is_refused_even_with_no_reader(tmp_path):
+    step("df_periodic")(type("Periodic", (Step,), {
+        "call_every": 5, "run": lambda self, session: None,
+    }))
+
+    with pytest.raises(RuntimeError, match="is a Step but sets call_every=5"):
+        build_session(tmp_path, {"df_periodic": {}})
+
+
+def test_a_step_with_a_cadence_registered_by_hand_is_refused_before_it_runs(
+        tmp_path,
+):
+    ran = []
+
+    class Periodic(Step):
+        call_every = 5
+
+        def run(self, session):
+            ran.append(session.iteration)
+
+    session = build_session(tmp_path)
+    session.add_step(step("df_hand_periodic")(Periodic)())
+
+    with pytest.raises(RuntimeError, match="is a Step but sets call_every=5"):
+        with session:
+            list(session)
+    assert ran == []
+
+
 # -- values passed in and returned --------------------------------------------------
 
 

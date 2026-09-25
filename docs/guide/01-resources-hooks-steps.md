@@ -65,6 +65,11 @@ An iteration hook must expose a positive `call_every` integer. An iteration hook
 
 The first and final iterations therefore invoke every iteration hook, regardless of `call_every`.
 
+Steps have no cadence: every step runs on every iteration. Work that should run
+every N iterations, such as validation, is an iteration hook with that
+`call_every`. A step that sets `call_every` is rejected when the session is
+built, since the value would otherwise be silently ignored.
+
 An iteration hook that declares `iteration_context` keys with `@reads` /
 `@writes` receives its reads as keyword arguments of `post_iteration_callback`
 and returns its writes from `pre_iteration_callback` (see

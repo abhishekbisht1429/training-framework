@@ -303,6 +303,8 @@ def topological_sort_components(
         for component in selected_components:
             if isinstance(component, IterationHook):
                 iteration_cadence(component)
+            elif isinstance(component, Step):
+                _reject_step_cadence(component)
 
     dependents_graph: dict[str, list[str]] = {
         component_id: [] for component_id in prerequisites_graph
@@ -342,6 +344,26 @@ def topological_sort_components(
         component_id: index
         for index, component_id in enumerate(sorted_components)
     }
+
+
+def _reject_step_cadence(step: Step) -> None:
+    """Refuse a `call_every` on a step, which the runtime would ignore.
+
+    Every step runs on every iteration; only an iteration hook has a
+    cadence. A step setting one would still run each iteration, and a
+    reader of its keys would be checked against a cadence of 1 -- a
+    periodic step that is neither periodic nor reported.
+    """
+    if not hasattr(step, "call_every"):
+        return
+    raise RuntimeError(
+        f"{step.id} is a Step but sets call_every={step.call_every!r}, which "
+        "steps do not have: every step runs on every iteration. To run it "
+        "every N iterations, make it an IterationHook with that call_every "
+        "(it returns its writes from pre_iteration_callback and takes its "
+        "reads in post_iteration_callback); readers of its keys are then "
+        "checked against that cadence."
+    )
 
 
 def _add_execution_edge(
