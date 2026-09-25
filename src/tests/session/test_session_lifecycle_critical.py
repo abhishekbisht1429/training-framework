@@ -87,10 +87,12 @@ class TraceHookBase(LifecycleHook):
         call_every: int = 1,
         fail_teardown: bool = False,
         fail_rollback: bool = False,
+        reads_payload: bool = False,
     ):
         self.label = label
         self.trace = trace
         self.call_every = call_every
+        self.reads_payload = reads_payload
         self.fail_teardown = fail_teardown
         self.fail_rollback = fail_rollback
         self.setup_calls = 0
@@ -128,42 +130,54 @@ class TraceHookBase(LifecycleHook):
     def pre_iteration_callback(self, session: TrainingSession) -> None:
         self.pre_iterations.append(session.iteration)
         self.trace.append(f"hook:{self.label}:pre:{session.iteration}")
-        session.iteration_context.setdefault("pre_hooks", []).append(self.label)
 
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(
+            self, session: TrainingSession, /, **reads,
+    ) -> None:
         self.post_iterations.append(session.iteration)
         self.trace.append(f"hook:{self.label}:post:{session.iteration}")
-        self.post_payloads.append(session.iteration_context["payload"])
+        if self.reads_payload:
+            self.post_payloads.append(reads["payload"])
+
+    def context_reads(self) -> dict[str, str]:
+        return {"payload": "payload"} if self.reads_payload else {}
 
 
 class TraceStepBase(Step):
+    """Writes `(iteration, labels so far)` under `writes_to`, extending what
+    the step it `reads_from` wrote -- a chain of steps building one payload."""
+
     def __init__(
         self,
         label: str,
         trace: list[str],
         *,
         fail: bool = False,
+        reads_from: str | None = None,
+        writes_to: str = "payload",
     ):
         self.label = label
         self.trace = trace
         self.fail = fail
+        self.reads_from = reads_from
+        self.writes_to = writes_to
         self.calls = 0
 
-    def run(self, session: TrainingSession) -> None:
+    def context_reads(self) -> dict[str, str]:
+        return {} if self.reads_from is None else {"previous": self.reads_from}
+
+    def context_writes(self) -> dict[str, str]:
+        return {self.writes_to: self.writes_to}
+
+    def run(self, session: TrainingSession, /, **reads):
         self.calls += 1
         self.trace.append(f"step:{self.label}:{session.iteration}")
-
-        steps = session.iteration_context.setdefault("steps", [])
-        steps.append(self.label)
-        session.iteration_context["payload"] = (
-            session.iteration,
-            tuple(steps),
-        )
         session.session_context["last_iteration"] = session.iteration
 
         if self.fail:
-            session.iteration_context["failure_marker"] = self.label
             raise LifecycleStepError(f"step {self.label} failed")
+        _, labels = reads.get("previous", (session.iteration, ()))
+        return session.iteration, labels + (self.label,)
 
 def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path):
 
@@ -198,10 +212,10 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
 
     resource_a = CriticalLifecycleResourceA("A", trace)
     resource_b = CriticalLifecycleResourceB("B", trace)
-    hook_a = CriticalLifecycleHookA("A", trace, call_every=1)
-    hook_b = CriticalLifecycleHookB("B", trace, call_every=3)
-    step_a = CriticalLifecycleStepA("A", trace)
-    step_b = CriticalLifecycleStepB("B", trace)
+    hook_a = CriticalLifecycleHookA("A", trace, call_every=1, reads_payload=True)
+    hook_b = CriticalLifecycleHookB("B", trace, call_every=3, reads_payload=True)
+    step_a = CriticalLifecycleStepA("A", trace, writes_to="partial")
+    step_b = CriticalLifecycleStepB("B", trace, reads_from="partial")
 
     session.register_resource(resource_a)
     session.register_resource(resource_b)
@@ -221,8 +235,9 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
                 break
 
             # Post callbacks have already observed the values, and successful
-            # iteration completion must clear the transient context.
-            assert session.iteration_context == {}
+            # iteration completion must clear the transient context. There is
+            # no public view of it, so the runtime's own store is checked.
+            assert session._shared_state == {}
 
 
     assert completed == [1, 2, 3, 4, 5]
@@ -278,7 +293,7 @@ def test_lifecycle_order_hook_cadence_and_iteration_context_visibility(tmp_path)
             RuntimeError,
             match="This instance of TrainingSession is not initialized yet!",
     ):
-        _ = session.iteration_context
+        next(session)
 
 
 def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
@@ -300,7 +315,7 @@ def test_paused_session_reenters_components_and_resumes_to_finished(tmp_path):
     )
 
     resource_a = CriticalLifecycleResourceA("A", trace)
-    hook_obj = CriticalLifecycleHookA("A", trace, call_every=1)
+    hook_obj = CriticalLifecycleHookA("A", trace, call_every=1, reads_payload=True)
     step_obj = CriticalLifecycleStepA("A", trace)
 
     session.register_resource(resource_a)

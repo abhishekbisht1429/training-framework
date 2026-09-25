@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 def clear_iteration_state(session: "Session") -> None:
     session._shared_state.clear()
+    session._iteration_generation += 1
 
 
 def _reads_for(session: "Session", reader) -> dict[str, Any]:
@@ -44,9 +45,7 @@ def _store_writes(session: "Session", writer, result: Any, callback: str) -> Non
     step can write a tuple or a dict. Several are a tuple in declaration
     order or a mapping by output name, exactly; nothing to write means None.
     No declared output may be None, which is what a forgotten `return`
-    produces.
-    Returning is the only way a declared key is written: finding it already
-    in the context means something wrote it directly, which is refused.
+    produces. Returning is the only way a key is written.
     """
     outputs = context_mapping(writer, "writes")
     shown = f"{writer.id}.{callback}"
@@ -80,14 +79,6 @@ def _store_writes(session: "Session", writer, result: Any, callback: str) -> Non
             "forgotten `return` looks like this)."
         )
     context = session._shared_state
-    for name, key in outputs.items():
-        if key in context:
-            raise RuntimeError(
-                f"iteration_context '{key}', which {writer.id} declares "
-                f"writing, was already written when {shown} returned. A "
-                "declared key is written only by returning it: return the "
-                "value instead of storing it in session.iteration_context."
-            )
     for name, key in outputs.items():
         context[key] = values[name]
 

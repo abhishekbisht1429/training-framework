@@ -639,20 +639,6 @@ def test_a_declared_output_returned_as_none_is_refused(tmp_path):
         _run_one(session)
 
 
-def test_a_declared_key_written_directly_is_refused(tmp_path):
-    @step("df_direct")
-    @writes("x")
-    class Direct(Step):
-        def run(self, session):
-            session.iteration_context["x"] = 1.0
-            return 1.0
-
-    session = build_session(tmp_path, {"df_direct": {}})
-
-    with pytest.raises(RuntimeError, match="'x'.*already written.*return the value"):
-        _run_one(session)
-
-
 def test_a_value_returned_without_declared_writes_is_refused(tmp_path):
     @step("df_forgetful")
     class Forgetful(Step):
@@ -760,3 +746,29 @@ def test_a_read_named_like_a_positional_only_parameter_is_passed(tmp_path):
     _run_one(build_session(tmp_path, {"df_head": {}, "df_reader": {}}))
 
     assert seen == [{"session": 1.0}]
+
+
+def test_values_cannot_be_exchanged_without_declaring_them(tmp_path):
+    # An undeclared reader of a rarer writer used to get None, unchecked, on
+    # the iterations the writer skipped. There is now no way to reach the
+    # context except through @reads / @writes, which are checked.
+    hook("df_every_three")(writes("tick")(
+        type("EveryThree", (_Hook,), {"call_every": 3})
+    ))
+    seen = []
+
+    @hook("df_undeclared_reader")
+    class UndeclaredReader(_Hook):
+        call_every = 2
+
+        def post_iteration_callback(self, session, **values):
+            seen.append(getattr(session, "iteration_context", "no accessor"))
+
+    session = build_session(
+        tmp_path, {"df_every_three": {}, "df_undeclared_reader": {}},
+    )
+    with session:
+        next(iter(session))
+
+    assert not hasattr(session, "iteration_context")
+    assert seen == ["no accessor"]

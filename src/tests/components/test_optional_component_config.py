@@ -16,6 +16,7 @@ from training_framework.components import (
     resource,
     step,
     wraps,
+    writes,
 )
 from training_framework.session import TrainingSession
 from tests.test_utils import configurator_for, has_resource_named, resource_named
@@ -34,12 +35,13 @@ def _session_config(tmp_path):
 
 def test_empty_mapping_activates_component_and_supplies_config(tmp_path):
     @step("optional_config_step")
+    @writes("configured_value")
     class OptionalConfigStep(Step):
         def __init__(self, config):
             self.config = dict(config)
 
         def run(self, session):
-            session.iteration_context["configured_value"] = self.config["value"]
+            return self.config["value"]
 
     @step("unselected_step")
     class UnselectedStep(Step):

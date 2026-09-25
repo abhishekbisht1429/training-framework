@@ -112,16 +112,4 @@ def test_requires_context_for_shared_state_and_iteration(minimal_session_config_
             RuntimeError,
             match="This instance of TrainingSession is not initialized yet!",
     ):
-        session.iteration_context["x"] = 1
-
-    with pytest.raises(
-            RuntimeError,
-            match="This instance of TrainingSession is not initialized yet!",
-    ):
-        session.iteration_context["x"]
-
-    with pytest.raises(
-            RuntimeError,
-            match="This instance of TrainingSession is not initialized yet!",
-    ):
         next(session)

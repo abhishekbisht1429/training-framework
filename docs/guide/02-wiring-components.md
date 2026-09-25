@@ -323,9 +323,9 @@ shows the relationship as `activates: Step.optimizer_step`.
 
 ## Ordering by dataflow
 
-Steps pass values through `session.iteration_context`. A step or an
-iteration hook can declare the keys it reads and writes, and the session then
-orders and checks steps by them. This section gives the rules for writing
+Steps and iteration hooks pass values through the iteration context, and
+only by declaring the keys they read and write; the session then orders and
+checks them by those keys. There is no direct access to the context. This section gives the rules for writing
 such a component; for the everyday case -- built-in steps configured in YAML
 -- see [Building an iteration](03-building-an-iteration.md).
 
@@ -357,8 +357,7 @@ The declarations drive the values:
   a tuple or a dict. Several: a tuple in declaration order, or a mapping with
   exactly the declared names. A declared output may not be `None` (that is
   what a forgotten `return` gives), and a component that declares no writes
-  must return `None`. Returning is the only way to write a declared key:
-  storing it in `session.iteration_context` yourself is refused.
+  must return `None`. Returning is the only way to write a key.
 
 A component whose keys come from its configuration overrides
 `context_reads()` / `context_writes()`, returning a mapping of *name* ->
@@ -412,9 +411,8 @@ came back. A rank of a distributed run
 keeps the writer of every key its components read -- see
 [What each rank builds](06-distributed-training.md#what-each-rank-builds).
 
-Declaring is optional: a component that declares nothing is neither ordered
-nor checked by keys, and may still use `session.iteration_context` directly
-(it must return `None`). The built-in `backward` does
+A component that declares nothing exchanges no values through the context
+(and must return `None`). The built-in `backward` does
 declare a read of `loss`, so a step of yours that produces the loss has to
 declare `@writes("loss")`.
 

@@ -18,14 +18,17 @@ import torch
 from training_framework.components.builtin import Checkpointer
 from training_framework.components import (
     hook,
+    reads,
     resource,
     step, Stateful, SessionHook, LifecycleHook, Resource, Step,
+    writes,
 )
 from training_framework.session import TrainingSession
 
 from tests.test_utils import make_config, resource_named
 
 
+@writes("accumulator")
 class CriticalCheckpointAccumulatorStepBase(Step, Stateful):
     """A deterministic stateful step suitable for exact resume comparisons."""
 
@@ -35,12 +38,12 @@ class CriticalCheckpointAccumulatorStepBase(Step, Stateful):
         self.value = start
         self.history: list[int] = []
 
-    def run(self, session: TrainingSession) -> None:
+    def run(self, session: TrainingSession) -> int:
         self.value += self.increment
         self.history.append(self.value)
 
-        session.iteration_context["accumulator"] = self.value
         session.session_context["last_accumulator"] = self.value
+        return self.value
 
     def get_state(self) -> Any:
         return {
@@ -68,6 +71,7 @@ def test_pickle_resume_matches_uninterrupted_run_and_preserves_rng_streams(tmp_p
     """A resumed run must produce exactly the same RNG samples as a full run."""
 
     @step("critical_checkpoint_rng_step")
+    @writes("rng_sample")
     class CriticalCheckpointRngStep(Step, Stateful):
         """Records values from every RNG whose state TrainingSession saves."""
 
@@ -83,7 +87,7 @@ def test_pickle_resume_matches_uninterrupted_run_and_preserves_rng_streams(tmp_p
                 int(torch.randint(0, 10 ** 9, (1,)).item()),
             )
             self.samples.append(sample)
-            session.iteration_context["rng_sample"] = sample
+            return sample
 
         def get_state(self) -> Any:
             return {"samples": list(self.samples)}
@@ -124,7 +128,7 @@ def test_pickle_resume_matches_uninterrupted_run_and_preserves_rng_streams(tmp_p
             RuntimeError,
             match="This instance of TrainingSession is not initialized yet!",
     ):
-        _ = restored.iteration_context
+        next(restored)
 
     assert run_to_completion(restored) == [4, 5, 6]
     assert restored_step.samples == expected_samples
@@ -134,6 +138,7 @@ def test_checkpoint_resume_preserves_model_and_optimizer_state(tmp_path):
     """Momentum and tensor state must match an uninterrupted optimization run."""
 
     @step("critical_checkpoint_optimizer_step")
+    @writes("optimized_weight")
     class CriticalCheckpointOptimizerStep(Step, Stateful):
         """A tiny deterministic optimization step with momentum state."""
 
@@ -166,7 +171,7 @@ def test_checkpoint_resume_preserves_model_and_optimizer_state(tmp_path):
 
             current_weight = float(self.weight.detach().item())
             self.weight_history.append(current_weight)
-            session.iteration_context["optimized_weight"] = current_weight
+            return current_weight
 
         def get_state(self) -> Any:
             return {
@@ -329,6 +334,7 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
             self.runtime_events.append("teardown")
 
     @hook("critical_checkpoint_stateful_hook")
+    @reads("accumulator")
     class CriticalCheckpointStatefulHook(LifecycleHook, Stateful):
         def __init__(self, label: str, call_every: int = 1):
             self.label = label
@@ -346,8 +352,10 @@ def test_checkpoint_restores_constructor_args_stateful_state_and_stateless_confi
         def pre_iteration_callback(self, session: TrainingSession) -> None:
             pass
 
-        def post_iteration_callback(self, session: TrainingSession) -> None:
-            self.observed_values.append(session.iteration_context["accumulator"])
+        def post_iteration_callback(
+                self, session: TrainingSession, *, accumulator: int,
+        ) -> None:
+            self.observed_values.append(accumulator)
 
         def get_state(self) -> Any:
             return {
@@ -486,6 +494,7 @@ def test_component_constructors_do_not_advance_restored_rng_streams(tmp_path):
     """Component reconstruction must not perturb checkpointed global RNG state."""
 
     @step("critical_checkpoint_random_init_step")
+    @writes("rng_sample")
     class CriticalCheckpointRandomInitStep(Step, Stateful):
         """Consumes global RNG state in its constructor to exercise restore order."""
 
@@ -504,7 +513,7 @@ def test_component_constructors_do_not_advance_restored_rng_streams(tmp_path):
                 int(torch.randint(0, 10 ** 9, (1,)).item()),
             )
             self.samples.append(sample)
-            session.iteration_context["rng_sample"] = sample
+            return sample
 
         def get_state(self) -> Any:
             return {

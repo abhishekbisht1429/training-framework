@@ -60,24 +60,35 @@ before that original exception propagates.
 
 ### `iteration_context`
 
-`session.iteration_context` is a dictionary for communication among hooks and steps during one iteration.
+Steps and iteration hooks hand values to each other within one iteration
+through the iteration context, and only by declaring keys: `@writes` keys are
+returned from `run` / `pre_iteration_callback`, and `@reads` keys arrive as
+keyword arguments of `run` / `post_iteration_callback`.
 
 ```python
-session.iteration_context["batch"] = batch
-loss = session.iteration_context["loss"]
+@writes("loss")
+@step("my_loss")
+class MyLoss(Step):
+    def run(self, session):
+        return compute_loss(...)
+
+
+@reads("loss")
+@hook("loss_printer")
+class LossPrinter(IterationHook):
+    call_every = 100
+    ...
+    def post_iteration_callback(self, session, *, loss):
+        print(loss.item())
 ```
 
-A step or iteration hook that declares its keys with `@reads` / `@writes`
-does not touch it for them: the session passes the reads in as arguments and
-stores what the callback returns (see
+There is no session attribute to read or write it directly, so every value
+exchanged is one the session can check: each read has a writer, one writer
+per key, steps ordered after their writers, and a reader's `call_every` a
+multiple of its writer's (see
 [Ordering by dataflow](../guide/02-wiring-components.md#ordering-by-dataflow)).
-
-It is:
-
-- available only while the session context is active;
-- visible to pre-hooks, steps, and post-hooks;
-- cleared after every iteration; and
-- not included in session checkpoints.
+The context is cleared after every iteration and is not included in session
+checkpoints.
 
 ### `session_context`
 

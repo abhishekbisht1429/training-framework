@@ -116,7 +116,6 @@ The engine monitors workers while leaving the context.
 | `iteration` | Current completed/in-progress iteration counter |
 | `device` | Active `torch.device` |
 | `session_context` | Session-lifetime shared dictionary |
-| `iteration_context` | Current-iteration shared dictionary; context-only |
 | `send_heartbeat(stage)` | Mark worker progress with a stage label; call periodically inside long-running components (no-op outside a spawned worker) |
 | `component_bindings` | Copy of the session's role-to-implementation bindings |
 | `component_aliases` | Deprecated compatibility property for `component_bindings` |

@@ -146,7 +146,6 @@ def test_checkpoint_pickle_round_trip_restores_resources_hooks_and_state(tmp_pat
                 int(torch.randint(0, 10 ** 6, (1,)).item()),
             )
             self.samples.append(sample)
-            session.iteration_context[f"{self.label}_sample"] = sample
 
         def get_state(self):
             return {"samples": list(self.samples)}

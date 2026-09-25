@@ -19,6 +19,7 @@ from training_framework.components import (
     SessionHook,
     Step,
     hook,
+    reads,
     requires_resource,
     requires_step,
     resource,
@@ -165,6 +166,7 @@ class InvalidCollateDataset(CollatingDataset):
 
 @step("integration_data")
 @requires_resource("data_manager")
+@writes("sample_index", "inputs", "targets")
 class DistributedDataLoadingStep(Step):
     """Publish the current DataManager batch to iteration context."""
 
@@ -172,43 +174,46 @@ class DistributedDataLoadingStep(Step):
         pass
 
     @override
-    def run(self, session: TrainingSession) -> None:
+    def run(self, session: TrainingSession) -> tuple:
         data_manager = self.get_dependency("data_manager")
         batch = next(data_manager.data_iter)
-        session.iteration_context["sample_index"] = int(batch[:, 0].item())
-        session.iteration_context["inputs"] = batch[:, 1:2].to(session.device)
-        session.iteration_context["targets"] = batch[:, 2:3].to(session.device)
+        return (
+            int(batch[:, 0].item()),
+            batch[:, 1:2].to(session.device),
+            batch[:, 2:3].to(session.device),
+        )
 
 
 @step("integration_train")
 @requires_resource("ddp")
 @requires_step("integration_data")
+@reads("inputs")
+@writes("prediction")
 class DDPTrainingStep(Step):
     def __init__(self, config: dict):
         pass
 
     @override
-    def run(self, session: TrainingSession) -> None:
+    def run(self, session: TrainingSession, *, inputs) -> torch.Tensor:
         model = self.get_dependency("ddp").wrapped_model
-        session.iteration_context["prediction"] = model(
-            session.iteration_context["inputs"]
-        )
+        return model(inputs)
 
 
 @step("integration_loss")
 @writes("loss")
 @requires_step("integration_train")
+@reads("prediction", "targets")
 class MeanSquaredLossStep(Step):
     def __init__(self, config: dict):
         pass
 
     @override
-    def run(self, session: TrainingSession) -> torch.Tensor:
-        prediction = session.iteration_context["prediction"]
-        target = session.iteration_context["targets"]
+    def run(
+            self, session: TrainingSession, *, prediction, targets,
+    ) -> torch.Tensor:
         return torch.nn.functional.mse_loss(
             prediction,
-            target,
+            targets,
         )
 
 
@@ -271,6 +276,7 @@ class HeartbeatingRankDelayHook(LifecycleHook):
 
 @hook("integration_results")
 @requires_resource("ddp")
+@reads("sample_index", "prediction", "targets", "loss")
 class RankResultHook(LifecycleHook):
     """Write observable child-process results after distributed training."""
 
@@ -292,15 +298,21 @@ class RankResultHook(LifecycleHook):
         return None
 
     @override
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(
+            self,
+            session: TrainingSession,
+            *,
+            sample_index,
+            prediction,
+            targets,
+            loss,
+    ) -> None:
         self._observations.append({
             "iteration": session.iteration,
-            "sample_index": session.iteration_context["sample_index"],
-            "prediction": float(
-                session.iteration_context["prediction"].detach().item()
-            ),
-            "target": float(session.iteration_context["targets"].item()),
-            "loss": float(session.iteration_context["loss"].detach().item()),
+            "sample_index": sample_index,
+            "prediction": float(prediction.detach().item()),
+            "target": float(targets.item()),
+            "loss": float(loss.detach().item()),
         })
         if self._progress_dir is not None:
             rank = self.get_dependency("ddp").rank

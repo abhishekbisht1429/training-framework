@@ -997,17 +997,18 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             return None
         return scheduler_config["metric_key"]
 
-    def scheduler_metric(self, iteration_context: Mapping) -> Any:
-        """The value a metric-driven schedule steps on, if one is configured."""
+    def scheduler_metric(self, values: Mapping) -> Any:
+        """The value a metric-driven schedule steps on, looked up in
+        `values` by `metric_key`; None if no metric is configured."""
         metric_key = self.metric_key
         if metric_key is None:
             return None
         try:
-            return iteration_context[metric_key]
+            return values[metric_key]
         except KeyError as error:
             raise KeyError(
-                f"Configured lr_scheduler metric {metric_key!r} is "
-                "missing from session.iteration_context"
+                f"Configured lr_scheduler metric {metric_key!r} is missing "
+                f"from the values given; they have {sorted(map(str, values))}"
             ) from error
 
     def step(self, metric: Any = None) -> None:

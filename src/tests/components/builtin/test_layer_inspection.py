@@ -83,20 +83,17 @@ class _FakeTrainedModel:
 
 class _FakeSession:
     """Minimal stand-in for Session, enough for LayerInspector's own
-    lifecycle: `iteration_context`, plus the `trained_model` it serves to
-    the inspector through `serve`."""
+    lifecycle: the iteration generation that scopes its captures, plus the
+    `trained_model` it serves to the inspector through `serve`."""
 
     def __init__(self, model):
         self._trained_model = _FakeTrainedModel(model)
-        self._shared_state: dict = {}
+        # One iteration for the whole test: captures accumulate.
+        self._iteration_generation = 0
 
     def serve(self, inspector):
         """Inject this session's trained model, as a real session would."""
         return inject_dependencies(inspector, trained_model=self._trained_model)
-
-    @property
-    def iteration_context(self):
-        return self._shared_state
 
 
 def _session_config(root, *, max_iterations=2):

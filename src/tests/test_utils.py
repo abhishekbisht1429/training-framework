@@ -12,7 +12,13 @@ from typing import Any
 
 from torch import nn
 
-from training_framework.components import LifecycleHook, Resource, Stateful, Step
+from training_framework.components import (
+    LifecycleHook,
+    Resource,
+    Stateful,
+    Step,
+    writes,
+)
 
 
 COMPONENTS_PACKAGE = "tests.test_components"
@@ -199,16 +205,16 @@ def has_resource_named(session, name) -> bool:
 # -- test doubles recording their lifecycle and state -----------------------
 
 
+@writes("step_called", "step_index")
 class AdditionalStepBase(Step, Stateful):
     def __init__(self):
         self.calls = 0
         self.last_seen_loss = None
 
-    def run(self, session: TrainingSession) -> None:
+    def run(self, session: TrainingSession) -> tuple[bool, int]:
         self.calls += 1
-        session.iteration_context["step_called"] = True
-        session.iteration_context["step_index"] = self.calls
         self.last_seen_loss = self.calls * 1.0
+        return True, self.calls
 
     def get_state(self) -> Any:
         return {"calls": self.calls, "last_seen_loss": self.last_seen_loss}
@@ -255,7 +261,6 @@ class AdditionalHookBase(LifecycleHook, Stateful):
         self.events: list[str] = []
         self.pre_iterations: list[int] = []
         self.post_iterations: list[int] = []
-        self.shared_snapshots: list[dict[str, Any]] = []
 
     def pre_session(self, session: TrainingSession):
         self.events.append("setup")
@@ -270,7 +275,6 @@ class AdditionalHookBase(LifecycleHook, Stateful):
     def post_iteration_callback(self, session: TrainingSession) -> None:
         self.events.append(f"post:{session.iteration}")
         self.post_iterations.append(session.iteration)
-        self.shared_snapshots.append(dict(session.iteration_context))
 
     def get_state(self) -> Any:
         return {
@@ -278,7 +282,6 @@ class AdditionalHookBase(LifecycleHook, Stateful):
             "events": list(self.events),
             "pre_iterations": list(self.pre_iterations),
             "post_iterations": list(self.post_iterations),
-            "shared_snapshots": [dict(item) for item in self.shared_snapshots],
         }
 
     def set_state(self, state: Any) -> None:
@@ -286,7 +289,6 @@ class AdditionalHookBase(LifecycleHook, Stateful):
         self.events = list(state["events"])
         self.pre_iterations = list(state["pre_iterations"])
         self.post_iterations = list(state["post_iterations"])
-        self.shared_snapshots = [dict(item) for item in state["shared_snapshots"]]
 
 
 # -- distributed stand-ins -------------------------------------------------------

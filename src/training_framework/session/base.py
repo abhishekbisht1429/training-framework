@@ -152,7 +152,13 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     def _init_transient_infra(self):
         self._device = self._check_and_get_device()
+        # The values steps and hooks hand each other this iteration. Not
+        # public: every key is declared with @reads/@writes and passed as an
+        # argument or returned, so the checks see every exchange.
         self._shared_state: dict[str, Any] = {}
+        # Bumped whenever the per-iteration state is cleared, so a component
+        # keeping its own per-iteration data knows when it went stale.
+        self._iteration_generation = 0
         import_all_modules(self._session_settings["components_package"])
 
         self._successfully_setup_resource_names = set()
@@ -303,11 +309,6 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     @property
     def session_context(self):
         return self._session_context
-
-    @property
-    @requires_context
-    def iteration_context(self):
-        return self._shared_state
 
     # --------------------------------------------------------------------
 

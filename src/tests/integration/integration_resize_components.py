@@ -15,9 +15,11 @@ from typing import override
 from training_framework.components import (
     LifecycleHook,
     Step,
+    reads,
     requires_resource,
     hook,
     step,
+    writes,
 )
 from training_framework.session import TrainingSession
 
@@ -28,6 +30,7 @@ from tests.integration import integration_training_components  # noqa: F401
 
 @step("integration_data", overwrite=True)
 @requires_resource("data_manager")
+@writes("sample_indices", "inputs", "targets")
 class ResizableDataLoadingStep(Step):
     """Publish the current batch, whatever local size the world gives it."""
 
@@ -35,18 +38,19 @@ class ResizableDataLoadingStep(Step):
         pass
 
     @override
-    def run(self, session: TrainingSession) -> None:
+    def run(self, session: TrainingSession) -> tuple:
         data_manager = self.get_dependency("data_manager")
         batch = next(data_manager.data_iter)
-        session.iteration_context["sample_indices"] = [
-            int(value) for value in batch[:, 0].tolist()
-        ]
-        session.iteration_context["inputs"] = batch[:, 1:2].to(session.device)
-        session.iteration_context["targets"] = batch[:, 2:3].to(session.device)
+        return (
+            [int(value) for value in batch[:, 0].tolist()],
+            batch[:, 1:2].to(session.device),
+            batch[:, 2:3].to(session.device),
+        )
 
 
 @hook("integration_results", overwrite=True)
 @requires_resource("ddp")
+@reads("sample_indices")
 class ResizableRankResultHook(LifecycleHook):
     """Record what each rank saw, without assuming one sample per batch."""
 
@@ -64,10 +68,12 @@ class ResizableRankResultHook(LifecycleHook):
         return None
 
     @override
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(
+            self, session: TrainingSession, *, sample_indices,
+    ) -> None:
         self._observations.append({
             "iteration": session.iteration,
-            "sample_indices": session.iteration_context["sample_indices"],
+            "sample_indices": sample_indices,
         })
 
     @override

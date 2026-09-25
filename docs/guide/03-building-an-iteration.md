@@ -32,8 +32,8 @@ steps           load_batch               batch -> inputs, targets
 post-iteration  checkpointer, logger, ...  see the updated weights
 ```
 
-The steps hand values to each other through `session.iteration_context`, a
-dictionary that is cleared after every iteration. You choose the keys: each
+The steps hand values to each other through the iteration context, a set of
+named values that is cleared after every iteration. You choose the keys: each
 generic step's configuration says which keys it reads and which it writes,
 and the session puts a step after the step that writes what it reads. You never
 state the order of the steps yourself.

@@ -327,7 +327,7 @@ layers that did not run a forward pass this iteration.
 `inspector.captures` is sparse — keyed only by layers that
 actually ran a forward pass — and accumulates every forward pass within the
 current iteration, in call order; it is cleared automatically at each
-iteration boundary (backed by `session.iteration_context`), so an iteration
+iteration boundary, so an iteration
 that never triggers a forward pass sees an empty mapping rather than stale
 data from a previous one.
 

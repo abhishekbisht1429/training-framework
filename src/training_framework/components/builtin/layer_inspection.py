@@ -64,7 +64,6 @@ class LayerInspector(Resource):
     the user's own analysis `Step`.
     """
 
-    _CAPTURE_CONTEXT_KEY = "layer_inspector_captures"
 
     def __init__(self, config: Mapping) -> None:
         super().__init__(config)
@@ -109,6 +108,8 @@ class LayerInspector(Resource):
         self._layers: dict[str, nn.Module] = {}
         self._handles: dict[str, Any] = {}
         self._session: Any = None
+        self._captures: dict[str, list[LayerCapture]] = {}
+        self._captures_generation: int | None = None
 
     @property
     def matched_layer_names(self) -> tuple[str, ...]:
@@ -133,12 +134,13 @@ class LayerInspector(Resource):
         """Captures observed so far this iteration, keyed by layer name.
 
         Sparse: only layers that actually ran a forward pass this iteration
-        have an entry. Cleared automatically at every iteration boundary by
-        the session (backed by `session.iteration_context`).
+        have an entry. Cleared automatically at every iteration boundary.
         """
-        return self._session.iteration_context.setdefault(
-            self._CAPTURE_CONTEXT_KEY, {}
-        )
+        generation = self._session._iteration_generation
+        if generation != self._captures_generation:
+            self._captures = {}
+            self._captures_generation = generation
+        return self._captures
 
     def last_capture(self, layer_name: str) -> LayerCapture | None:
         """The most recent capture of `layer_name` this iteration, if any.
@@ -219,3 +221,5 @@ class LayerInspector(Resource):
         self._matched_layer_names = ()
         self._layers = {}
         self._session = None
+        self._captures = {}
+        self._captures_generation = None

@@ -280,7 +280,7 @@ def test_pickled_layer_inspector_captures_matched_layer_forward_pass(tmp_path):
         "name_patterns": [r"^$"],  # the root module itself
     })))
     # Enough of Session for LayerInspector's own lifecycle to run against.
-    inspection_session = SimpleNamespace(iteration_context={})
+    inspection_session = SimpleNamespace(_iteration_generation=0)
 
     # An unpickled component carries no prerequisites; joining a session is
     # what gives it them.
