@@ -8,6 +8,7 @@ class is replaced by a stand-in that records what it was asked for.
 from __future__ import annotations
 
 import importlib
+import pickle
 
 import pytest
 
@@ -421,3 +422,158 @@ def test_the_optional_component_table_lists_exactly_these_datasets():
         name for name, package in OPTIONAL_COMPONENTS.items()
         if package is VISION_DATASETS
     }
+
+
+@pytest.mark.parametrize(
+    ("statistics", "message"),
+    [
+        ("mean: [.nan, 0.5, 0.5]\nstd: [0.5, 0.5, 0.5]",
+         r"mean values must be finite numbers; got \[nan, 0.5, 0.5\]"),
+        ("mean: [0.5, .inf, 0.5]\nstd: [0.5, 0.5, 0.5]",
+         r"mean values must be finite numbers; got \[0.5, inf, 0.5\]"),
+        ("mean: [0.5, 0.5, 0.5]\nstd: [0.5, .nan, 0.5]",
+         r"std values must be finite numbers"),
+        ("mean: [0.5, 0.5, 0.5]\nstd: [0.5, 0.5, .inf]",
+         r"std values must be finite numbers"),
+    ],
+)
+def test_non_finite_normalization_from_yaml_is_refused(tmp_path, statistics, message):
+    import yaml
+
+    config = {"root": str(tmp_path), "split": "train", "transform": "eval"}
+    with pytest.raises(ValueError, match=message):
+        ImageNet({**config, **yaml.safe_load(statistics)})
+
+
+# -- serialization ------------------------------------------------------------------
+
+#: Registered name -> (module in the datasets package, class name).
+_DATASET_MODULES = {
+    "cifar10": ("cifar10", "CIFAR10"),
+    "flowers102": ("flowers102", "Flowers102"),
+    "stanford_cars": ("stanford_cars", "StanfordCars"),
+    "inaturalist": ("inaturalist", "INaturalist"),
+    "imagenet": ("imagenet", "ImageNet"),
+}
+
+
+def _dataset_config(name, root):
+    """A config for `name` whose data exists: folders on disk for the two
+    folder datasets, the stand-in source (see `fake_sources`) for the rest."""
+    if name == "imagenet":
+        return {"root": str(_image_folders(root)), "split": "train"}
+    if name == "inaturalist":
+        for index in range(2):
+            _write_image(
+                root / "2021_valid"
+                / f"0000{index}_K_P_C_O_F_G_s{index}" / "img.jpg",
+                shade=index * 90,
+            )
+        return {"root": str(root), "split": "2021_valid"}
+    split = {"cifar10": "test", "flowers102": "val", "stanford_cars": "test"}[name]
+    return {"root": str(root), "split": split}
+
+
+@pytest.fixture
+def registered_datasets():
+    """Register the dataset resources again: the registry is reset around
+    every test, as importing a components package does in a run."""
+    for module, _ in _DATASET_MODULES.values():
+        importlib.reload(importlib.import_module(
+            f"training_framework.components.builtin.datasets.{module}"
+        ))
+
+
+def _dataset_class(name):
+    """The class as its module now defines it -- after a reload, the one
+    pickle finds by name."""
+    module, class_name = _DATASET_MODULES[name]
+    return getattr(importlib.import_module(
+        f"training_framework.components.builtin.datasets.{module}"
+    ), class_name)
+
+
+def _same_dataset(restored, original):
+    assert type(restored).__name__ == type(original).__name__
+    assert restored.split == original.split
+    assert restored.labels == original.labels
+    assert len(restored) == len(original)
+    assert (restored.mean, restored.std) == (original.mean, original.std)
+    for index in range(len(original)):
+        image, label = restored[index]
+        expected_image, expected_label = original[index]
+        torch.testing.assert_close(image, expected_image)
+        assert label == expected_label
+
+
+@pytest.mark.parametrize("name", sorted(_DATASET_MODULES))
+def test_a_pickled_dataset_reads_the_same_samples(
+        tmp_path, fake_sources, registered_datasets, name,
+):
+    original = _dataset_class(name)({
+        **_dataset_config(name, tmp_path),
+        "transform": "eval",
+        "image_size": 8,
+        "mean": "imagenet",
+        "std": "imagenet",
+    })
+
+    _same_dataset(pickle.loads(pickle.dumps(original)), original)
+
+
+@pytest.mark.parametrize("name", sorted(_DATASET_MODULES))
+def test_a_checkpointed_session_restores_its_dataset_instance(
+        tmp_path, monkeypatch, fake_sources, registered_datasets, name,
+):
+    from training_framework.components.builtin import Checkpointer
+
+    stub_process_group(monkeypatch)
+
+    @resource("dataset_test_model")
+    class Model(nn.Module, StatefulResource):
+        def __init__(self, config=None):
+            nn.Module.__init__(self)
+            self.linear = nn.Linear(1, 1)
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+        def get_state(self):
+            return {}
+
+        def set_state(self, state):
+            pass
+
+    instance = f"{name}#train_split"
+    config = make_config(tmp_path / "session")
+    config["session_config"]["show_execution_graph"] = False
+    config.update({
+        "component_bindings": {
+            "dataset": instance, "model": "dataset_test_model",
+        },
+        "dataset_test_model": {},
+        instance: {
+            **_dataset_config(name, tmp_path / "data"),
+            "transform": "eval",
+            "image_size": 8,
+            "mean": [0.1, 0.2, 0.3],
+            "std": [0.4, 0.5, 0.6],
+        },
+        "ddp": {
+            "world_size": 1, "backend": "gloo",
+            "master_addr": "localhost", "master_port": "12355",
+        },
+        "data_manager": {"batch_size": 1, "num_workers": 0, "pin_memory": False},
+    })
+    session = TrainingSession(config)
+    original = resource_named(session, instance)
+
+    path = Checkpointer.save_checkpoint(session, tmp_path / "checkpoint")
+    restored = resource_named(Checkpointer.load_checkpoint(path), instance)
+
+    assert restored is not original
+    assert restored.name == instance
+    _same_dataset(restored, original)

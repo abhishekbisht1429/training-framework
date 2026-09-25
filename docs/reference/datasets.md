@@ -3,9 +3,11 @@
 [← Docs](../README.md) · [Built-in components](builtin-components.md)
 
 Optional resources that fill the `dataset` role with one split of a
-torchvision image dataset. Each sample is an `(image, label)` pair: a
-normalized `float32` tensor of shape `(3, image_size, image_size)` and an
-`int` class index.
+torchvision image dataset. Each sample is an `(image, label)` pair with an
+`int` class index. With the `train` and `eval` transform presets the image
+is a normalized `float32` tensor of shape `(3, image_size, image_size)`; a
+transform given by dotted path replaces the whole pipeline, so it decides
+the image's type and shape itself.
 
 | Name | Splits | Default `image_size` |
 | --- | --- | --- |

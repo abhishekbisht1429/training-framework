@@ -12,6 +12,7 @@ starts, so a download happens once there rather than once per rank.
 
 from __future__ import annotations
 
+import math
 from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -144,7 +145,7 @@ class TorchvisionDatasetConfig:
 
 
 def _channel_values(value: Any, key: str) -> tuple[float, float, float]:
-    """Return `value` as three floats, one per RGB channel."""
+    """Return `value` as three finite floats, one per RGB channel."""
     if (
             not isinstance(value, (list, tuple))
             or len(value) != 3
@@ -157,7 +158,14 @@ def _channel_values(value: Any, key: str) -> tuple[float, float, float]:
             f"{key} must be three numbers (one per RGB channel) or one of "
             f"{sorted(NAMED_STATISTICS)}; got {value!r}"
         )
-    return tuple(float(item) for item in value)
+    channels = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in channels):
+        # YAML reads `.nan` and `.inf` as floats; either would make every
+        # normalized pixel non-finite.
+        raise ValueError(
+            f"{key} values must be finite numbers; got {list(channels)}"
+        )
+    return channels
 
 
 class TorchvisionDataset(Dataset, Resource):
