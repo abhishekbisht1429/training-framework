@@ -159,7 +159,7 @@ def test_the_eval_preset_is_deterministic_and_normalized(tmp_path):
     assert isinstance(label, int)
     # A uniform grey image normalizes to (grey - mean) / std per channel.
     grey = 40 / 255
-    expected = [(grey - m) / s for m, s in zip(dataset.MEAN, dataset.STD)]
+    expected = [(grey - m) / s for m, s in zip(dataset.mean, dataset.std)]
     torch.testing.assert_close(
         image.mean(dim=(1, 2)), torch.tensor(expected), atol=1e-3, rtol=0,
     )
@@ -200,6 +200,83 @@ def test_cifar10_keeps_its_native_size_unless_asked(tmp_path, fake_sources):
     assert native[1][0].shape == (3, 32, 32)
     assert larger[1][0].shape == (3, 64, 64)
     assert native.labels == ["a", "b", "c"]
+
+
+def _grey_channel_means(dataset):
+    """The per-channel mean of sample 0: n01/img0, a uniform shade of 40."""
+    return dataset[0][0].mean(dim=(1, 2))
+
+
+@pytest.mark.parametrize(
+    ("statistics", "mean", "std"),
+    [
+        ({}, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ({"mean": [0.2, 0.3, 0.4], "std": [0.1, 0.2, 0.25]},
+         (0.2, 0.3, 0.4), (0.1, 0.2, 0.25)),
+        ({"mean": "imagenet", "std": "imagenet"},
+         (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ({"mean": "cifar10", "std": "cifar10"},
+         (0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+    ],
+    ids=["default", "listed", "imagenet", "cifar10"],
+)
+def test_presets_normalize_with_the_configured_statistics(
+        tmp_path, statistics, mean, std,
+):
+    dataset = ImageNet({
+        "root": str(_image_folders(tmp_path)),
+        "split": "train",
+        "transform": "eval",
+        "image_size": 8,
+        **statistics,
+    })
+
+    assert dataset.mean == mean
+    assert dataset.std == std
+    grey = 40 / 255
+    torch.testing.assert_close(
+        _grey_channel_means(dataset),
+        torch.tensor([(grey - m) / s for m, s in zip(mean, std)]),
+        atol=1e-3,
+        rtol=0,
+    )
+
+
+def test_every_dataset_defaults_to_half_normalization(tmp_path, fake_sources):
+    root = str(tmp_path)
+    for dataset in (
+            CIFAR10({"root": root, "split": "train", "transform": "eval"}),
+            Flowers102({"root": root, "split": "train", "transform": "train"}),
+            StanfordCars({"root": root, "split": "test", "transform": "eval"}),
+    ):
+        assert (dataset.mean, dataset.std) == ((0.5,) * 3, (0.5,) * 3)
+    # Sample 0 of the stand-in is black: (0 - 0.5) / 0.5 on every channel.
+    black = CIFAR10({"root": root, "split": "test", "transform": "eval"})[0][0]
+    torch.testing.assert_close(black, torch.full_like(black, -1.0))
+
+
+@pytest.mark.parametrize(
+    ("statistics", "message"),
+    [
+        ({"mean": [0.5, 0.5, 0.5]}, "must be set together"),
+        ({"std": "imagenet"}, "must be set together"),
+        ({"mean": [0.5, 0.5], "std": [0.5, 0.5, 0.5]},
+         "mean must be three numbers"),
+        ({"mean": [0.5, 0.5, 0.5], "std": [0.5, True, 0.5]},
+         "std must be three numbers"),
+        ({"mean": [0.5, 0.5, 0.5], "std": [0.5, 0.0, 0.5]},
+         "greater than 0"),
+        ({"mean": "imagenet", "std": "cifar10"}, "same statistics"),
+        ({"mean": "imagenet", "std": [0.5, 0.5, 0.5]}, "same statistics"),
+        ({"mean": "coco", "std": "coco"}, "same statistics"),
+        ({"transform": "a.b", "mean": "imagenet", "std": "imagenet"},
+         "drop them"),
+    ],
+)
+def test_invalid_normalization_is_reported(tmp_path, statistics, message):
+    config = {"root": str(tmp_path), "split": "train", "transform": "eval"}
+    with pytest.raises(ValueError, match=message):
+        ImageNet({**config, **statistics})
 
 
 def test_a_transform_named_by_dotted_path_replaces_the_preset(tmp_path):

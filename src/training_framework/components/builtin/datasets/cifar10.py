@@ -29,8 +29,6 @@ class CIFAR10(TorchvisionDataset):
     """
 
     config_schema = CIFAR10Config
-    MEAN = (0.4914, 0.4822, 0.4465)
-    STD = (0.2470, 0.2435, 0.2616)
     IMAGE_SIZE = _NATIVE_SIZE
 
     def _build_source(self) -> Any:

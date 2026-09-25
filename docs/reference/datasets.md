@@ -7,13 +7,16 @@ torchvision image dataset. Each sample is an `(image, label)` pair: a
 normalized `float32` tensor of shape `(3, image_size, image_size)` and an
 `int` class index.
 
-| Name | Splits | Default `image_size` | Normalization |
-| --- | --- | --- | --- |
-| `cifar10` | `train`, `test` | 32 | CIFAR-10 statistics |
-| `flowers102` | `train`, `val`, `test` | 224 | ImageNet statistics |
-| `stanford_cars` | `train`, `test` | 224 | ImageNet statistics |
-| `inaturalist` | `2017`, `2018`, `2019`, `2021_train`, `2021_train_mini`, `2021_valid` | 224 | ImageNet statistics |
-| `imagenet` | `train`, `val` | 224 | ImageNet statistics |
+| Name | Splits | Default `image_size` |
+| --- | --- | --- |
+| `cifar10` | `train`, `test` | 32 |
+| `flowers102` | `train`, `val`, `test` | 224 |
+| `stanford_cars` | `train`, `test` | 224 |
+| `inaturalist` | `2017`, `2018`, `2019`, `2021_train`, `2021_train_mini`, `2021_valid` | 224 |
+| `imagenet` | `train`, `val` | 224 |
+
+Every dataset normalizes with mean and std `[0.5, 0.5, 0.5]` (pixels scaled
+to `[-1, 1]`) unless its config sets `mean` and `std`.
 
 ## Enabling them
 
@@ -46,6 +49,8 @@ cifar10#train:
   transform: train       # required: train, eval, or a dotted path
   download: true         # optional, default false
   image_size: 224        # optional, default per dataset
+  mean: imagenet         # optional, with std: default [0.5, 0.5, 0.5]
+  std: imagenet
 
 data_manager: {batch_size: 128, num_workers: 4, pin_memory: true}
 load_batch: {fields: [images, labels]}
@@ -72,19 +77,24 @@ Two splits of one dataset are two instances, e.g. `cifar10#train` and
 - `image_size` -- the side of the square images the presets produce. For
   `cifar10`, a size other than 32 resizes after augmenting. Refused together
   with a dotted-path transform, which sets its own size.
+- `mean`, `std` -- the per-channel normalization of the presets. Set both
+  or neither. Each is three numbers (`[0.485, 0.456, 0.406]`), or both are
+  the same name: `imagenet` or `cifar10`, for those datasets' published
+  statistics. Unset, both are `[0.5, 0.5, 0.5]`. Refused together with a
+  dotted-path transform, which does its own normalization.
 
 `imagenet` reads `root/<split>/<class folder>/<image>`, with classes and
 files in sorted order, so a sample index names the same image on every rank
 and machine. `inaturalist` reads `root/<split>` and labels by species.
 
 Each dataset exposes `labels` (class names, indexed by label),
-`num_classes`, `split`, `image_size` and `transform`.
+`num_classes`, `split`, `image_size`, `mean`, `std` and `transform`.
 
 ## Adding a dataset
 
 Subclass `TorchvisionDataset`, give it a config listing its splits, and
 build the untransformed torchvision dataset in `_build_source`. Override
-`MEAN` / `STD` / `IMAGE_SIZE`, `train_transform` / `eval_transform` (the
+`IMAGE_SIZE`, `train_transform` / `eval_transform` (the
 steps before normalization), or `labels` where the defaults don't fit:
 
 ```python
