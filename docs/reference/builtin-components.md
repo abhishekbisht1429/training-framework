@@ -32,9 +32,10 @@ which registers all built-ins. Their classes are also importable from
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
 
 `dataset` and `model` are declared roles (see [Component
-bindings](../guide/02-wiring-components.md#component-bindings)) with no built-in
+bindings](../guide/02-wiring-components.md#component-bindings)) with no default
 implementation; register a `Resource` under that name, or bind one via
-`component_bindings`, before activating `data_manager` or `ddp`.
+`component_bindings`, before activating `data_manager` or `ddp`. Optional
+torchvision [image datasets](datasets.md) can fill the `dataset` role.
 
 The training defaults are equivalent to:
 
@@ -347,6 +348,7 @@ need it should run its forward pass under `torch.no_grad()` itself.
 ---
 
 **See also:** [transformer blocks](transformer-blocks.md) for the built-in
-model building blocks, [infinite samplers](samplers.md), and
+model building blocks, [image datasets](datasets.md), [infinite
+samplers](samplers.md), and
 [`ModuleResource`](../concepts/module-resource.md) for writing your own
 composable model resource.

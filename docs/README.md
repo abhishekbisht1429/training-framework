@@ -41,6 +41,9 @@ A task-ordered path. It picks up where the
   stages.
 - [Transformer blocks](reference/transformer-blocks.md) — the swappable
   transformer building blocks and the two composite models.
+- [Image datasets](reference/datasets.md) — optional torchvision datasets
+  (CIFAR-10, Flowers-102, Stanford Cars, iNaturalist, ImageNet) for the
+  `dataset` role.
 - [Infinite samplers](reference/samplers.md) — `InfiniteSampler` and
   `DistributedInfiniteSampler`.
 - [CLI reference](reference/cli.md) — every command-line flag.

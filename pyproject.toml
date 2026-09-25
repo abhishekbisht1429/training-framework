@@ -27,5 +27,13 @@ dependencies = [
     "tensorboard>=2.20.0"
 ]
 
+[project.optional-dependencies]
+# Image datasets (training_framework.components.builtin.datasets); scipy
+# reads the Flowers102 and Stanford Cars annotations.
+vision = [
+    "torchvision==0.28.0",
+    "scipy",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
