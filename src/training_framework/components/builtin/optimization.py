@@ -81,7 +81,11 @@ def _supports_extension_path(path: tuple[str, ...]) -> bool:
     return bool(path) and path[0] == "lr_scheduler"
 
 
-def _rebase_scheduler_lrs(state: Mapping, new_lr: float) -> None:
+def _rebase_scheduler_lrs(
+        state: Mapping,
+        new_lr: float,
+        keep: frozenset[int] = frozenset(),
+) -> None:
     """Rescale a serialized scheduler state so its current lr becomes
     ``new_lr``, preserving the schedule's relative progress.
 
@@ -100,6 +104,10 @@ def _rebase_scheduler_lrs(state: Mapping, new_lr: float) -> None:
     constructed, not a value it ever actually ran at — so it is left alone
     and uses its own originally configured base once it activates.
 
+    Groups whose index is in ``keep`` -- those whose ``param_groups`` entry
+    sets its own ``lr`` -- do not follow the global lr, so their entries
+    are left as they are and their schedule carries on unchanged.
+
     A no-op for scheduler kinds with no ``base_lrs`` (e.g.
     ReduceLROnPlateau, which reads the optimizer's current lr directly).
     """
@@ -108,17 +116,21 @@ def _rebase_scheduler_lrs(state: Mapping, new_lr: float) -> None:
         milestones = state.get("_milestones", [])
         last_epoch = state.get("last_epoch", 0)
         active_index = bisect_right(milestones, last_epoch)
-        _rebase_scheduler_lrs(schedulers[active_index], new_lr)
+        _rebase_scheduler_lrs(schedulers[active_index], new_lr, keep)
         return
     if "base_lrs" not in state:
         return
     base_lrs = state["base_lrs"]
     last_lr = state.get("_last_lr", base_lrs)
     state["base_lrs"] = [
-        base * (new_lr / current) if current else new_lr
-        for base, current in zip(base_lrs, last_lr)
+        base if index in keep
+        else base * (new_lr / current) if current else new_lr
+        for index, (base, current) in enumerate(zip(base_lrs, last_lr))
     ]
-    state["_last_lr"] = [new_lr] * len(last_lr)
+    state["_last_lr"] = [
+        current if index in keep else new_lr
+        for index, current in enumerate(last_lr)
+    ]
 
 
 def _require_mapping(value: Any, path: str) -> Mapping:
@@ -283,6 +295,13 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         self._no_sync = None
         self._processed: set[int] = set()
         self._grad_norm: float | None = None
+        # The iteration begun, how many micro-batches its accumulation group
+        # has and where it starts, and the last iteration whose backward
+        # ran -- which tells a retried iteration from a fresh one.
+        self._iteration: int | None = None
+        self._group_size = 1
+        self._group_start = 1
+        self._backward_iteration: int | None = None
 
     # -- configuration ------------------------------------------------------
 
@@ -878,7 +897,13 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             elif "lr" in changed_kwarg_keys:
                 scheduler_state = self._restored_state.get("lr_scheduler_state")
                 if scheduler_state is not None:
-                    _rebase_scheduler_lrs(scheduler_state, optimizer_kwargs["lr"])
+                    own_lr = frozenset(
+                        index for index, overrides in enumerate(group_overrides)
+                        if "lr" in overrides
+                    )
+                    _rebase_scheduler_lrs(
+                        scheduler_state, optimizer_kwargs["lr"], keep=own_lr,
+                    )
 
         self._settings = settings
 
@@ -899,6 +924,18 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             or iteration % accumulate_steps == 0
             or iteration >= self._max_iterations
         )
+        # The group this iteration belongs to. Only the last group of a run
+        # can be short; its losses are averaged over its own size.
+        self._group_start = (
+            (iteration - 1) // accumulate_steps * accumulate_steps + 1
+        )
+        group_end = min(
+            self._group_start + accumulate_steps - 1, self._max_iterations,
+        )
+        self._group_size = max(1, group_end - self._group_start + 1)
+        if self._backward_iteration == iteration:
+            self._discard_failed_attempt(iteration)
+        self._iteration = iteration
         if not self._boundary:
             no_sync = getattr(
                 self.get_dependency("ddp").wrapped_model, "no_sync", None,
@@ -912,6 +949,32 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             context = torch.autocast(self._device_type, dtype=dtype)
             context.__enter__()
             self._autocast = context
+
+    def _discard_failed_attempt(self, iteration: int) -> None:
+        """Undo what a failed attempt at `iteration` left behind.
+
+        The runtime rolls the counter back when an iteration raises, so the
+        same iteration can be run again. If the failed attempt got past
+        `backward`, its gradients are still there, and at a boundary fp16
+        gradients were already unscaled. At the start of a group only that
+        attempt contributed, so they are cleared and the scaler gets fresh
+        per-step bookkeeping (rebuilt from its own state, keeping its scale).
+        Mid-group they cannot be told apart from the micro-batches before it.
+        """
+        if iteration != self._group_start:
+            raise RuntimeError(
+                f"Iteration {iteration} failed after its backward pass, in "
+                "the middle of a gradient accumulation group: its gradients "
+                "cannot be separated from those of the group's earlier "
+                "iterations, so it cannot be run again. Resume from the last "
+                "checkpoint instead."
+            )
+        self._optimizer.zero_grad()
+        if self._grad_scaler is not None:
+            fresh = torch.amp.GradScaler(self._device_type)
+            fresh.load_state_dict(self._grad_scaler.state_dict())
+            self._grad_scaler = fresh
+        self._backward_iteration = None
 
     @property
     def is_boundary(self) -> bool:
@@ -939,11 +1002,15 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         right away, so every later step sees true gradients.
         """
         self.exit_autocast()
+        # A norm is measured only when this iteration steps; until then
+        # there is none for it.
+        self._grad_norm = None
         try:
-            accumulate_steps = self._settings.accumulate_steps
-            scaled = loss / accumulate_steps if accumulate_steps > 1 else loss
+            group_size = self._group_size
+            scaled = loss / group_size if group_size > 1 else loss
             if self._grad_scaler is not None:
                 scaled = self._grad_scaler.scale(scaled)
+            self._backward_iteration = self._iteration
             scaled.backward()
         finally:
             self.exit_no_sync()
@@ -1012,13 +1079,22 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             ) from error
 
     def step(self, metric: Any = None) -> None:
-        """Apply the gradients, advance the schedule, and clear them."""
+        """Apply the gradients, advance the schedule, and clear them.
+
+        Under fp16 the scaler skips a step whose gradients overflowed; the
+        schedule then does not advance either, since no step was taken.
+        """
+        skipped = False
         if self._grad_scaler is not None:
+            scale = self._grad_scaler.get_scale()
             self._grad_scaler.step(self._optimizer)
             self._grad_scaler.update()
+            # `update` lowers the scale only when it found non-finite
+            # gradients, which is exactly when `step` skipped.
+            skipped = self._grad_scaler.get_scale() < scale
         else:
             self._optimizer.step()
-        if self._lr_scheduler is not None:
+        if self._lr_scheduler is not None and not skipped:
             if metric is not None:
                 self._lr_scheduler.step(metric)
             elif (
@@ -1241,10 +1317,13 @@ class ClipGradientsConfig:
         if (
                 isinstance(self.norm_type, bool)
                 or not isinstance(self.norm_type, (int, float))
+                or math.isnan(self.norm_type)
                 or self.norm_type <= 0
         ):
+            # inf is valid: the largest absolute gradient.
             raise ValueError(
-                f"norm_type must be a positive number; got {self.norm_type!r}"
+                "norm_type must be a positive number (inf for the largest "
+                f"absolute gradient); got {self.norm_type!r}"
             )
         self.norm_type = float(self.norm_type)
         if not isinstance(self.track_norm, bool):

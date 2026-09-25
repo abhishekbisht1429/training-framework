@@ -210,7 +210,11 @@ def _reference_classification(records, *, milestone=10, clip=None, accumulate=1)
     for iteration, record in enumerate(records, start=1):
         index = torch.tensor(record["indices"])
         loss = functional.cross_entropy(model(images[index]), labels[index])
-        (loss / accumulate if accumulate > 1 else loss).backward()
+        # The mean over the micro-batches of this iteration's group; only
+        # the run's last group can be shorter than `accumulate`.
+        group_start = (iteration - 1) // accumulate * accumulate + 1
+        group_size = min(group_start + accumulate - 1, iterations) - group_start + 1
+        (loss / group_size if group_size > 1 else loss).backward()
         norm = None
         if accumulate == 1 or iteration % accumulate == 0 or iteration == iterations:
             gradients = [p for p in model.parameters() if p.grad is not None]
@@ -230,17 +234,24 @@ def _reference_classification(records, *, milestone=10, clip=None, accumulate=1)
 
 
 @pytest.mark.parametrize(
-    ("clip", "accumulate", "milestone"),
-    [(None, 1, 10), (0.5, 1, 10), (None, 2, 5)],
-    ids=["plain", "clipped", "accumulated"],
+    ("clip", "accumulate", "milestone", "iterations"),
+    [
+        (None, 1, 10, ITERATIONS),
+        (0.5, 1, 10, ITERATIONS),
+        (None, 2, 5, ITERATIONS),
+        # 41 = 13 groups of 3 and a last group of 2.
+        (None, 3, 5, 41),
+    ],
+    ids=["plain", "clipped", "accumulated", "accumulated-short-last-group"],
 )
 def test_vit_classification_matches_plain_torch(
-        tmp_path, monkeypatch, clip, accumulate, milestone,
+        tmp_path, monkeypatch, clip, accumulate, milestone, iterations,
 ):
     stub_process_group(monkeypatch)
     _register_components()
     session = _in_process(_classification_config(
-        tmp_path, milestone=milestone, clip=clip, accumulate=accumulate,
+        tmp_path, iterations=iterations, milestone=milestone, clip=clip,
+        accumulate=accumulate,
     ))
     with session:
         list(session)

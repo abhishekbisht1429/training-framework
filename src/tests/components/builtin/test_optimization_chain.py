@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import pickle
+import warnings
 
 import pytest
 import torch
@@ -281,7 +282,12 @@ def test_a_resumed_run_matches_an_uninterrupted_one(tmp_path):
     torch.testing.assert_close(_linear(resumed).weight, _linear(uninterrupted).weight)
     resumed_state = resource_named(resumed, "optimizer").get_state()
     reference_state = resource_named(uninterrupted, "optimizer").get_state()
-    assert resumed_state["lr_scheduler_state"]["last_epoch"] == 4
+    # fp16 skips steps whose gradients overflow, and the schedule advances
+    # only for steps taken; the resumed run must have taken the same ones.
+    assert (
+        resumed_state["lr_scheduler_state"]["last_epoch"]
+        == reference_state["lr_scheduler_state"]["last_epoch"]
+    )
     assert resumed_state["grad_scaler_state"] == reference_state["grad_scaler_state"]
 
 
@@ -709,3 +715,186 @@ def test_a_run_with_every_stage_configured_resumes_exactly(tmp_path):
 
     torch.testing.assert_close(_linear(resumed).weight, _linear(uninterrupted).weight)
     torch.testing.assert_close(_linear(resumed).bias, _linear(uninterrupted).bias)
+
+
+# -- review fixes: skipped steps, partial groups, retries, reporting -------------------
+
+
+def _gradient_session(tmp_path, gradients, **config):
+    """A session whose loss gives every parameter the gradient
+    `gradients[iteration - 1]`, so each expected weight is plain arithmetic."""
+    _register_components({})
+
+    @writes("loss")
+    @requires_resource("chain_model")
+    @step("chain_set_gradient", overwrite=True)
+    class SetGradient(Step):
+        def run(self, session):
+            model = self.get_dependency("chain_model")
+            return sum(p.sum() for p in model.parameters()) * gradients[
+                session.iteration - 1
+            ]
+
+    full = _config(tmp_path, **config)
+    del full["chain_loss"]
+    full["chain_set_gradient"] = {}
+    session = TrainingSession(full)
+    session.unregister_hook("logger")
+    session.unregister_hook("checkpointer")
+    return session
+
+
+def _weights(session) -> torch.Tensor:
+    return torch.cat([p.detach().flatten() for p in _linear(session).parameters()])
+
+
+def _initial_weights() -> torch.Tensor:
+    return torch.cat([p.detach().flatten() for p in fresh_model().parameters()])
+
+
+def test_an_overflowing_fp16_step_does_not_advance_the_schedule(tmp_path):
+    session = _gradient_session(
+        tmp_path, [float("inf"), 1.0], max_iterations=2, optimizer={
+            "optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}},
+            "lr_scheduler": {"stages": [
+                {"name": "StepLR", "kwargs": {"step_size": 1, "gamma": 0.5}},
+            ]},
+            "precision": "fp16",
+        },
+    )
+    optimizer = resource_named(session, "optimizer")
+
+    with session, warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        next(session)
+        # The step was skipped: nothing moved, so neither did the schedule.
+        torch.testing.assert_close(_weights(session), _initial_weights())
+        assert optimizer.current_lrs == [1.0]
+        next(session)
+        assert optimizer.current_lrs == [0.5]
+
+    torch.testing.assert_close(_weights(session), _initial_weights() - 1.0)
+
+
+def test_the_last_short_accumulation_group_is_averaged_over_its_own_size(tmp_path):
+    # Groups {1, 2} and {3}: each averages to a gradient of 1.
+    session = _gradient_session(tmp_path, [1.0, 1.0, 1.0], max_iterations=3, optimizer={
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}},
+        "accumulate_steps": 2,
+    })
+    _run(session)
+
+    torch.testing.assert_close(_weights(session), _initial_weights() - 2.0)
+
+
+def test_an_lr_extension_leaves_the_schedule_of_a_group_with_its_own_lr(tmp_path):
+    session = _session(tmp_path, max_iterations=2, optimizer={
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 0.1}},
+        "param_groups": [{"match": ["*bias"], "kwargs": {"lr": 0.2}}],
+        "lr_scheduler": {"stages": [
+            {"name": "StepLR", "kwargs": {"step_size": 1, "gamma": 0.5}},
+        ]},
+    })
+    _run(session)
+    before = resource_named(session, "optimizer").get_state()["lr_scheduler_state"]
+
+    session.apply_extension_overrides([
+        "session_config.max_iterations=3",
+        "optimizer.optimizer.kwargs.lr=0.08",
+    ])
+    after = resource_named(session, "optimizer").get_state()["lr_scheduler_state"]
+
+    # Group 0 (bias) keeps its own lr and schedule; group 1 follows the new
+    # global lr from where its schedule had got to (two halvings: 0.25).
+    assert after["base_lrs"][0] == before["base_lrs"][0]
+    assert after["_last_lr"][0] == before["_last_lr"][0]
+    assert after["_last_lr"][1] == pytest.approx(0.08)
+    assert after["base_lrs"][1] == pytest.approx(0.08 / 0.25)
+
+
+def _failing_stage(fail_on: set[int]):
+    """A gradient stage, bound into the chain, that fails once per listed
+    iteration -- after backward, before optimizer_step."""
+
+    @requires_step("clip_gradients")
+    @step("chain_failing_stage", overwrite=True)
+    class FailingStage(GradientProcessor):
+        def process(self, session, named_parameters):
+            if session.iteration in fail_on:
+                fail_on.discard(session.iteration)
+                raise RuntimeError("stage failed on purpose")
+
+    return {
+        "chain_failing_stage": {},
+        "component_bindings": {
+            "model": "chain_model",
+            "optimizer_step": {"clip_gradients": "chain_failing_stage"},
+        },
+    }
+
+
+@pytest.mark.parametrize("precision", ["fp32", "fp16"])
+def test_a_retried_iteration_applies_its_gradients_once(tmp_path, precision):
+    session = _gradient_session(
+        tmp_path, [2.0], max_iterations=1,
+        optimizer={
+            "optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}},
+            "precision": precision,
+        },
+        **_failing_stage({1}),
+    )
+
+    with session:
+        with pytest.raises(RuntimeError, match="stage failed on purpose"):
+            next(session)
+        assert next(session) == 1
+
+    torch.testing.assert_close(_weights(session), _initial_weights() - 2.0)
+
+
+def test_retrying_an_iteration_in_the_middle_of_a_group_is_refused(tmp_path):
+    session = _gradient_session(
+        tmp_path, [1.0, 1.0], max_iterations=2,
+        optimizer={
+            "optimizer": {"name": "SGD", "kwargs": {"lr": 1.0}},
+            "accumulate_steps": 2,
+        },
+        **_failing_stage({2}),
+    )
+
+    with session:
+        next(session)
+        with pytest.raises(RuntimeError, match="stage failed on purpose"):
+            next(session)
+        with pytest.raises(RuntimeError, match="cannot be run again"):
+            next(session)
+
+
+def test_a_nan_norm_type_is_refused_and_inf_is_the_max_norm(tmp_path):
+    with pytest.raises(ValueError, match="norm_type must be a positive number"):
+        _session(tmp_path / "nan", clip_gradients={
+            "max_norm": 1.0, "norm_type": float("nan"),
+        })
+
+    session = _session(tmp_path / "inf", max_iterations=1, clip_gradients={
+        "track_norm": True, "norm_type": float("inf"),
+    })
+    _run(session)
+    assert resource_named(session, "optimizer").grad_norm > 0
+
+
+def test_the_gradient_norm_is_reported_only_for_an_iteration_that_stepped(tmp_path):
+    session = _session(tmp_path, max_iterations=4, optimizer={
+        "optimizer": {"name": "SGD", "kwargs": {"lr": 0.1}},
+        "accumulate_steps": 2,
+    }, clip_gradients={"track_norm": True})
+    optimizer = resource_named(session, "optimizer")
+
+    norms = []
+    with session:
+        for _ in range(4):
+            next(session)
+            norms.append(optimizer.grad_norm)
+
+    assert norms[0] is None and norms[2] is None
+    assert norms[1] is not None and norms[3] is not None

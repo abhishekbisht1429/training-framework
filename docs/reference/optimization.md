@@ -30,7 +30,7 @@ want to configure one. Every post-iteration hook -- `checkpointer`, `logger`,
 |---|---|---|---|
 | `optimizer` | Stateful resource | Builds the optimizer, schedule and scaler in `setup` from the parameters of the DDP-wrapped model; checkpoints their state | [`optimizer`](#optimizer) |
 | `forward_context` | Lifecycle hook | Opens each iteration before any step: DDP `no_sync` while gradients accumulate, `torch.autocast` for `bf16` / `fp16` | none |
-| `backward` | Step | Leaves autocast and backpropagates the loss (divided by `accumulate_steps`, scaled for fp16); unscales fp16 gradients on an iteration that steps | [`backward`](#backward) |
+| `backward` | Step | Leaves autocast and backpropagates the loss (averaged over its accumulation group, scaled for fp16); unscales fp16 gradients on an iteration that steps | [`backward`](#backward) |
 | `freeze_gradients` | Step | Sets matching parameters' gradients to None until an iteration | [`freeze_gradients`](#freeze_gradients) |
 | `clip_gradients` | Step | Clips, or only measures, the total gradient norm | [`clip_gradients`](#clip_gradients) |
 | `optimizer_step` | Step | Steps the optimizer and the schedule, then clears the gradients | none |
@@ -71,7 +71,7 @@ optimizer:
 | `optimizer.kwargs` | `{}` | Its constructor arguments (not `params`) |
 | `lr_scheduler` | none | See [learning-rate schedule](#learning-rate-schedule) |
 | `param_groups` | none | A list of `{match, kwargs}`: parameters matching a `match` pattern get the entry's `kwargs` on top of the optimizer's. A parameter belongs to the first entry that matches it; the rest form a final default group |
-| `precision` | `fp32` | `fp32`, `bf16` (autocast) or `fp16` (autocast and a `GradScaler`, whose state is checkpointed). `bf16` is rejected on a CUDA device that does not support it |
+| `precision` | `fp32` | `fp32`, `bf16` (autocast) or `fp16` (autocast and a `GradScaler`, whose state is checkpointed). Under `fp16` a step whose gradients overflow is skipped, and the schedule does not advance for it. `bf16` is rejected on a CUDA device that does not support it |
 | `accumulate_steps` | `1` | Iterations per optimizer step; see [gradient accumulation](#gradient-accumulation) |
 
 The former `learning_rate`, `weight_decay` and `warmup_iters` fields are
@@ -140,24 +140,34 @@ clip_gradients:
 | Key | Default | Meaning |
 |---|---|---|
 | `max_norm` | none | Clip the total norm to this finite positive value |
-| `norm_type` | `2.0` | The norm's order |
+| `norm_type` | `2.0` | The norm's order; `.inf` for the largest absolute gradient (NaN is rejected) |
 | `track_norm` | `false` | Measure the norm without clipping |
 
 With neither `max_norm` nor `track_norm` it does nothing. The norm before
-clipping is exposed as `optimizer.grad_norm`, which `logger` prints.
+clipping is exposed as `optimizer.grad_norm`, which `logger` prints: the norm
+of the step the last iteration took, or none if that iteration did not step
+(accumulating).
 
 ## Gradient accumulation
 
 With `accumulate_steps: k`, each iteration is one micro-batch and the
 optimizer steps on every k-th iteration and on the final one. `backward`
-divides the loss by k, and DDP skips its gradient all-reduce (`no_sync`) on
-the iterations in between. The schedule advances once per optimizer step, so
+divides the loss by the size of its group -- k, except for a shorter last
+group when `max_iterations` is not a multiple of k -- so every step applies
+the mean over its micro-batches. DDP skips its gradient all-reduce
+(`no_sync`) on the iterations in between. The schedule advances once per optimizer step, so
 `$max_iterations` resolves to `ceil(max_iterations / k)` and `milestones`
 count optimizer steps.
 
 Gradients of an unfinished group are not checkpointed: choose a
 `checkpoint_every` that is a multiple of `k`, or the first step after a resume
 uses fewer micro-batches.
+
+An iteration that raises can be run again (the session rolls its counter
+back). If it had already run `backward`, its gradients are discarded first
+when it starts a group -- always so with `k = 1`; in the middle of a group they
+cannot be told apart from the group's earlier micro-batches, so running it
+again is refused: resume from the last checkpoint.
 
 ## Custom gradient stages
 
@@ -199,7 +209,9 @@ reconfigured by `--extend-session`.
   its own group. Overriding `optimizer.optimizer.kwargs.lr` while leaving
   `lr_scheduler` unchanged scales the active stage's base learning rate(s) by
   the same ratio, keeping its progress; a stage not reached yet runs with its
-  own originally configured base once it activates.
+  own originally configured base once it activates. A group whose
+  `param_groups` entry sets its own `lr` keeps its lr and its schedule as
+  they were.
 - **`lr_scheduler`**, replaced entirely. A changed schedule (class, stages,
   milestones or `metric_key`) restarts from the extension point and runs over
   the optimizer steps left; optimizer tensors and step counts are unaffected.
