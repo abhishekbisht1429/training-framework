@@ -286,3 +286,39 @@ def test_a_rank_plan_naming_an_unconfigured_component_is_reported(tmp_path):
 
     assert "is not configured in this session" in message
     assert "not active in this session" in message
+
+
+_DATASETS = "training_framework.components.builtin.datasets"
+
+
+def test_binding_to_an_optional_dataset_that_was_not_imported(tmp_path):
+    message = _error(
+        ValueError,
+        lambda: build_session(
+            tmp_path,
+            {"imagenet#train": {}},
+            bindings={"dataset": "imagenet#train"},
+        ),
+    )
+
+    assert message.startswith(
+        "Component binding target 'imagenet#train' is not a registered "
+        "component"
+    )
+    assert (
+        f"'imagenet' is an optional built-in; it is registered only once "
+        f"{_DATASETS} is imported"
+    ) in message
+    assert f"Add 'import {_DATASETS}'" in message
+    assert "pip install training-framework[vision]" in message
+    assert "@resource('imagenet')" not in message
+
+
+def test_requiring_an_optional_dataset_that_was_not_imported(tmp_path):
+    _consumer("cifar10")
+
+    message = _error(RuntimeError, lambda: build_session(tmp_path, {"diag_consumer": {}}))
+
+    assert message.startswith("unmet prerequisite! Resource 'cifar10'")
+    assert "Required by: Step 'diag_consumer' (DiagConsumer)" in message
+    assert f"Add 'import {_DATASETS}'" in message

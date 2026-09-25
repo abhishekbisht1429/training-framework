@@ -36,6 +36,8 @@ import training_framework.components.builtin.datasets  # noqa: F401
 ```
 
 Without torchvision that import fails with an `ImportError` naming the extra.
+Naming a dataset without the import fails as an unregistered component, and
+the error says which import is missing.
 
 ## Configuration
 

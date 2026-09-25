@@ -401,3 +401,23 @@ def test_a_training_session_loads_labelled_image_batches(tmp_path, monkeypatch):
         assert images.shape == (4, 3, 8, 8)
         assert labels.dtype == torch.int64
         assert set(labels.tolist()) <= {0, 1}
+
+
+def test_the_optional_component_table_lists_exactly_these_datasets():
+    from training_framework.components.builtin import datasets
+    from training_framework.components.optional import (
+        OPTIONAL_COMPONENTS,
+        VISION_DATASETS,
+    )
+
+    registered = {
+        exported.name
+        for exported in map(lambda name: getattr(datasets, name), datasets.__all__)
+        if "name" in vars(exported)
+    }
+
+    assert VISION_DATASETS.module == datasets.__name__
+    assert registered == {
+        name for name, package in OPTIONAL_COMPONENTS.items()
+        if package is VISION_DATASETS
+    }

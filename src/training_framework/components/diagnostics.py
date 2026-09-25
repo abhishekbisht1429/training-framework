@@ -20,6 +20,7 @@ from training_framework.components.registry import (
     _component_type,
     _normalize_component_session_type,
 )
+from training_framework.components.optional import OPTIONAL_COMPONENTS
 
 
 def _category_name(component_class: type[Component]) -> str:
@@ -247,6 +248,19 @@ def explain_missing_component(
                     f"{_searched_registries(session_type)}, or for any other "
                     "session type."
                 )
+            optional = OPTIONAL_COMPONENTS.get(resolved_name)
+            if optional is not None and role is None and not role_scopes:
+                lines.append(
+                    f"Reason: '{resolved_name}' is an optional built-in; it "
+                    f"is registered only once {optional.module} is imported."
+                )
+                lines.append(
+                    f"Fix: Add 'import {optional.module}' to a module of "
+                    "your session_config.components_package (or set "
+                    f"components_package to {optional.module}). It needs "
+                    f"`pip install training-framework[{optional.extra}]`."
+                )
+                return "\n".join(f"  {line}" for line in lines)
             scoped_hint = (
                 f" (add session_type='{session_type}' to limit it to "
                 f"'{session_type}' sessions)"
