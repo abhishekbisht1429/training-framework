@@ -3,6 +3,7 @@
 from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.components.builtin.analysis import AnalysisLogger
 from training_framework.components.builtin.computation import (
+    AnalysisCompute,
     AnalysisForward,
     Compute,
     Forward,
@@ -39,6 +40,7 @@ from training_framework.components.builtin.transformer import (
 
 __all__ = [
     "AnalysisDataManager",
+    "AnalysisCompute",
     "AnalysisForward",
     "AnalysisLogger",
     "Backward",

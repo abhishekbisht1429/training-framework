@@ -29,8 +29,18 @@ raised when the step runs.
 ## `load_batch`
 
 Takes `next(data_manager.data_iter)`, moves every tensor in it to the
-session's device -- through nested lists, tuples, named tuples and dicts;
+session's device -- through nested lists, tuples, named tuples and mappings;
 anything else is left as it is -- and stores it.
+
+- A value with its own `to()` -- a `PackedSequence`, a Hugging Face
+  `BatchEncoding`, a batch class of your own -- moves itself with
+  `to(device, non_blocking=...)`. Its type is kept, and so is whatever it
+  keeps on the CPU (a `PackedSequence`'s `batch_sizes`).
+- A mapping keeps its type: a dict subclass, an `OrderedDict` or a
+  `defaultdict` is copied and its values replaced, so attributes and a
+  default factory survive. A read-only mapping (a `MappingProxyType`, a
+  frozen mapping) is refused, naming its type: give it a `to()` method or
+  collate into a dict.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -132,6 +142,7 @@ Calls a function, or an instance of a class, on context keys.
 | [call settings](#call-settings) | | | |
 | `function` | string | required | What to call; see below |
 | `init` | mapping | none | Constructor arguments; see below |
+| `training` | bool | `true`; `false` in an analysis session | Train or eval mode of a module built here (`Dropout`, `BatchNorm`); an error for anything that is not an `nn.Module` -- pass a function's own `training` argument through `constants` |
 
 **Finding `function`.** A name without a dot is looked up in these modules, in
 order, and the first match wins:

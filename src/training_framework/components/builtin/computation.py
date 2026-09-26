@@ -11,9 +11,10 @@ what orders them: a step runs after the step that writes what it reads.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Mapping, Sequence
+import copy
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, ClassVar, override
 
 import torch
 from torch import nn
@@ -78,14 +79,42 @@ def _returned(values: dict[str, Any]) -> Any:
 
 
 def _to_device(value: Any, device: torch.device, non_blocking: bool) -> Any:
-    """Move every tensor in a batch to `device`, leaving the rest alone."""
+    """Move every tensor in a batch to `device`, leaving the rest alone.
+
+    A value with its own `to` moves itself: `PackedSequence` keeps
+    `batch_sizes` on the CPU, which rebuilding it field by field would not.
+    A mapping keeps its type; one that cannot be rebuilt with new values is
+    refused rather than turned into a plain dict.
+    """
     if isinstance(value, torch.Tensor):
         return value.to(device, non_blocking=non_blocking)
+    if callable(getattr(value, "to", None)):
+        try:
+            return value.to(device, non_blocking=non_blocking)
+        except TypeError as error:
+            raise TypeError(
+                f"load_batch moves a {type(value).__name__} with its own to(), "
+                "which must accept (device, non_blocking=...): "
+                f"{error}"
+            ) from error
     if isinstance(value, Mapping):
-        return {
+        moved = {
             key: _to_device(item, device, non_blocking)
             for key, item in value.items()
         }
+        if type(value) is dict:
+            return moved
+        if not isinstance(value, MutableMapping):
+            raise TypeError(
+                f"load_batch cannot move a {type(value).__name__} batch: it is "
+                "a read-only mapping, so it cannot be rebuilt with the moved "
+                "values. Give it a to(device, non_blocking=...) method, or "
+                "collate into a dict."
+            )
+        rebuilt = copy.copy(value)
+        for key, item in moved.items():
+            rebuilt[key] = item
+        return rebuilt
     if isinstance(value, tuple) and hasattr(value, "_fields"):
         return type(value)(*(
             _to_device(item, device, non_blocking) for item in value
@@ -167,7 +196,7 @@ class LoadBatch(Step):
         return {key: key for key in keys}
 
     @override
-    def run(self, session: Session) -> Any:
+    def run(self, session: Session, /, *args: Any, **reads: Any) -> Any:
         batch = _to_device(
             next(self.get_dependency("data_manager").data_iter),
             session.device,
@@ -326,13 +355,8 @@ class _CallStep(Step):
                             f"{sorted(map(str, result))}"
                         )
                     values[key] = result[result_field]
-                elif isinstance(result_field, str) and hasattr(result, result_field):
-                    values[key] = getattr(result, result_field)
                 else:
-                    raise KeyError(
-                        f"{self.name}.outputs picks {result_field!r}, which a "
-                        f"{type(result).__name__} result does not have"
-                    )
+                    values[key] = self._attribute(result, result_field)
             return _returned(values)
         if not isinstance(result, (list, tuple)) or len(result) != len(outputs):
             raise ValueError(
@@ -344,6 +368,19 @@ class _CallStep(Step):
                 )
             )
         return _returned(dict(zip(outputs, result)))
+
+    def _attribute(self, result, result_field) -> Any:
+        """`result_field` of `result`, read once: it may be a property."""
+        missing = KeyError(
+            f"{self.name}.outputs picks {result_field!r}, which a "
+            f"{type(result).__name__} result does not have"
+        )
+        if not isinstance(result_field, str):
+            raise missing
+        try:
+            return getattr(result, result_field)
+        except AttributeError as error:
+            raise missing from error
 
 
 def _shares_parameters(module: nn.Module, other: nn.Module) -> bool:
@@ -391,20 +428,17 @@ class Forward(_CallStep):
 
     config_schema = ForwardConfig
 
-    def __init__(self, config=None):
-        super().__init__(config)
-        self._route_checked = False
-
     @override
-    def run(self, session: Session, /, **inputs: Any) -> Any:
+    def run(self, session: Session, /, *args: Any, **inputs: Any) -> Any:
         return self._call(self._target(), inputs)
 
     def _target(self):
+        # Checked on every call, against what this instance holds now: a
+        # step can be pickled and registered elsewhere, bound to other
+        # models, so a result kept from an earlier call could be stale.
         model = self.get_dependency("model")
         wrapped = self.get_dependency("ddp").wrapped_model
-        if not self._route_checked:
-            self._check_route(model, getattr(wrapped, "module", None))
-            self._route_checked = True
+        self._check_route(model, getattr(wrapped, "module", None))
         if self._cfg.method is not None:
             return _bound_method(model, self._cfg.method, self.name)
         if getattr(wrapped, "module", None) is model:
@@ -464,7 +498,7 @@ class AnalysisForward(_CallStep):
     config_schema = AnalysisForwardConfig
 
     @override
-    def run(self, session: Session, /, **inputs: Any) -> Any:
+    def run(self, session: Session, /, *args: Any, **inputs: Any) -> Any:
         model = self.get_dependency("trained_model").model
         target = (
             model
@@ -530,11 +564,17 @@ class ComputeConfig(CallConfig):
     function: str
     init: Any = None
     """Constructor arguments; present (even `{}`) means "construct once"."""
+    training: bool | None = None
+    """The module's train/eval mode; None is the session type's default."""
 
     def __post_init__(self):
         super().__post_init__()
         if self.init is not None:
             self.init = _parameter_names(self.init, "init")
+        if self.training is not None and not isinstance(self.training, bool):
+            raise ValueError(
+                f"training must be a boolean; got {self.training!r}"
+            )
 
 
 @step("compute")
@@ -547,6 +587,9 @@ class Compute(_CallStep):
     constructed once and the instance is called (a module is moved to the
     session's device); any other class is called directly, like a function.
 
+    A module is put in train mode, or eval mode with `training: false`; in
+    an analysis session the default is eval mode.
+
     Meant for stateless callables. The instance persists across iterations
     but is not checkpointed, and a module's parameters are not trained: keep
     learnable weights in the model or a `ModuleResource`, and other state in
@@ -554,21 +597,44 @@ class Compute(_CallStep):
     """
 
     config_schema = ComputeConfig
+    default_training: ClassVar[bool] = True
+    """The module's mode when `training` is not set."""
 
     def __init__(self, config=None):
         super().__init__(config)
         self._function = _resolve_function(self._cfg.function, self._cfg.init)
         self._device = None
+        training = self._cfg.training
+        if isinstance(self._function, nn.Module):
+            self._function.train(
+                self.default_training if training is None else training
+            )
+        elif training is not None:
+            raise ValueError(
+                f"compute.training sets the mode of an nn.Module, but "
+                f"{self._cfg.function!r} is not an nn.Module, so it would do "
+                "nothing. A function taking `training` gets it through "
+                "constants: {training: ...}."
+            )
 
     @override
-    def run(self, session: Session, /, **inputs: Any) -> Any:
+    def run(self, session: Session, /, *args: Any, **inputs: Any) -> Any:
         if isinstance(self._function, nn.Module) and self._device != session.device:
             self._function.to(session.device)
             self._device = session.device
         return self._call(self._function, inputs)
 
 
+@step("compute", session_type=ANALYSIS_SESSION_TYPE)
+class AnalysisCompute(Compute):
+    """`compute` in an analysis session: a module is in eval mode unless
+    `training: true` asks otherwise."""
+
+    default_training = False
+
+
 __all__ = [
+    "AnalysisCompute",
     "AnalysisForward",
     "Compute",
     "Forward",

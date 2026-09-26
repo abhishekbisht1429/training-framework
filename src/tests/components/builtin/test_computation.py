@@ -865,3 +865,235 @@ def test_a_separate_model_with_gradients_is_called_directly(tmp_path):
         next(session)
 
     assert seen[0]["other"].requires_grad
+
+
+# -- review 2: checks that go stale, batch types, modes --------------------------------
+
+
+def test_a_forward_checks_its_route_again_where_it_is_registered(tmp_path):
+    _register()
+
+    @resource("cmp_teacher", overwrite=True)
+    class Teacher(nn.Module, _InertResource):
+        def __init__(self, config=None):
+            nn.Module.__init__(self)
+            self.linear = nn.Linear(2, 1)
+
+        def encode(self, x):
+            return self.linear(x)
+
+    _recorder("other")
+    safe = _gradient_config(tmp_path, method="encode")
+    safe["cmp_teacher"] = {}
+    safe["component_bindings"]["forward#other"] = {"model": "cmp_teacher"}
+    with _session(safe) as session:
+        next(session)
+        checked = next(s for s in session.get_all_steps() if s.name == "forward#other")
+
+    # Registered where `model` is the model DDP wraps, the same instance --
+    # already checked once, against the teacher -- must be refused.
+    session = _session(_gradient_config(tmp_path, method="encode"))
+    session.remove_step("forward#other")
+    session.add_step(checked)
+    with session:
+        with pytest.raises(RuntimeError, match=r"forward#other calls Model\.encode"):
+            next(session)
+
+
+class SelfMovingBatch:
+    """A batch type that knows how to move itself, as PackedSequence does."""
+
+    def __init__(self, inputs, moved_to=None):
+        self.inputs = inputs
+        self.moved_to = moved_to
+
+    def to(self, device, non_blocking=False):
+        return SelfMovingBatch(self.inputs.to(device), moved_to=torch.device(device))
+
+
+def _register_collated(collate):
+    """The four samples, collated into one batch by `collate`."""
+
+    @resource("cmp_dataset", overwrite=True)
+    class Dataset(_InertResource):
+        def __len__(self):
+            return len(INPUTS)
+
+        def __getitem__(self, index):
+            return INPUTS[index]
+
+        @staticmethod
+        def collate_fn(samples):
+            return collate(torch.stack(samples))
+
+
+def _whole_batch(tmp_path, collate):
+    _register()
+    _register_collated(collate)
+    seen = _recorder("batch")
+    config = _config(tmp_path, max_iterations=1, load_batch={}, cmp_recorder={})
+    del config["optimizer"]
+    with _session(config) as session:
+        next(session)
+    return seen[0]["batch"]
+
+
+def test_a_batch_that_has_its_own_to_moves_itself(tmp_path):
+    batch = _whole_batch(tmp_path, SelfMovingBatch)
+
+    assert isinstance(batch, SelfMovingBatch)
+    assert batch.moved_to == torch.device("cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_a_packed_sequence_batch_reaches_the_gpu(tmp_path):
+    def pack(inputs):
+        return nn.utils.rnn.pack_padded_sequence(
+            inputs.unsqueeze(-1), lengths=[2, 2, 2, 2], batch_first=True,
+        )
+
+    _register()
+    _register_collated(pack)
+    seen = _recorder("batch")
+    config = _config(tmp_path, max_iterations=1, load_batch={}, cmp_recorder={})
+    config["session_config"]["device"] = "cuda"
+    del config["optimizer"]
+    with _session(config) as session:
+        next(session)
+
+    batch = seen[0]["batch"]
+    assert isinstance(batch, nn.utils.rnn.PackedSequence)
+    assert batch.data.device.type == "cuda"
+    assert batch.batch_sizes.device.type == "cpu"
+
+
+class TaggedBatch(dict):
+    """A dict batch carrying an attribute of its own."""
+
+
+def test_a_dict_subclass_batch_keeps_its_type_and_attributes(tmp_path):
+    def tag(inputs):
+        batch = TaggedBatch(inputs=inputs)
+        batch.source = "tagged"
+        return batch
+
+    batch = _whole_batch(tmp_path, tag)
+
+    assert type(batch) is TaggedBatch
+    assert batch.source == "tagged"
+    assert batch["inputs"].shape == INPUTS.shape
+
+
+def test_a_read_only_mapping_batch_is_refused_not_turned_into_a_dict(tmp_path):
+    from types import MappingProxyType
+
+    with pytest.raises(TypeError, match="mappingproxy"):
+        _whole_batch(tmp_path, lambda inputs: MappingProxyType({"inputs": inputs}))
+
+
+def test_an_attribute_output_is_read_once(tmp_path):
+    _register()
+    seen = _recorder("pooled")
+    reads = []
+
+    class Result:
+        @property
+        def pooled(self):
+            reads.append(1)
+            return len(reads)
+
+    @resource("cmp_structured", overwrite=True)
+    class Structured(nn.Module, _InertResource):
+        def __init__(self, config=None):
+            nn.Module.__init__(self)
+
+        def forward(self, x):
+            return Result()
+
+    config = _config(
+        tmp_path,
+        max_iterations=1,
+        cmp_structured={},
+        cmp_recorder={},
+        load_batch={"fields": ["inputs", "targets"]},
+        forward={"args": ["inputs"], "outputs": {"pooled": "pooled"}},
+    )
+    del config["optimizer"]
+    config["component_bindings"]["forward"] = {"model": "cmp_structured"}
+    with _session(config) as session:
+        next(session)
+
+    assert seen[0]["pooled"] == 1
+    assert len(reads) == 1
+
+
+def _dropout(tmp_path, analysis, **compute):
+    """The inputs, and what a `compute` of `Dropout(p=0.9)` makes of them."""
+    _register()
+    compute = {
+        "function": "Dropout",
+        "init": {"p": 0.9},
+        "args": ["inputs"],
+        "outputs": "dropped",
+        **compute,
+    }
+    config = make_config(tmp_path, max_iterations=1)
+    config["session_config"]["show_execution_graph"] = False
+    if analysis:
+        @resource("cmp_trained", session_type="analysis", overwrite=True)
+        class Trained(_InertResource):
+            model = _fresh_linear()
+
+        seen = []
+
+        @reads("inputs", "dropped")
+        @step("cmp_probe", session_type="analysis", overwrite=True)
+        class Probe(Step):
+            def run(self, session, inputs, dropped):
+                seen.append((inputs, dropped))
+
+        config.update({
+            "component_bindings": {
+                "trained_model": "cmp_trained", "dataset": "cmp_dataset",
+            },
+            "cmp_trained": {},
+            "cmp_dataset": {},
+            "cmp_probe": {},
+            "data_manager": {"batch_size": 4},
+            "load_batch": {"fields": ["inputs", "targets"]},
+            "compute": compute,
+        })
+    else:
+        recorded = _recorder("inputs", "dropped")
+        config = _config(
+            tmp_path,
+            max_iterations=1,
+            cmp_recorder={},
+            load_batch={"fields": ["inputs", "targets"]},
+            compute=compute,
+        )
+        del config["optimizer"]
+    with _session(config) as session:
+        next(session)
+    if analysis:
+        return seen[0]
+    return recorded[0]["inputs"], recorded[0]["dropped"]
+
+
+@pytest.mark.parametrize(("analysis", "compute", "active"), [
+    (False, {}, True),
+    (False, {"training": False}, False),
+    (True, {}, False),
+    (True, {"training": True}, True),
+])
+def test_a_compute_module_is_in_the_mode_of_its_session_unless_set(
+        tmp_path, analysis, compute, active,
+):
+    inputs, dropped = _dropout(tmp_path, analysis, **compute)
+
+    assert torch.equal(dropped, inputs) is not active
+
+
+def test_training_for_something_that_is_not_a_module_is_refused():
+    with pytest.raises(ValueError, match=r"not an nn\.Module.*constants"):
+        Compute({"function": "dropout", "training": False, "outputs": "x"})
