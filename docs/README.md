@@ -39,6 +39,9 @@ A task-ordered path. It picks up where the
 - [Optimization](reference/optimization.md) — `optimizer`, the steps from
   `backward` to `optimizer_step`, accumulation, precision, custom gradient
   stages.
+- [Fine-tuning](reference/fine-tuning.md) — `checkpoint_module` and
+  `fine_tuned_model`: a pretrained backbone from another run, frozen layers,
+  and your own head.
 - [Transformer blocks](reference/transformer-blocks.md) — the swappable
   transformer building blocks and the two composite models.
 - [Image datasets](reference/datasets.md) — optional torchvision datasets

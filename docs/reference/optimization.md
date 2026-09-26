@@ -133,7 +133,9 @@ freeze_gradients:
 | `rules[].until_iteration` | required | Non-negative integer; the gradients are dropped while `iteration <= until_iteration` |
 
 A parameter whose gradient is None is skipped by the optimizer entirely,
-weight decay and moment updates included.
+weight decay and moment updates included. The backward pass still computes
+those gradients; to freeze parameters for a whole run and skip that work, see
+[`fine_tuned_model.frozen`](fine-tuning.md#fine_tuned_model).
 
 ## `clip_gradients`
 

@@ -22,7 +22,6 @@ from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, override
 
 import torch
@@ -40,6 +39,11 @@ from training_framework.components import (
     requires_step,
     resource,
     step,
+)
+from training_framework.components.builtin.parameter_patterns import (
+    check_patterns_match,
+    matches_any,
+    parameter_patterns,
 )
 
 if TYPE_CHECKING:
@@ -210,46 +214,6 @@ def _resolve_placeholders(
 
 
 
-def _patterns(value: Any, path: str) -> list[str]:
-    """Return a list of parameter-name glob patterns, one string or several."""
-    if isinstance(value, str):
-        value = [value]
-    if (
-            not isinstance(value, Sequence)
-            or isinstance(value, (bytes, Mapping))
-            or not value
-            or any(not isinstance(item, str) or not item for item in value)
-    ):
-        raise ValueError(
-            f"{path} must be a non-empty list of parameter name patterns"
-        )
-    return list(value)
-
-
-def _matches(name: str, patterns: Sequence[str]) -> bool:
-    return any(fnmatchcase(name, pattern) for pattern in patterns)
-
-
-def _check_patterns_match(
-        patterns: Sequence[str],
-        names: Sequence[str],
-        path: str,
-) -> None:
-    """Reject a pattern that selects no parameter: it is almost always a typo,
-    and a rule that silently applies to nothing gives a run that works and is
-    quietly wrong."""
-    unmatched = [
-        pattern for pattern in patterns
-        if not any(fnmatchcase(name, pattern) for name in names)
-    ]
-    if unmatched:
-        preview = ", ".join(names[:8]) + (", ..." if len(names) > 8 else "")
-        raise ValueError(
-            f"{path} patterns {unmatched} match no parameter. Parameter "
-            f"names look like: {preview}"
-        )
-
-
 def _unwrapped(wrapped_model: nn.Module) -> nn.Module:
     """The model DDP wraps, whose parameter names patterns are written for."""
     if isinstance(wrapped_model, nn.parallel.DistributedDataParallel):
@@ -390,7 +354,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                     "parameters are the ones its patterns match"
                 )
             groups.append({
-                "match": _patterns(entry.get("match"), f"{path}.match"),
+                "match": parameter_patterns(entry.get("match"), f"{path}.match"),
                 "kwargs": deepcopy(dict(kwargs)),
             })
         return groups
@@ -539,12 +503,12 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         claimed: set[str] = set()
         groups = []
         for index, group in enumerate(configured):
-            _check_patterns_match(
+            check_patterns_match(
                 group["match"], names, f"optimizer.param_groups[{index}].match",
             )
             params = []
             for name, parameter in named:
-                if name not in claimed and _matches(name, group["match"]):
+                if name not in claimed and matches_any(name, group["match"]):
                     claimed.add(name)
                     params.append(parameter)
             groups.append({"params": params, **deepcopy(group["kwargs"])})
@@ -1250,7 +1214,7 @@ class FreezeGradientsConfig:
                     f"got {until!r}"
                 )
             rules.append({
-                "match": _patterns(rule.get("match"), f"{path}.match"),
+                "match": parameter_patterns(rule.get("match"), f"{path}.match"),
                 "until_iteration": until,
             })
         self.rules = tuple(rules)
@@ -1281,7 +1245,7 @@ class FreezeGradients(GradientProcessor):
         if not self._patterns_checked and self._cfg.rules:
             names = self.get_dependency("optimizer").parameter_names()
             for index, rule in enumerate(self._cfg.rules):
-                _check_patterns_match(
+                check_patterns_match(
                     rule["match"], names,
                     f"freeze_gradients.rules[{index}].match",
                 )
@@ -1297,7 +1261,7 @@ class FreezeGradients(GradientProcessor):
         if not active:
             return
         for name, parameter in named_parameters:
-            if any(_matches(name, patterns) for patterns in active):
+            if any(matches_any(name, patterns) for patterns in active):
                 parameter.grad = None
 
 

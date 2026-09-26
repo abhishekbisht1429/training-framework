@@ -50,8 +50,10 @@ every multi-process launch.
 [generic steps](generic-steps.md) (`LoadBatch`, `Forward`, `AnalysisForward`,
 `Compute`) and of the [optimization chain](optimization.md)
 (`OptimizerResource`, `ForwardContext`, `Backward`, `FreezeGradients`,
-`ClipGradients`, `OptimizerStep`, `GradientProcessor`). They are configured by
-name in YAML; only `GradientProcessor` is meant to be subclassed.
+`ClipGradients`, `OptimizerStep`, `GradientProcessor`), and the
+[fine-tuning](fine-tuning.md) resources (`CheckpointModule`,
+`FineTunedModel`). They are configured by name in YAML; only
+`GradientProcessor` is meant to be subclassed.
 
 `training_framework.functions` holds the small functions `compute` finds by
 name: `weighted_sum(*, weights=None, **terms)`; see

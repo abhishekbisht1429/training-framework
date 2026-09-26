@@ -28,6 +28,8 @@ which registers all built-ins. Their classes are also importable from
 | `freeze_gradients` | Step | Drops the gradients of matching parameters until an iteration; does nothing unless configured; [chain](optimization.md#freeze_gradients) |
 | `clip_gradients` | Step | Clips or measures the total gradient norm; does nothing unless configured; [chain](optimization.md#clip_gradients) |
 | `optimizer_step` | Step | Steps the optimizer and its schedule on iterations that end an accumulation group; [chain](optimization.md#the-chain) |
+| `checkpoint_module` | Resource | A module taken out of another run's checkpoint, trained and checkpointed here; [fine-tuning](fine-tuning.md#checkpoint_module) |
+| `fine_tuned_model` | Resource | `head(backbone(x))` with part of the backbone frozen; requires `backbone` and `head`; [fine-tuning](fine-tuning.md#fine_tuned_model) |
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
 

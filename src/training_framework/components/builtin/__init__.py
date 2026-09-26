@@ -13,6 +13,10 @@ from training_framework.components.builtin.data import (
     DataManager,
 )
 from training_framework.components.builtin.distributed import DDPResource
+from training_framework.components.builtin.fine_tuning import (
+    CheckpointModule,
+    FineTunedModel,
+)
 from training_framework.components.builtin.layer_inspection import (
     LayerCapture,
     LayerInspector,
@@ -42,11 +46,13 @@ __all__ = [
     "AnalysisForward",
     "AnalysisLogger",
     "Backward",
+    "CheckpointModule",
     "Checkpointer",
     "ClipGradients",
     "Compute",
     "DataManager",
     "DDPResource",
+    "FineTunedModel",
     "Forward",
     "ForwardContext",
     "FreezeGradients",
