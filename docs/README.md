@@ -2,18 +2,66 @@
 
 [Project README](../README.md)
 
-Use the guides in this order when learning the framework:
+The docs are in three tracks. Read the **guide** in order if you are new;
+dip into **reference** when you need a specific key or signature; read
+**concepts** when you need to know why something behaves the way it does.
 
-1. [Components](components.md) — resources, hooks, steps, state, registration, bindings, and dependencies.
-2. [Sessions](sessions.md) — lifecycle, shared contexts, analysis, and direct execution.
-3. [Configuration](configuration.md) — YAML configuration, CLI operations, overrides, and monitoring options.
-4. [Architecture](architecture.md) — parent/worker responsibilities, spawning, supervision, and heartbeats.
+## Learn it
 
-Reference and advanced guides:
+A task-ordered path. It picks up where the
+[quick start](../README.md#quick-start) in the project README ends.
 
-- [Distributed training](distributed-training.md)
-- [Checkpointing, resume, and extension](checkpointing.md)
-- [Built-in components and samplers](built-in-components.md)
-- [API summary](api.md)
-- [Development and testing](development.md)
-- [Current behavior and limitations](limitations.md)
+1. [Resources, hooks, and steps](guide/01-resources-hooks-steps.md) — the three
+   kinds of component, giving one state that survives a checkpoint, and how the
+   framework discovers your classes.
+2. [Wiring components together](guide/02-wiring-components.md) — activating
+   components from YAML, binding a role to an implementation, declaring
+   dependencies and wrapping.
+3. [Building an iteration](guide/03-building-an-iteration.md) — a training
+   run from the built-in `load_batch`, `forward` and `compute` steps and the
+   optimizer, configured in YAML; recipes for several losses, a second model
+   and two views.
+4. [Configuration](guide/04-configuration.md) — the `sessions` structure,
+   `session_config` fields, and command-line overrides.
+5. [Checkpoints, resume, and extend](guide/05-checkpoints-and-resume.md) — what
+   a checkpoint holds, continuing a run, and changing hyperparameters safely.
+6. [Distributed training](guide/06-distributed-training.md) — DDP configuration,
+   how a launch decides its topology, and coordinated stopping.
+7. [Analysis sessions](guide/07-analysis-sessions.md) — driving a trained
+   checkpoint through an analysis workflow.
+
+## Look it up
+
+- [Built-in components](reference/builtin-components.md) — every component the
+  framework ships with, and its configuration keys.
+- [Generic steps](reference/generic-steps.md) — `load_batch`, `forward` and
+  `compute`: every key, and how values go in and out of `iteration_context`.
+- [Optimization](reference/optimization.md) — `optimizer`, the steps from
+  `backward` to `optimizer_step`, accumulation, precision, custom gradient
+  stages.
+- [Transformer blocks](reference/transformer-blocks.md) — the swappable
+  transformer building blocks and the two composite models.
+- [Image datasets](reference/datasets.md) — optional torchvision datasets
+  (CIFAR-10, Flowers-102, Stanford Cars, iNaturalist, ImageNet) for the
+  `dataset` role.
+- [Infinite samplers](reference/samplers.md) — `InfiniteSampler` and
+  `DistributedInfiniteSampler`.
+- [CLI reference](reference/cli.md) — every command-line flag.
+- [API summary](reference/api.md) — public imports and type members.
+
+## Understand it
+
+- [Architecture and process model](concepts/architecture.md) — parent and
+  worker responsibilities, spawning, supervision, heartbeats.
+- [Session lifecycle](concepts/session-lifecycle.md) — exact phase ordering,
+  failure and rollback, the two shared contexts.
+- [The component model](concepts/component-model.md) — what a component may do
+  while being constructed, configuration schemas, dependency errors.
+- [`ModuleResource`](concepts/module-resource.md) — composing `nn.Module`
+  resources and who owns which weights.
+- [Current behavior and limitations](concepts/limitations.md) — known
+  constraints, grouped by area.
+
+## Contributing
+
+- [Development and testing](development.md) — running the suite, project layout.

@@ -2,6 +2,8 @@
 
 from training_framework.components.base import (
     Component,
+    ComponentDependencyError,
+    ExtendableComponent,
     Hook,
     IterationHook,
     LifecycleHook,
@@ -16,21 +18,31 @@ from training_framework.components.base import (
     StatefulStep,
     Step,
 )
+from training_framework.components.config_schema import parse_component_config
+from training_framework.components.module import ModuleResource
 from training_framework.components.registry import (
     ANALYSIS_SESSION_TYPE,
     TRAINING_SESSION_TYPE,
     ComponentAliases,
     ComponentBindings,
+    RoleDeclaration,
+    activates,
     component_registry,
     format_execution_graph,
     hook,
+    rank_zero_only,
+    reads,
+    singleton,
     requires_hook,
     requires_resource,
     requires_step,
     resource,
+    role,
+    role_registry,
     step,
     topological_sort_of_components,
     wraps,
+    writes,
 )
 
 __all__ = [
@@ -39,10 +51,15 @@ __all__ = [
     "Component",
     "ComponentAliases",
     "ComponentBindings",
+    "ComponentDependencyError",
+    "ExtendableComponent",
     "Hook",
     "IterationHook",
     "LifecycleHook",
+    "ModuleResource",
+    "parse_component_config",
     "Resource",
+    "RoleDeclaration",
     "SessionHook",
     "Stateful",
     "StatefulIterationHook",
@@ -52,16 +69,23 @@ __all__ = [
     "StatefulSessionHook",
     "StatefulStep",
     "Step",
+    "activates",
     "component_registry",
     "format_execution_graph",
     "hook",
+    "rank_zero_only",
+    "reads",
+    "singleton",
     "requires_hook",
     "requires_resource",
     "requires_step",
     "resource",
+    "role",
+    "role_registry",
     "step",
     "topological_sort_of_components",
     "wraps",
+    "writes",
 ]
 
 from training_framework.components import builtin as builtin

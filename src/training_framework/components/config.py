@@ -29,9 +29,7 @@ def component_bindings_from_config(config: Mapping) -> Mapping[str, str]:
     return config.get("component_bindings", {})
 
 
-SESSION_RESERVED_CONFIG_NAMES = {
-    "analysis": frozenset({"model_checkpoint_path"}),
-}
+SESSION_RESERVED_CONFIG_NAMES: dict[str, frozenset[str]] = {}
 
 
 def reserved_config_names(session_type: str | None = None) -> frozenset[str]:

@@ -4,6 +4,7 @@ import warnings
 from abc import abstractmethod
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any, cast, override
 
@@ -28,9 +29,11 @@ from training_framework.session.config import (
 from training_framework.session.io import write_session_config
 from training_framework.session.registry import session_class_for_type
 from training_framework.session.state import (
+    CHECKPOINT_VERSION,
     capture_rng_state,
     configuration_from_state,
     restore_rng_state,
+    rng_restore_enabled,
 )
 from training_framework.session.runtime import (
     clear_iteration_state,
@@ -48,6 +51,7 @@ from training_framework.util import (
     context_exit,
     import_all_modules,
     requires_context,
+    timestamp_str,
 )
 
 
@@ -84,6 +88,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         )
 
         self._iteration = 0
+        self._extension_config_history_pending = False
 
         torch.manual_seed(self._session_config.rng_seed)
         random.seed(self._session_config.rng_seed)
@@ -147,29 +152,44 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     def _init_transient_infra(self):
         self._device = self._check_and_get_device()
+        # The values steps and hooks hand each other this iteration. Not
+        # public: every key is declared with @reads/@writes and passed as an
+        # argument or returned, so the checks see every exchange.
         self._shared_state: dict[str, Any] = {}
+        # Bumped whenever the per-iteration state is cleared, so a component
+        # keeping its own per-iteration data knows when it went stale.
+        self._iteration_generation = 0
         import_all_modules(self._session_settings["components_package"])
 
         self._successfully_setup_resource_names = set()
         self._successfully_setup_hook_names = set()
 
         self._dist_manager_err_conn = None
-        self._heartbeat_interval = None
-        self._last_heartbeat_time = 0.0
+        self._worker_exception_reported = False
+        self._progress_beacon = None
+
+        # A CUDA stream this process could not apply because it pinned no
+        # device. The parent is such a process: it holds the stream so the
+        # workers it spawns still get it.
+        self._pending_cuda_rng_state = None
 
     @override
     def get_state(self):
         state = {
+            "checkpoint_version": CHECKPOINT_VERSION,
             "session_type": self._session_type,
             "config": deepcopy(self._config),
-            "session_config": self._session_config,
+            "session_config": asdict(self._session_config),
             "iteration": self._iteration,
             "components_state": self._components.get_state(),
             "session_context": deepcopy(self._session_context),
             "init_args": self._init_args,
+            "extension_config_history_pending": (
+                self._extension_config_history_pending
+            ),
         }
         state.update(self._get_session_type_state())
-        state.update(capture_rng_state())
+        state.update(capture_rng_state(self._pending_cuda_rng_state))
         return state
 
     @staticmethod
@@ -178,6 +198,9 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     @override
     def set_state(self, state):
+        self._apply_state(state)
+
+    def _apply_state(self, state, *, on_mismatch="raise"):
         if "components_state" not in state:
             raise ValueError(
                 "Checkpoint uses an unsupported component state schema; "
@@ -190,17 +213,28 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             self._session_config,
         ) = self._configuration_from_state(state)
         self._iteration = state["iteration"]
+        self._extension_config_history_pending = state.get(
+            "extension_config_history_pending",
+            False,
+        )
 
         self._init_transient_infra()
         restored_components = SessionComponents(
             component_bindings=component_bindings_from_config(self._config),
             session_type=self._session_type,
         )
-        restored_components.set_state(state["components_state"])
+        restored_components.set_state(
+            state["components_state"],
+            on_mismatch=on_mismatch,
+        )
         self._components = restored_components
 
         self._session_context = state["session_context"]
-        restore_rng_state(state)
+        if rng_restore_enabled():
+            self._pending_cuda_rng_state = restore_rng_state(
+                state,
+                rng_seed=self._session_settings["rng_seed"],
+            )
 
     def _prepare_for_state_restore(self, state) -> None:
         self._init_args = state["init_args"]
@@ -220,7 +254,12 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self.set_state(state)
 
     @classmethod
-    def from_state(cls, session_state):
+    def from_state(cls, session_state, *, on_mismatch="raise"):
+        """Rebuild a session from `get_state()`'s result.
+
+        `on_mismatch` is `SessionComponents.set_state`'s: what to do with a
+        component whose saved state this version cannot take.
+        """
         if "session_type" not in session_state:
             raise ValueError(
                 "Checkpoint does not contain the required 'session_type'"
@@ -237,7 +276,8 @@ class Session(Stateful, metaclass=CaptureInitMeta):
                 f"{session_type} session-type state"
             )
         obj = target_cls.__new__(target_cls)
-        obj.__setstate__(session_state)
+        obj._prepare_for_state_restore(session_state)
+        obj._apply_state(session_state, on_mismatch=on_mismatch)
         return obj
 
     @property
@@ -269,11 +309,6 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     @property
     def session_context(self):
         return self._session_context
-
-    @property
-    @requires_context
-    def iteration_context(self):
-        return self._shared_state
 
     # --------------------------------------------------------------------
 
@@ -321,12 +356,6 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _clear_iteration_state(self):
         clear_iteration_state(self)
 
-    def get_resource(self, key: str):
-        return self._components.get_resource(key)
-
-    def has_resource(self, resource_name):
-        return self._components.has_resource(resource_name)
-
     @property
     def component_aliases(self) -> dict[str, str]:
         warnings.warn(
@@ -345,6 +374,30 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     def _component_dependency_closure(self, names) -> set[str]:
         return self._components.dependency_closure(names)
+
+    def validate_component_names(self, names, *, source: str) -> set[str]:
+        """Resolve configured component names against this session."""
+        return self._components.validate_component_names(names, source=source)
+
+    def rank_parallel_names(self, **kwargs) -> set[str]:
+        """Return the components a secondary DDP rank builds.
+
+        The engine calls this on the parent's session before it spawns
+        anything, so a name that does not resolve is reported by the launch
+        rather than by a worker the other ranks are already waiting for.
+        """
+        return self._components.rank_parallel_names(**kwargs)
+
+    def activate_component(self, name: str, config=None) -> str:
+        """Activate a registered component and its prerequisites.
+
+        Only valid before the session is set up. This is the supported way to
+        add a component that declares dependencies: it resolves bindings and
+        constructs each component with its prerequisites visible, which
+        registering a hand-built instance cannot do.
+        """
+        self._raise_if_not_new()
+        return self._components.activate_component(name, config)
 
     def get_all_hooks(self):
         return list(self._components.hooks.values())
@@ -435,7 +488,11 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def __enter__(self):
         self._raise_if_finished()
 
-        ddp_resource = self.get_resource("ddp") if self.has_resource("ddp") else None
+        ddp_resource = (
+            self._components.get_resource("ddp")
+            if self._components.has_resource("ddp")
+            else None
+        )
         if self._session_settings.get("show_execution_graph", True):
             # print only for rank zero
             if ddp_resource is None or cast(Any, ddp_resource).rank == 0:
@@ -466,17 +523,25 @@ class Session(Stateful, metaclass=CaptureInitMeta):
                 self.session_config.session_dir,
                 self.full_config,
             )
+            if self._extension_config_history_pending:
+                write_session_config(
+                    self.session_config.session_dir,
+                    self.full_config,
+                    filename=f"config_extension_{timestamp_str()}.yaml",
+                )
+                self._extension_config_history_pending = False
 
         self._phase = SessionPhase.READY
         return self
 
     @context_exit
     def __exit__(self, exc_type, exc_val, exc_tb):
-        report_worker_exception(self, exc_type, exc_val)
-
-        self._teardown_session_hooks()
-        self._teardown_resources()
-        self._session_context.clear()
+        try:
+            report_worker_exception(self, exc_type, exc_val)
+        finally:
+            self._teardown_session_hooks()
+            self._teardown_resources()
+            self._session_context.clear()
 
         if self._phase is SessionPhase.READY:
             self._phase = SessionPhase.NEW
@@ -487,9 +552,14 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
     def set_dist_manager_err_conn(self, err_conn):
         self._dist_manager_err_conn = err_conn
+        self._worker_exception_reported = False
 
-    def set_heartbeat_interval(self, interval):
-        self._heartbeat_interval = interval
+    @property
+    def worker_exception_reported(self) -> bool:
+        return self._worker_exception_reported
+
+    def set_progress_beacon(self, beacon):
+        self._progress_beacon = beacon
 
     def send_heartbeat(self, stage):
         send_worker_heartbeat(self, stage)

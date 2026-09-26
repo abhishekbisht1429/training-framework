@@ -1,7 +1,7 @@
 # Training Framework
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
-[![Package version](https://img.shields.io/badge/version-0.3.4-blue.svg)](./pyproject.toml)
+[![Package version](https://img.shields.io/badge/version-0.5.0-blue.svg)](./pyproject.toml)
 [![Python tests](https://github.com/abhishekbisht1429/training-framework/actions/workflows/python-tests.yaml/badge.svg)](https://github.com/abhishekbisht1429/training-framework/actions/workflows/python-tests.yaml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
@@ -9,7 +9,7 @@ A component-based framework for building, running, checkpointing, and supervisin
 
 Workflow code is organized into reusable **resources**, **hooks**, and **steps**. `TrainingSession` and `AnalysisSession` share the lifecycle implemented by the abstract `Session` base, while using separate component registries and defaults. `TrainingEngine` constructs or restores the appropriate session in the parent process, serializes its state, launches one or more spawned workers, and monitors them for completion, errors, interrupts, and missed heartbeats.
 
-> **Project status:** This project is under active development. The current API is suitable for experimentation and framework development, but review [Current behavior and limitations](docs/limitations.md) before using it for long-running or production workloads.
+> **Project status:** This project is under active development. The current API is suitable for experimentation and framework development, but review [Current behavior and limitations](docs/concepts/limitations.md) before using it for long-running or production workloads.
 
 
 ## Features
@@ -20,6 +20,7 @@ Workflow code is organized into reusable **resources**, **hooks**, and **steps**
 - Explicit resource, hook, and step dependencies
 - Opt-in rollback for partially initialized resources and session hooks
 - Topological execution ordering and dependency-cycle detection
+- Built-in batch, forward and loss steps configured in YAML, ordered by the `iteration_context` keys they read and write
 - Session-level and iteration-level shared contexts
 - Stateful component checkpointing and session restoration
 - Restoration of Python, NumPy, PyTorch, and CUDA RNG state
@@ -90,9 +91,11 @@ from training_framework.components import (
     StatefulResource,
     Step,
     hook,
+    reads,
     requires_resource,
     resource,
     step,
+    writes,
 )
 from training_framework.session import TrainingSession
 
@@ -117,18 +120,19 @@ class CounterResource(StatefulResource):
 
 @step("increment")
 @requires_resource("counter")
+@writes("counter_value")
 class IncrementStep(Step):
     def __init__(self, config: dict):
         self.amount = int(config.get("amount", 1))
 
-    def run(self, session: TrainingSession) -> None:
-        counter = session.get_resource("counter")
+    def run(self, session: TrainingSession) -> int:
+        counter = self.get_dependency("counter")
         counter.value += self.amount
-        session.iteration_context["counter_value"] = counter.value
+        return counter.value
 
 
 @hook("progress")
-@requires_resource("counter")
+@reads("counter_value")
 class ProgressHook(LifecycleHook):
     def __init__(self, config: dict):
         self.call_every = int(config.get("call_every", 1))
@@ -142,12 +146,17 @@ class ProgressHook(LifecycleHook):
     def pre_iteration_callback(self, session: TrainingSession) -> None:
         pass
 
-    def post_iteration_callback(self, session: TrainingSession) -> None:
-        value = session.iteration_context["counter_value"]
-        print(f"iteration={session.iteration}, counter={value}")
+    def post_iteration_callback(
+        self, session: TrainingSession, counter_value: int
+    ) -> None:
+        print(f"iteration={session.iteration}, counter={counter_value}")
 ```
 
 Each configured component class receives its YAML mapping as one `config` argument.
+The step and the hook share a value through the iteration's context: `@writes`
+stores what `run` returns under `counter_value`, and `@reads` passes it to
+`post_iteration_callback` as the `counter_value` argument (see
+[Ordering by dataflow](docs/guide/02-wiring-components.md#ordering-by-dataflow)).
 
 ### 3. Create the YAML configuration
 
@@ -228,21 +237,94 @@ heartbeat, failure, timeout, or termination monitoring:
 python -m my_project.train --config my_project/config.yaml --debug
 ```
 
+## Training a real model
+
+The quick start writes its own step. For ordinary training you do not have to:
+the built-in `load_batch`, `forward` and `compute` steps and the `optimizer`
+resource do the work from configuration, so the only code is a dataset and a
+model, registered as resources:
+
+```python
+import torch
+from torch import nn
+
+from training_framework.components import ModuleResource, Resource, resource
+
+
+@resource("toy_dataset")
+class ToyDataset(Resource):
+    def __init__(self, config=None):
+        self.inputs = torch.randn(256, 8)
+        self.targets = (self.inputs.sum(dim=1) > 0).long()
+
+    def setup(self, session):
+        pass
+
+    def teardown(self, session):
+        pass
+
+    def __len__(self):
+        return len(self.inputs)
+
+    def __getitem__(self, index):
+        return self.inputs[index], self.targets[index]
+
+
+@resource("classifier")
+class Classifier(ModuleResource):
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.net = nn.Sequential(nn.Linear(8, 32), nn.ReLU(), nn.Linear(32, 2))
+
+    def forward(self, inputs):
+        return self.net(inputs)
+```
+
+In the session's YAML, next to `session_config`:
+
+```yaml
+    component_bindings: {model: classifier, dataset: toy_dataset}
+    classifier: {}
+    toy_dataset: {}
+    ddp: {world_size: 1, backend: gloo}
+    data_manager: {batch_size: 32, num_workers: 0, pin_memory: false}
+
+    load_batch: {fields: [inputs, targets]}           # batch -> inputs, targets
+    forward: {args: [inputs], outputs: logits}        # classifier(inputs)
+    compute#loss: {function: cross_entropy, args: [logits, targets], outputs: loss}
+    optimizer: {optimizer: {name: AdamW, kwargs: {lr: 0.001}}}
+```
+
+Each step names the `iteration_context` keys it reads and writes, and the
+session orders the steps by them; `optimizer` brings in `backward` (which reads
+`loss`) and the update after it. [Building an
+iteration](docs/guide/03-building-an-iteration.md) walks through this run and
+varies it: several loss terms, a second model, two views of one input.
+
 ## Documentation
 
-The README covers installation and a complete first run. Detailed guides are
-available in the [documentation index](docs/README.md):
+The README covers installation and a complete first run. Everything else is in
+the [documentation index](docs/README.md), which is organized in three tracks:
 
-- [Architecture and process model](docs/architecture.md)
-- [Components](docs/components.md)
-- [Sessions](docs/sessions.md)
-- [Configuration and CLI](docs/configuration.md)
-- [Distributed training](docs/distributed-training.md)
-- [Checkpointing, resume, and extension](docs/checkpointing.md)
-- [Built-in components and samplers](docs/built-in-components.md)
-- [API summary](docs/api.md)
-- [Development and testing](docs/development.md)
-- [Current behavior and limitations](docs/limitations.md)
+- **[Guide](docs/README.md#learn-it)** — a task-ordered path starting from
+  [resources, hooks, and steps](docs/guide/01-resources-hooks-steps.md) and
+  ending at [analysis sessions](docs/guide/07-analysis-sessions.md).
+- **[Reference](docs/README.md#look-it-up)** —
+  [built-in components](docs/reference/builtin-components.md),
+  [generic steps](docs/reference/generic-steps.md),
+  [optimization](docs/reference/optimization.md),
+  [transformer blocks](docs/reference/transformer-blocks.md),
+  [samplers](docs/reference/samplers.md),
+  [CLI](docs/reference/cli.md) and [API](docs/reference/api.md).
+- **[Concepts](docs/README.md#understand-it)** —
+  [architecture](docs/concepts/architecture.md),
+  [session lifecycle](docs/concepts/session-lifecycle.md),
+  [the component model](docs/concepts/component-model.md),
+  [`ModuleResource`](docs/concepts/module-resource.md) and
+  [limitations](docs/concepts/limitations.md).
+
+Working on the framework itself? See
+[development and testing](docs/development.md).
 
 ## License
 

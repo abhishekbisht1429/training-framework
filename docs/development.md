@@ -1,6 +1,9 @@
 # Development and Testing
 
-[← Documentation index](README.md) · [Project README](../README.md)
+[← Docs](README.md) · [Project README](../README.md)
+
+How to run the test suite and where everything lives in the repository. This
+page is for people working on the framework itself.
 
 ## Testing
 
@@ -14,7 +17,7 @@ python -m pytest
 Run a focused file with:
 
 ```bash
-python -m pytest src/tests/test_engine.py -q
+python -m pytest src/tests/engine -q
 ```
 
 The GitHub Actions workflow runs the suite on Python 3.12 and Python 3.13.
@@ -36,6 +39,10 @@ The current tests cover areas including:
 ```text
 training-framework/
 ├── docs/                 # Detailed Markdown documentation
+│   ├── README.md         # Documentation index
+│   ├── guide/            # Task-ordered learning path
+│   ├── concepts/         # How and why the framework works
+│   └── reference/        # Lookup: built-ins, CLI, API
 ├── .github/
 │   └── workflows/
 │       └── python-tests.yaml
@@ -44,9 +51,12 @@ training-framework/
 │   │   ├── __init__.py
 │   │   ├── components/
 │   │   │   ├── __init__.py
-│   │   │   ├── base.py
+│   │   │   ├── base.py           # Component categories, dependency view
 │   │   │   ├── config.py
+│   │   │   ├── config_schema.py  # Opt-in dataclass configuration parsing
+│   │   │   ├── diagnostics.py    # Missing-dependency explanations
 │   │   │   ├── graph.py
+│   │   │   ├── module.py         # ModuleResource
 │   │   │   ├── registry.py
 │   │   │   └── builtin/
 │   │   │       ├── __init__.py
@@ -54,8 +64,14 @@ training-framework/
 │   │   │       ├── checkpointing.py
 │   │   │       ├── data.py
 │   │   │       ├── distributed.py
+│   │   │       ├── layer_inspection.py
+│   │   │       ├── model.py
 │   │   │       ├── observability.py
-│   │   │       └── optimization.py
+│   │   │       ├── optimization.py
+│   │   │       └── transformer/
+│   │   │           ├── __init__.py
+│   │   │           ├── components.py
+│   │   │           └── modules.py
 │   │   ├── engine/
 │   │   │   ├── __init__.py
 │   │   │   ├── config.py
@@ -69,12 +85,14 @@ training-framework/
 │   │   │   ├── components.py
 │   │   │   ├── config.py
 │   │   │   ├── io.py
+│   │   │   ├── progress.py       # Shared-memory progress beacon
+│   │   │   ├── registry.py
 │   │   │   ├── runtime.py
 │   │   │   ├── state.py
 │   │   │   └── training.py
 │   │   ├── dataloader.py
 │   │   └── util.py
-│   └── tests/
+│   └── tests/            # Mirrors the package layout, plus integration/
 ├── LICENSE
 ├── README.md
 └── pyproject.toml

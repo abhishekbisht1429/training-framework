@@ -4,14 +4,25 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any, override
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 
-from training_framework.components import StatefulResource
+from training_framework.components import Resource, StatefulResource
 from training_framework.dataloader import DistributedInfiniteSampler
-from training_framework.components import requires_resource, resource
+from training_framework.components import requires_resource, resource, role
 
 if TYPE_CHECKING:
     from training_framework.session import Session
+
+
+role(
+    "dataset",
+    Resource,
+    description=(
+        "the training dataset; a Resource yielding samples for "
+        "DataManager's DataLoader"
+    ),
+    session_type="training",
+)
 
 
 class _ManagedDataIterator:
@@ -53,7 +64,7 @@ class DataManager(StatefulResource):
         self._data_iter: _ManagedDataIterator | None = None
         self._sampler_state: dict[str, Any] | None = None
         self._local_batch_size: int | None = None
-        self._samples_per_rank: int | None = None
+        self._epoch_size: int | None = None
 
         if (
                 isinstance(self._batch_size, bool)
@@ -98,8 +109,6 @@ class DataManager(StatefulResource):
             self,
             sampler: DistributedInfiniteSampler,
             dataset_size: int,
-            rank: int,
-            world_size: int,
     ) -> None:
         if self._sampler_state is None:
             return
@@ -110,42 +119,38 @@ class DataManager(StatefulResource):
                 "Cannot restore DataManager state with a different dataset "
                 "size"
             )
-        if restored_state.get("world_size") != world_size:
-            raise ValueError(
-                "Cannot restore DataManager state with a different DDP "
-                "world_size"
-            )
 
-        restored_state["rank"] = rank
+        # The world size is deliberately not checked. The sampler rebases the
+        # saved position onto whatever topology this launch resolved, so a
+        # run trained on eight ranks resumes on four.
         sampler.set_state(restored_state)
 
     def _record_batch_delivery(self) -> None:
         if (
                 self._sampler_state is None
                 or self._local_batch_size is None
-                or self._samples_per_rank is None
+                or self._epoch_size is None
         ):
             raise RuntimeError("DataManager is not set up")
 
+        # Every rank delivers its slice of the same global batch, so the
+        # epoch advances by the global batch size on every rank alike. The
+        # position is tracked globally, which is the form it is saved in.
         position = (
-            self._sampler_state["index_within_epoch"]
-            + self._local_batch_size
+            self._sampler_state["consumed_in_epoch"] + self.batch_size
         )
-        completed_epochs, index_within_epoch = divmod(
-            position,
-            self._samples_per_rank,
-        )
+        completed_epochs, consumed = divmod(position, self._epoch_size)
         self._sampler_state["epoch"] += completed_epochs
-        self._sampler_state["index_within_epoch"] = index_within_epoch
+        self._sampler_state["consumed_in_epoch"] = consumed
 
     @override
     def setup(self, session: Session):
-        ddp = session.get_resource("ddp")
-        dataset = session.get_resource("dataset")
+        ddp = self.get_dependency("ddp")
+        dataset = self.get_dependency("dataset")
         dataset_size = len(dataset)
         world_size = ddp.world_size
         self._validate_setup(dataset_size, world_size)
-        collate_fn = getattr(dataset, "collate_fn", torch.stack)
+        collate_fn = getattr(dataset, "collate_fn", default_collate)
         if not callable(collate_fn):
             raise TypeError(
                 f"Dataset resource '{type(dataset).__name__}' collate_fn "
@@ -157,15 +162,10 @@ class DataManager(StatefulResource):
             rank=ddp.rank,
             world_size=world_size,
         )
-        self._restore_sampler(
-            sampler,
-            dataset_size,
-            ddp.rank,
-            world_size,
-        )
+        self._restore_sampler(sampler, dataset_size)
 
         self._local_batch_size = self.batch_size // world_size
-        self._samples_per_rank = sampler.num_samples_per_rank
+        self._epoch_size = sampler.total_size
         self._sampler_state = sampler.get_state()
 
         dataloader = DataLoader(
@@ -186,7 +186,7 @@ class DataManager(StatefulResource):
         finally:
             self._data_iter = None
             self._local_batch_size = None
-            self._samples_per_rank = None
+            self._epoch_size = None
 
     @override
     def get_state(self) -> dict[str, Any]:
@@ -202,3 +202,94 @@ class DataManager(StatefulResource):
                 "Cannot restore DataManager state with a different batch_size"
             )
         self._sampler_state = deepcopy(state["sampler_state"])
+
+
+role(
+    "dataset",
+    Resource,
+    description=(
+        "the analysis dataset; a Resource yielding samples for the analysis "
+        "DataManager's DataLoader"
+    ),
+    session_type="analysis",
+)
+
+
+@requires_resource("dataset")
+@resource("data_manager", session_type="analysis")
+class AnalysisDataManager(Resource):
+    """Iterate a dataset once, in order, for analysis.
+
+    Unlike the training ``DataManager``, it needs no ``ddp`` resource, does
+    not shuffle or repeat, and keeps no resumable state. Exhausting
+    ``data_iter`` raises ``StopIteration`` from ``next()``, which ends the
+    analysis session.
+    """
+
+    def __init__(self, config):
+        self._batch_size = config["batch_size"]
+        self._num_workers = config.get("num_workers", 0)
+        self._pin_memory = config.get("pin_memory", False)
+        self._drop_last = config.get("drop_last", False)
+        self._dataloader: DataLoader | None = None
+        self._data_iter = None
+
+        if (
+                isinstance(self._batch_size, bool)
+                or not isinstance(self._batch_size, int)
+                or self._batch_size <= 0
+        ):
+            raise ValueError(
+                "DataManager batch_size must be a positive integer"
+            )
+        if (
+                isinstance(self._num_workers, bool)
+                or not isinstance(self._num_workers, int)
+                or self._num_workers < 0
+        ):
+            raise ValueError(
+                "DataManager num_workers must be a non-negative integer"
+            )
+        for key in ("pin_memory", "drop_last"):
+            if not isinstance(config.get(key, False), bool):
+                raise TypeError(f"DataManager {key} must be a boolean")
+
+    @property
+    def batch_size(self):
+        return self._batch_size
+
+    @property
+    def dataloader(self):
+        return self._dataloader
+
+    @property
+    def data_iter(self):
+        return self._data_iter
+
+    @override
+    def setup(self, session: Session):
+        dataset = self.get_dependency("dataset")
+        if len(dataset) <= 0:
+            raise ValueError("DataManager requires a non-empty dataset")
+        collate_fn = getattr(dataset, "collate_fn", default_collate)
+        if not callable(collate_fn):
+            raise TypeError(
+                f"Dataset resource '{type(dataset).__name__}' collate_fn "
+                "must be callable"
+            )
+
+        self._dataloader = DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=self._drop_last,
+            collate_fn=collate_fn,
+            num_workers=self._num_workers,
+            pin_memory=self._pin_memory,
+        )
+        self._data_iter = iter(self._dataloader)
+
+    @override
+    def teardown(self, session: Session):
+        self._data_iter = None
+        self._dataloader = None

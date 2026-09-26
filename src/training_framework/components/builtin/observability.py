@@ -4,16 +4,19 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from torch.utils.tensorboard import SummaryWriter
 
 from training_framework.components import (
+    ExtendableComponent,
     LifecycleHook,
     Resource,
     hook,
+    rank_zero_only,
     resource,
-    wraps,
 )
 from training_framework.util import format_execution_time
 
@@ -21,36 +24,71 @@ if TYPE_CHECKING:
     from training_framework.session import Session, TrainingSession
 
 
+@rank_zero_only
 @hook("logger")
-class Logger(LifecycleHook):
+class Logger(LifecycleHook, ExtendableComponent):
 
     def __init__(self, config: dict):
         self._config = config
         self.call_every = config["log_every"]
-        self._log_file = config.get("log_file", sys.stdout)
+        # The configured path (None: stdout), and the stream written to,
+        # which is stdout whenever no file is open.
+        self._log_path = config.get("log_file")
+        self._log_file = sys.stdout
 
     def pre_session(self, session: Session) -> Any:
-        if self._log_file is not sys.stdout:
-            try:
-                self._log_file = open(self._config["log_file"], "w")
-            except FileNotFoundError:
-                print(
-                    "Unable to open log file for writing to "
-                    f"{self._config['log_file']}"
-                )
+        if self._log_path is None:
+            return
+        # A session resumed from a checkpoint continues the log of the run
+        # it came from; a fresh one starts it clean.
+        mode = "a" if session.iteration > 0 else "w"
+        try:
+            os.makedirs(os.path.dirname(self._log_path) or ".", exist_ok=True)
+            self._log_file = open(self._log_path, mode)
+        except OSError as error:
+            raise OSError(
+                f"Logger cannot open log_file {self._log_path!r} for "
+                f"writing: {error}"
+            ) from error
 
     def post_session(self, session) -> None:
-        if self._log_file is not sys.stdout:
-            self._log_file.close()
+        log_file, self._log_file = self._log_file, sys.stdout
+        if log_file is not sys.stdout:
+            log_file.close()
 
     def print(self, *args, **kwargs):
         print(*args, **kwargs, file=self._log_file)
 
     def pre_iteration_callback(self, session: Session) -> None:
-        self.print(
+        line = (
             f"Iteration {session.iteration}/"
             f"{session.session_config.max_iterations}"
         )
+        lrs = self._reported(session, "current_lrs")
+        if lrs is not None:
+            line += " | lr: " + ", ".join(f"{lr:.3e}" for lr in lrs)
+        grad_norm = self._reported(session, "grad_norm")
+        if grad_norm is not None:
+            line += f" | grad_norm: {grad_norm:.3e}"
+        self.print(line)
+
+    @staticmethod
+    def _reported(session: Session, attribute: str) -> Any:
+        """The first non-None `attribute` any hook or resource exposes.
+
+        Duck-typed so the value is found whatever the component is called or
+        bound as -- `current_lrs` and `grad_norm` come from the optimizer
+        resource, and a hook may expose them too.
+        """
+        for listing in ("get_all_hooks", "get_all_resources"):
+            get_all = getattr(session, listing, None)
+            if get_all is None:
+                continue
+            for component in get_all():
+                value = getattr(component, attribute, None)
+                if value is not None:
+                    return value
+        return None
 
     def post_iteration_callback(self, session: Session) -> None:
         pass
@@ -61,7 +99,22 @@ class Logger(LifecycleHook):
     def __setstate__(self, state: Any) -> None:
         self.__init__(state["config"])
 
+    def apply_extension_config(
+            self,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        unsupported = changed_paths - {("log_every",)}
+        if unsupported:
+            names = ", ".join(".".join(path) for path in sorted(unsupported))
+            raise ValueError(
+                "Logger session extension does not allow changes to: " + names
+            )
+        self._config = deepcopy(dict(config))
+        self.call_every = self._config["log_every"]
 
+
+@rank_zero_only
 @resource("tensorboard")
 class Tensorboard(Resource):
 
@@ -87,10 +140,16 @@ class Tensorboard(Resource):
         ]
         print("Tensorboard Arguments: ", " ".join(tensorboard_args))
         self._tb_process = subprocess.Popen(tensorboard_args)
+        # Named per instance, so two writers do not merge their scalars into
+        # one event directory. The port cannot be shared and is not defaulted:
+        # a second instance must be given one of its own.
+        writer_dir = f"{type(self).__name__}_tensorboard"
+        if self.instance_suffix is not None:
+            writer_dir = f"{writer_dir}_{self.instance_suffix}"
         self._tb_summary_writer = SummaryWriter(
             log_dir=os.path.join(
                 session.session_config.session_dir,
-                f"{type(self).__name__}_tensorboard",
+                writer_dir,
             )
         )
         time.sleep(3)
@@ -119,7 +178,7 @@ class Tensorboard(Resource):
                 process.terminate()
 
 
-@wraps("optimizer")
+@rank_zero_only
 @hook("timer", session_type="training")
 class Timer(LifecycleHook):
 

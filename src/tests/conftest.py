@@ -2,7 +2,9 @@ import pytest
 
 from training_framework.components.registry import (
     _SESSION_COMPONENT_REGISTRIES,
+    _SESSION_ROLE_REGISTRIES,
     _SHARED_COMPONENT_REGISTRY,
+    _SHARED_ROLE_REGISTRY,
 )
 from training_framework.session.registry import _SESSION_TYPE_REGISTRY
 
@@ -11,6 +13,11 @@ _DEFAULT_SHARED_COMPONENTS = dict(_SHARED_COMPONENT_REGISTRY)
 _DEFAULT_SESSION_COMPONENTS = {
     session_type: dict(registry)
     for session_type, registry in _SESSION_COMPONENT_REGISTRIES.items()
+}
+_DEFAULT_SHARED_ROLES = dict(_SHARED_ROLE_REGISTRY)
+_DEFAULT_SESSION_ROLES = {
+    session_type: dict(registry)
+    for session_type, registry in _SESSION_ROLE_REGISTRIES.items()
 }
 _DEFAULT_SESSION_TYPES = dict(_SESSION_TYPE_REGISTRY)
 
@@ -28,5 +35,42 @@ def reset_registries():
         registry.clear()
         registry.update(defaults)
 
+    _SHARED_ROLE_REGISTRY.clear()
+    _SHARED_ROLE_REGISTRY.update(_DEFAULT_SHARED_ROLES)
+
+    for session_type in tuple(_SESSION_ROLE_REGISTRIES):
+        if session_type not in _DEFAULT_SESSION_ROLES:
+            del _SESSION_ROLE_REGISTRIES[session_type]
+    for session_type, defaults in _DEFAULT_SESSION_ROLES.items():
+        registry = _SESSION_ROLE_REGISTRIES.setdefault(session_type, {})
+        registry.clear()
+        registry.update(defaults)
+
     _SESSION_TYPE_REGISTRY.clear()
     _SESSION_TYPE_REGISTRY.update(_DEFAULT_SESSION_TYPES)
+
+
+@pytest.fixture
+def minimal_session_config_1(tmp_path):
+    return {
+        "session_config": {
+            "max_iterations": 3,
+            "sessions_dir": str(tmp_path / "sessions"),
+            "device": "cpu",
+            "rng_seed": 7,
+            "components_package": "training_framework.components.builtin",
+        }
+    }
+
+
+@pytest.fixture
+def minimal_session_config_2(tmp_path):
+    return {
+        "session_config": {
+            "max_iterations": 2,
+            "sessions_dir": str(tmp_path / "sessions"),
+            "device": "cpu",
+            "rng_seed": 11,
+            "components_package": "training_framework.components.builtin",
+        }
+    }

@@ -1,15 +1,44 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from training_framework.components.naming import parse_instance_name
 from training_framework.util import CaptureInitMeta, context_entry, context_exit
 
 if TYPE_CHECKING:
     from training_framework.session.base import Session
 
 
+_DEPENDENCIES_ATTR = "_injected_dependencies"
+"""Instance ``__dict__`` key holding a component's injected prerequisites."""
+
+_DEPENDENCIES_KEYWORD = "__training_framework_dependencies__"
+"""Private keyword carrying prerequisites into a component's construction."""
+
+
 class ComponentMeta(CaptureInitMeta):
     """Apply component lifecycle behavior to class-local overrides."""
+
+    def __call__(cls, *args, **kwargs):
+        """Construct a component, handing it its prerequisites first.
+
+        The session passes them under a private keyword. They are written into
+        the instance after ``__new__`` and before ``__init__`` -- so a
+        constructor can use them -- and otherwise construction is what
+        ``type.__call__`` does: ``__new__`` receives the arguments, and
+        ``__init__`` runs only when ``__new__`` returned an instance of the
+        class. A metaclass that overrides ``__call__`` and defers to ``super()``
+        passes the keyword through untouched. ``__init__`` never sees it, so
+        the captured constructor arguments stay plain configuration.
+        """
+        if _DEPENDENCIES_KEYWORD not in kwargs:
+            return super().__call__(*args, **kwargs)
+        dependencies = kwargs.pop(_DEPENDENCIES_KEYWORD)
+        instance = cls.__new__(cls, *args, **kwargs)
+        if isinstance(instance, cls):
+            instance.__dict__[_DEPENDENCIES_ATTR] = dependencies
+            type(instance).__init__(instance, *args, **kwargs)
+        return instance
 
     def __new__(mcls, name, bases, namespace):
         cls = super().__new__(mcls, name, bases, namespace)
@@ -28,6 +57,10 @@ class ComponentMeta(CaptureInitMeta):
         return cls
 
 
+class ComponentDependencyError(RuntimeError):
+    """A component could not be wired to its prerequisite components."""
+
+
 class Component(ABC, metaclass=ComponentMeta):
     """Common base for every executable training-framework component."""
 
@@ -35,14 +68,275 @@ class Component(ABC, metaclass=ComponentMeta):
     id: str
     _context_managed_lifecycle = False
 
+    config_schema: ClassVar[type | None] = None
+    """Optional dataclass describing this component's configuration."""
+
+    singleton: ClassVar[bool] = False
+    """Whether a session may hold only one instance of this component.
+
+    Set by :func:`singleton`. Most components may be configured more than
+    once; this marks the ones where a second instance would be meaningless or
+    harmful because they own something process-wide.
+    """
+
+    rank_zero_only: ClassVar[bool] = False
+    """Whether a distributed session builds this component on rank 0 only.
+
+    Set by :func:`rank_zero_only`. Components run on every rank by default:
+    leaving one out of a rank is what deadlocks a collective, while running
+    a rank-zero-only component everywhere merely duplicates its work.
+    """
+
+    declared_reads: ClassVar[tuple[str, ...]] = ()
+    """`iteration_context` keys this component reads; set by `@reads`."""
+
+    declared_writes: ClassVar[tuple[str, ...]] = ()
+    """`iteration_context` keys this component writes; set by `@writes`."""
+
+    state_version: ClassVar[int] = 1
+    """The version of what this component checkpoints.
+
+    Recorded with every checkpoint. Raise it when `get_state()` or the
+    constructor arguments change shape, and implement `migrate_state` (and
+    `migrate_init_args`, if the constructor changed) so checkpoints written
+    by an earlier version still restore.
+    """
+
+    @classmethod
+    def migrate_state(cls, from_version: int, state: Any) -> Any:
+        """Return `state`, written at `from_version`, in the current shape.
+
+        Called before `set_state` when a checkpoint was written by an older
+        `state_version`. The default has no migration to offer.
+        """
+        raise ValueError(
+            f"{cls._component_name()} was checkpointed at state_version "
+            f"{from_version}, and is now at {cls.state_version} with no "
+            "migrate_state to bring the old state forward"
+        )
+
+    @classmethod
+    def migrate_init_args(cls, from_version: int, init_args: dict) -> dict:
+        """Return constructor arguments recorded at `from_version`, updated.
+
+        `init_args` is `{"args": tuple, "kwargs": dict}`. Called before the
+        component is rebuilt from an older checkpoint; the default keeps
+        them, for a version change that touched only the state.
+        """
+        return init_args
+
     def __init__(self, config: Mapping | None = None) -> None:
         """Initialize a component that does not require configuration."""
-        pass
+        self._parse_config_schema(config)
+
+    def context_reads(self) -> dict[str, str]:
+        """Return the `iteration_context` values this instance reads, as
+        parameter name -> context key.
+
+        Each is passed to `run` (a step) or `post_iteration_callback` (a
+        hook) as the keyword argument of that name. A step runs after the
+        step that writes each key. Override when a key comes from the
+        configuration rather than the class: the parameter name stays fixed
+        while the key it is filled from changes.
+        """
+        return {key: key for key in type(self).declared_reads}
+
+    def context_writes(self) -> dict[str, str]:
+        """Return the `iteration_context` values this instance writes, as
+        output name -> context key, in the order a tuple result lists them.
+
+        A step returns them from `run`; a hook from its pre-iteration
+        callback, so they are there before any step runs. One output is the
+        return value itself; several are a tuple in this order or a mapping
+        by output name. Override when a key comes from the configuration.
+        """
+        return {key: key for key in type(self).declared_writes}
+
+    @classmethod
+    def _component_name(cls) -> str:
+        return getattr(cls, "name", cls.__name__)
+
+    @property
+    def instance_suffix(self) -> str | None:
+        """Return the suffix telling this instance from its siblings.
+
+        None when the component is the only instance of itself, which is the
+        usual case. A component that writes somewhere named after itself --
+        a directory, a file, a run name -- uses this to keep two instances
+        from landing on top of each other, while leaving the single-instance
+        name exactly as it was.
+        """
+        name = getattr(self, "name", None)
+        if not isinstance(name, str):
+            return None
+        try:
+            _, suffix = parse_instance_name(name)
+        except (TypeError, ValueError):
+            return None
+        return suffix
+
+    def _stamp_identity(self, instance_name: str) -> None:
+        """Give this instance its own name and id.
+
+        Registration writes `name` and `id` onto the *class*, so every
+        instance of a component would otherwise report the same pair. The
+        session names the instance instead, which is what lets a name identify
+        one component rather than one component class.
+
+        Assigned through `__dict__` so that an `nn.Module` subclass needs no
+        `nn.Module.__init__` to have run first.
+        """
+        self.__dict__["name"] = instance_name
+        self.__dict__["id"] = (
+            f"{self._component_category_name()}.{instance_name}"
+        )
+
+    @property
+    def implementation_name(self) -> str:
+        """Return the registered name of the class implementing this component.
+
+        Distinct from ``name``, which the session overwrites per instance:
+        several instances of one component share an implementation name and
+        have different names.
+        """
+        return type(self)._component_name()
+
+    def _parse_config_schema(self, config: Mapping | None) -> None:
+        """Populate ``self._cfg`` when the class declares a ``config_schema``."""
+        if type(self).config_schema is None:
+            return
+        # Imported lazily: config_schema imports base for the error type.
+        from training_framework.components.config_schema import (
+            parse_component_config,
+        )
+        self._cfg = parse_component_config(type(self), config)
+
+    @property
+    def _linked_components(self) -> dict[str, "Resource"]:
+        """Return the prerequisites handed to this component, by asked name.
+
+        Created on first use: a component may ask for a dependency before -- or
+        without ever -- calling ``Component.__init__``.
+        """
+        linked = self.__dict__.get("_linked_components_map")
+        if linked is None:
+            linked = {}
+            # Assigned through __dict__ so that an nn.Module subclass needs no
+            # nn.Module.__init__ to have run first.
+            self.__dict__["_linked_components_map"] = linked
+        return linked
+
+    DEPENDENCIES_ATTR = _DEPENDENCIES_ATTR
+    """Instance ``__dict__`` key holding the injected prerequisites."""
+
+    @property
+    def _dependencies(self) -> dict[str, "Resource"]:
+        """Return the prerequisites the session injected, by declared name.
+
+        Written into the instance ``__dict__`` by
+        ``SessionComponents._construct`` *before* ``__init__`` runs, so a
+        constructor may use them and an ``nn.Module`` subclass needs no
+        ``nn.Module.__init__`` to have run first. Writing through
+        ``__dict__`` also bypasses ``nn.Module.__setattr__``, so a
+        prerequisite module is not registered as a submodule of its consumer.
+        """
+        injected = self.__dict__.get(self.DEPENDENCIES_ATTR)
+        return {} if injected is None else injected
+
+    def __getstate__(self) -> Any:
+        """Leave injected prerequisites out of a component's own pickle.
+
+        They belong to the session that injected them. A component pickled on
+        its own -- rather than as part of a session, which rebuilds its
+        components through construction -- would otherwise carry copies of
+        other components, and registering it into a session replaces them
+        anyway.
+
+        Cooperative, so `Stateful`'s reconstruction envelope, which follows
+        `Component` in the MRO of every stateful component, still decides
+        what a stateful component pickles.
+        """
+        state = super().__getstate__()
+        if isinstance(state, dict) and self.DEPENDENCIES_ATTR in state:
+            state = dict(state)
+            del state[self.DEPENDENCIES_ATTR]
+        return state
+
+    def get_dependency(self, name: str) -> "Resource":
+        """Return a prerequisite resource declared with ``@requires_resource``.
+
+        Valid at any point in a component's life. Prerequisites are resolved
+        for *this* consumer -- honouring its own ``component_bindings`` wiring
+        -- and injected before ``__init__`` runs, so construction, ``setup``
+        and a running step all see the same instance.
+
+        What is handed out is recorded, so the framework knows this component
+        was wired to another one wherever the caller puts the reference --
+        an attribute, a container module, or nowhere at all.
+        """
+        injected = self.__dict__.get(self.DEPENDENCIES_ATTR)
+        if injected is None:
+            raise ComponentDependencyError(
+                f"{self._component_name()} requested resource '{name}' but "
+                "was given no prerequisites. A component that declares "
+                "dependencies must be activated by the session -- through "
+                "configuration or Session.activate_component() -- rather than "
+                "constructed directly."
+            )
+        if name not in injected and name in getattr(
+                type(self), "required_resources", (),
+        ):
+            raise ComponentDependencyError(
+                f"{self._component_name()} requested resource '{name}', which "
+                "it declares but which is no longer in its session: it was "
+                "removed and nothing has been registered in its place."
+            )
+        if name not in injected:
+            declared = ", ".join(sorted(injected)) or "nothing"
+            raise ComponentDependencyError(
+                f"{self._component_name()} requested resource '{name}' but "
+                f"does not declare it. Add @requires_resource('{name}') so it "
+                f"is constructed first. Declared: {declared}."
+            )
+        component = injected[name]
+        self._linked_components[name] = component
+        return component
+
+    @property
+    def linked_components(self) -> dict[str, str]:
+        """Return the asked name -> instance name map of prerequisites.
+
+        The *instance* is recorded, not merely the class implementing it, so
+        that rewiring a consumer between two instances of one component is
+        visible to the checkpoint guard rather than silently restoring one
+        instance's state into another.
+        """
+        return {
+            name: getattr(component, "name", type(component).__name__)
+            for name, component in self._linked_components.items()
+        }
+
+    def has_dependency(self, name: str) -> bool:
+        """Return whether a declared prerequisite was injected."""
+        return name in self._dependencies
 
     @classmethod
     @abstractmethod
     def _component_category_name(cls) -> str:
         """Return the top-level lifecycle category implemented by the class."""
+        raise NotImplementedError
+
+
+class ExtendableComponent(ABC):
+    """Opt a component into safe configuration changes during extension."""
+
+    @abstractmethod
+    def apply_extension_config(
+            self,
+            config: Mapping,
+            changed_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        """Validate and apply an effective config to a restored component."""
         raise NotImplementedError
 
 
@@ -62,11 +356,20 @@ class Stateful(ABC):
         if not isinstance(self, Component):
             return self.get_state()
 
-        return {
+        envelope = {
             self._PICKLE_VERSION_KEY: self._PICKLE_VERSION,
             "init_args": self._init_args,
             "state": self.get_state(),
         }
+        # Reconstruction runs __init__, which does not name the instance, so
+        # a suffixed instance would come back under its class's name and, for
+        # a component that names its output after itself, write on top of its
+        # sibling. Optional: an envelope without it is simply unnamed, so the
+        # pickle version does not change.
+        instance_name = self.__dict__.get("name")
+        if instance_name is not None:
+            envelope["instance_name"] = instance_name
+        return envelope
 
     def __setstate__(self, state: Any) -> None:
         if (
@@ -79,6 +382,9 @@ class Stateful(ABC):
                 *init_args["args"],
                 **init_args["kwargs"],
             )
+            instance_name = state.get("instance_name")
+            if instance_name is not None:
+                self._stamp_identity(instance_name)
             self.set_state(state["state"])
             return
 
@@ -120,11 +426,22 @@ class IterationHook(Hook, ABC):
     call_every: int
 
     @abstractmethod
-    def pre_iteration_callback(self, session: "Session") -> None:
+    def pre_iteration_callback(self, session: "Session") -> Any:
+        """Run before the iteration's steps; return what `@writes` declares
+        (None when it declares nothing)."""
         pass
 
     @abstractmethod
-    def post_iteration_callback(self, session: "Session") -> None:
+    def post_iteration_callback(
+        self, session: "Session", /, *args: Any, **reads: Any
+    ) -> None:
+        """Run after the iteration's steps, given what `@reads` declares as
+        keyword arguments.
+
+        Nothing is ever passed positionally; ``*args`` is here only so that
+        an override taking its reads by name type-checks. What an override
+        must take is set by `@reads` and checked when the session is built.
+        """
         pass
 
 
@@ -165,7 +482,18 @@ class Step(Component, ABC):
         return "Step"
 
     @abstractmethod
-    def run(self, session: "Session") -> None:
+    def run(self, session: "Session", /, *args: Any, **reads: Any) -> Any:
+        """Run once per iteration.
+
+        What `@reads` declares arrives as keyword arguments, and what
+        `@writes` declares is returned: one value as is, several as a tuple
+        in declaration order or a mapping by name. A step declaring no
+        writes returns None.
+
+        Nothing is ever passed positionally; ``*args`` is here only so that
+        an override taking its reads by name type-checks. What an override
+        must take is set by `@reads` and checked when the session is built.
+        """
         pass
 
 

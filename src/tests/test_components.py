@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, override
 
@@ -21,9 +22,11 @@ from training_framework.components import (
     StatefulStep,
     Step,
     hook,
+    reads,
     requires_resource,
     resource,
     step,
+    writes,
 )
 from training_framework.session import TrainingSession
 
@@ -96,6 +99,7 @@ class StatefulModelResource(StatefulResource):
 
 @step("it_3d45_train")
 @requires_resource("it_3d45_model")
+@writes("weight", "loss")
 class StatefulTrainingStep(StatefulStep):
     """A genuine autograd/optimizer step with a stochastic target."""
 
@@ -105,8 +109,8 @@ class StatefulTrainingStep(StatefulStep):
         self.noise_history: list[float] = []
 
     @override
-    def run(self, session: TrainingSession) -> None:
-        model: StatefulModelResource = session.get_resource("it_3d45_model")
+    def run(self, session: TrainingSession) -> tuple[float, float]:
+        model: StatefulModelResource = self.get_dependency("it_3d45_model")
         noise_scale = float(self.config.get("noise_scale", 0.05))
         noise = float(torch.rand((), dtype=model.weight.dtype).item()) * noise_scale
         target = torch.tensor(
@@ -124,8 +128,6 @@ class StatefulTrainingStep(StatefulStep):
         loss_value = float(loss.detach().item())
         self.weight_history.append(weight)
         self.noise_history.append(noise)
-        session.iteration_context["weight"] = weight
-        session.iteration_context["loss"] = loss_value
         session.session_context["last_weight"] = weight
 
         _append_event(
@@ -136,6 +138,7 @@ class StatefulTrainingStep(StatefulStep):
             loss=loss_value,
             noise=noise,
         )
+        return weight, loss_value
 
     @override
     def get_state(self) -> dict[str, Any]:
@@ -152,6 +155,7 @@ class StatefulTrainingStep(StatefulStep):
 
 @hook("it_3d45_metrics")
 @requires_resource("it_3d45_model")
+@reads("weight", "loss")
 class StatefulMetricsHook(StatefulLifeCycleHook):
     def __init__(self, config: dict):
         self.config = dict(config)
@@ -185,11 +189,13 @@ class StatefulMetricsHook(StatefulLifeCycleHook):
         return None
 
     @override
-    def post_iteration_callback(self, session: TrainingSession) -> None:
+    def post_iteration_callback(
+            self, session: TrainingSession, *, weight: float, loss: float,
+    ) -> None:
         observation = {
             "iteration": session.iteration,
-            "weight": float(session.iteration_context["weight"]),
-            "loss": float(session.iteration_context["loss"]),
+            "weight": float(weight),
+            "loss": float(loss),
         }
         self.observations.append(observation)
         _append_event(
@@ -223,6 +229,24 @@ class FailingStep(Step):
         fail_at = int(self.config.get("fail_at", 1))
         if session.iteration == fail_at:
             raise RuntimeError(self.config.get("message", "intentional worker failure"))
+
+
+@step("it_3d45_slow")
+class SlowStep(Step):
+    """Block on the first iteration, optionally pinging the supervisor."""
+
+    def __init__(self, config: dict):
+        self.config = dict(config)
+
+    @override
+    def run(self, session: TrainingSession) -> None:
+        if session.iteration != 1:
+            return
+        deadline = time.monotonic() + float(self.config["seconds"])
+        while time.monotonic() < deadline:
+            if self.config.get("ping", False):
+                session.send_heartbeat("Slow step still working")
+            time.sleep(0.05)
 
 
 @resource("it_3d45_rank0_resource")

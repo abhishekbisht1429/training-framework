@@ -1,4 +1,6 @@
 import argparse
+import math
+import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 
@@ -8,9 +10,33 @@ from training_framework.components.config import (
     reject_legacy_components_entry,
     reserved_config_names,
 )
+from training_framework.engine.topology import TOPOLOGY_KEYS
+
+
+#: Overrides that describe the launch rather than the session, and so may be
+#: given when resuming a checkpoint that changes nothing else.
+_TOPOLOGY_OVERRIDES = frozenset(f"ddp.{name}" for name in TOPOLOGY_KEYS)
 
 
 class Configurator:
+    @staticmethod
+    def _non_negative_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0:
+            raise argparse.ArgumentTypeError(
+                "must be a finite, non-negative number"
+            )
+        return parsed
+
+    @staticmethod
+    def _positive_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise argparse.ArgumentTypeError(
+                "must be a finite number greater than zero"
+            )
+        return parsed
+
     def __init__(self):
         self._parser = argparse.ArgumentParser()
 
@@ -18,8 +44,12 @@ class Configurator:
         group.add_argument("--config", help="Path to session config file")
         group.add_argument(
             "--extend-session",
-            nargs=2,
-            help="Path to session checkpoint to extend",
+            nargs="+",
+            metavar="VALUE",
+            help=(
+                "Path to session checkpoint to extend, optionally followed "
+                "by the deprecated positional maximum iteration count"
+            ),
         )
         group.add_argument(
             "--resume-session",
@@ -34,6 +64,23 @@ class Configurator:
         )
         self._parser.add_argument("--heartbeat-timeout", type=float, default=30.0)
         self._parser.add_argument(
+            "--stop-sync-grace-period",
+            type=self._non_negative_finite_float,
+            default=0.01,
+            help=(
+                "Seconds to poll a DDP stop collective before sleeping"
+            ),
+        )
+        self._parser.add_argument(
+            "--stop-sync-poll-interval",
+            type=self._positive_finite_float,
+            default=0.005,
+            help=(
+                "Seconds to sleep between DDP stop-collective polls after "
+                "the grace period"
+            ),
+        )
+        self._parser.add_argument(
             "--process_timeout_on_join",
             type=float,
             default=30.0,
@@ -44,6 +91,8 @@ class Configurator:
         self._session_configs = None
         self._checkpoint_path = None
         self._new_max_iters = None
+        self._extension_overrides = None
+        self._topology_overrides = {}
         self._mode = None
 
         if self._args.config:
@@ -54,11 +103,82 @@ class Configurator:
             self._session_configs = OmegaConf.to_container(config)["sessions"]
         elif self._args.extend_session:
             self._mode = "extend"
-            self._checkpoint_path = self._args.extend_session[0]
-            self._new_max_iters = int(self._args.extend_session[1])
+            values = self._args.extend_session
+            if len(values) > 2:
+                self._parser.error(
+                    "--extend-session accepts CHECKPOINT and an optional "
+                    "deprecated NEW_MAX_ITERATIONS value"
+                )
+            self._checkpoint_path = values[0]
+            overrides = list(self._args.override or [])
+            self._topology_overrides, overrides = (
+                self._split_topology_overrides(overrides)
+            )
+            if len(values) == 2:
+                warnings.warn(
+                    "The positional NEW_MAX_ITERATIONS argument is deprecated; "
+                    "use --override session_config.max_iterations=VALUE",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                try:
+                    self._new_max_iters = int(values[1])
+                except ValueError:
+                    self._parser.error(
+                        "The deprecated positional NEW_MAX_ITERATIONS value "
+                        "must be an integer"
+                    )
+                if any(
+                    item.split("=", 1)[0].strip()
+                    == "session_config.max_iterations"
+                    for item in overrides
+                ):
+                    self._parser.error(
+                        "max_iterations cannot be supplied both positionally "
+                        "and through --override"
+                    )
+                overrides.append(
+                    f"session_config.max_iterations={self._new_max_iters}"
+                )
+            if not overrides and not self._topology_overrides:
+                self._parser.error(
+                    "--extend-session requires at least one --override"
+                )
+            self._extension_overrides = tuple(overrides)
         elif self._args.resume_session:
             self._mode = "resume"
             self._checkpoint_path = self._args.resume_session
+            self._topology_overrides, unsupported = (
+                self._split_topology_overrides(self._args.override or [])
+            )
+            if unsupported:
+                names = ", ".join(sorted(unsupported))
+                self._parser.error(
+                    "--resume-session only accepts launch-topology "
+                    f"overrides ({', '.join(sorted(_TOPOLOGY_OVERRIDES))}), "
+                    f"but got: {names}. Use --extend-session to change the "
+                    "session configuration."
+                )
+
+    @staticmethod
+    def _split_topology_overrides(
+            overrides,
+    ) -> tuple[dict[str, str], list[str]]:
+        """Separate launch-topology overrides from session-config ones.
+
+        Topology overrides never reach the session extension machinery: they
+        describe the machine this launch runs on, not the run itself.
+        """
+        topology: dict[str, str] = {}
+        remaining: list[str] = []
+        for item in overrides:
+            key, separator, value = item.partition("=")
+            key = key.strip()
+            if separator and key in _TOPOLOGY_OVERRIDES:
+                topology[key.split(".", 1)[1]] = value
+            else:
+                remaining.append(item)
+        return topology, remaining
 
     def get_session_definition(self, index):
         if not self._session_configs:
@@ -115,10 +235,20 @@ class Configurator:
         return self._checkpoint_path
 
     @property
+    def topology_overrides(self):
+        return dict(self._topology_overrides)
+
+    @property
     def new_max_iters(self):
-        if not self._new_max_iters:
+        if self._new_max_iters is None:
             raise KeyError("Cannot use this property in the current operation!")
         return self._new_max_iters
+
+    @property
+    def extension_overrides(self):
+        if self._extension_overrides is None:
+            raise KeyError("Cannot use this property in the current operation!")
+        return tuple(self._extension_overrides)
 
     @property
     def process_timeout_on_join(self):
@@ -131,6 +261,14 @@ class Configurator:
     @property
     def heartbeat_timeout(self):
         return self._args.heartbeat_timeout
+
+    @property
+    def stop_sync_grace_period(self):
+        return self._args.stop_sync_grace_period
+
+    @property
+    def stop_sync_poll_interval(self):
+        return self._args.stop_sync_poll_interval
 
     @property
     def debug(self):

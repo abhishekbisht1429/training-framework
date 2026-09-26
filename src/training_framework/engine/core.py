@@ -9,10 +9,20 @@ from training_framework.engine.supervision import (
     monitor_processes,
     process_ready_waitables,
 )
+from training_framework.engine.topology import (
+    HostedRendezvous,
+    host_rendezvous,
+    resolve_launch_topology,
+)
 from training_framework.engine.worker import SessionProcessWrapper
+from training_framework.engine.worker import (
+    _STOP_SYNC_GRACE_PERIOD,
+    _STOP_SYNC_POLL_INTERVAL,
+)
 from training_framework.session import (
     TRAINING_SESSION_TYPE,
     Session,
+    TrainingSession,
     normalize_session_type,
     session_class_for_type,
 )
@@ -23,7 +33,34 @@ class TrainingEngine:
     def __init__(self, configurator: Configurator):
         self._configurator = configurator
         self._timeout_on_interrupt = configurator.process_timeout_on_join
+        self._stop_sync_grace_period = getattr(
+            configurator,
+            "stop_sync_grace_period",
+            _STOP_SYNC_GRACE_PERIOD,
+        )
+        self._stop_sync_poll_interval = getattr(
+            configurator,
+            "stop_sync_poll_interval",
+            _STOP_SYNC_POLL_INTERVAL,
+        )
         self._session_process_wrappers: list[SessionProcessWrapper] = []
+        # One per multi-process launch, held until its workers have joined.
+        self._rendezvous: list[HostedRendezvous] = []
+
+    @property
+    def _topology_overrides(self):
+        return getattr(self._configurator, "topology_overrides", None)
+
+    def _wrapper_kwargs(self, topology) -> dict:
+        kwargs = {
+            "heartbeat_timeout": self._configurator.heartbeat_timeout,
+            "stop_sync_grace_period": self._stop_sync_grace_period,
+            "stop_sync_poll_interval": self._stop_sync_poll_interval,
+        }
+        # A single-process session has no topology to convey.
+        if topology is not None:
+            kwargs["launch_topology"] = topology
+        return kwargs
 
     def load_session(
             self,
@@ -32,20 +69,102 @@ class TrainingEngine:
     ):
         session = Checkpointer.load_checkpoint(checkpoint_path)
 
-        if session.has_resource("ddp"):
-            world_size = session.get_resource("ddp").world_size
-        else:
-            world_size = 1
+        if session_update_params is not None:
+            if not isinstance(session, TrainingSession):
+                raise TypeError(
+                    "Session extension updates require a TrainingSession"
+                )
+            if "overrides" in session_update_params:
+                session.apply_extension_overrides(
+                    session_update_params["overrides"]
+                )
+            elif "max_iterations" in session_update_params:
+                session.apply_extension_overrides((
+                    "session_config.max_iterations="
+                    f"{session_update_params['max_iterations']}",
+                ))
+            else:
+                raise ValueError(
+                    "Unsupported session extension update parameters"
+                )
 
-        self._session_process_wrappers = [
-            SessionProcessWrapper(
-                session=session,
-                rank=rank,
-                session_update_params=session_update_params,
-                heartbeat_timeout=self._configurator.heartbeat_timeout,
-            )
-            for rank in range(world_size)
-        ]
+        # The checkpoint's own topology describes the machine that wrote it,
+        # so this launch decides how many processes to run and where they
+        # meet, not the stored configuration.
+        topology = resolve_launch_topology(
+            session._components.get_resource("ddp").config
+            if session._components.has_resource("ddp")
+            else None,
+            overrides=self._topology_overrides,
+            from_checkpoint=True,
+        )
+        world_size = 1 if topology is None else topology.world_size
+        self._check_rank_component_plan(session, world_size)
+        hosted = None
+        if topology is not None:
+            hosted = host_rendezvous(topology)
+            topology = hosted.topology
+
+        try:
+            wrappers = [
+                SessionProcessWrapper(
+                    session=session,
+                    rank=rank,
+                    **self._wrapper_kwargs(topology),
+                )
+                for rank in range(world_size)
+            ]
+        except BaseException:
+            if hosted is not None:
+                hosted.close()
+            raise
+        if hosted is not None:
+            self._rendezvous.append(hosted)
+        self._session_process_wrappers = wrappers
+
+    @staticmethod
+    def _check_rank_component_plan(session, world_size: int) -> None:
+        """Settle what the secondary ranks will build, before any of them run.
+
+        The workers resolve this for themselves, but by then rank 0 is on its
+        way into `init_process_group`: a name that does not resolve would
+        abort one worker while the others wait out the join timeout. Doing it
+        here turns that into a launch-time error, and surfaces the
+        rank-zero-only warnings and errors where they can still be acted on.
+        """
+        if not session._components.has_resource("ddp"):
+            return
+        ddp_resource = session._components.get_resource("ddp")
+
+        if world_size <= 1:
+            # There is no rank to prune for, so no plan to settle. The names
+            # are still resolved: a typo here is dormant until the same
+            # configuration is run on more than one rank, and it should not
+            # take that launch to find it. The collective diagnostics stay
+            # off, because with one rank there is nobody left waiting.
+            for names, source in (
+                    (ddp_resource.rank_zero_components,
+                     "ddp.rank_zero_components"),
+                    (ddp_resource.parallel_components,
+                     "ddp.parallel_components"),
+            ):
+                session.validate_component_names(names, source=source)
+            if not ddp_resource.declares_parallel_components:
+                # Likewise a rank-zero-only prerequisite of a component that
+                # runs on every rank: harmless on one rank, an error on two.
+                session._components.check_rank_zero_dependants(
+                    rank_zero_components=ddp_resource.rank_zero_components,
+                )
+            return
+
+        session.rank_parallel_names(
+            parallel_components=(
+                ddp_resource.parallel_components
+                if ddp_resource.declares_parallel_components
+                else None
+            ),
+            rank_zero_components=ddp_resource.rank_zero_components,
+        )
 
     def register_session(
             self,
@@ -66,34 +185,51 @@ class TrainingEngine:
         normalized_type = normalize_session_type(session_type)
         session_class = session_class_for_type(normalized_type)
 
-        if "ddp" in config:
-            try:
-                world_size = config["ddp"]["world_size"]
-            except (KeyError, TypeError) as exc:
-                raise ValueError(
-                    "DDP configuration must contain ddp.world_size"
-                ) from exc
-        else:
-            world_size = 1
+        if "ddp" in config and not isinstance(config["ddp"], Mapping):
+            raise ValueError("DDP configuration must contain ddp.world_size")
 
-        if (
-            not isinstance(world_size, int)
-            or isinstance(world_size, bool)
-            or world_size < 1
-        ):
-            raise ValueError("ddp.world_size must be a positive integer")
+        topology = resolve_launch_topology(
+            config.get("ddp"),
+            overrides=self._topology_overrides,
+            from_checkpoint=False,
+        )
+        world_size = 1 if topology is None else topology.world_size
+        hosted = None
+        if topology is not None:
+            hosted = host_rendezvous(topology)
+            topology = hosted.topology
+            # Keep the parent's session agreeing with the workers when the
+            # launch resolved a different topology than the file states.
+            config = dict(config)
+            config["ddp"] = {
+                **dict(config["ddp"]),
+                **topology.config_overlay(),
+            }
 
-        wrappers = [
-            SessionProcessWrapper(
-                session=session_class(
+        try:
+            sessions = [
+                session_class(
                     deepcopy(dict(config)),
                     **deepcopy(dict(session_kwargs)),
-                ),
-                rank=rank,
-                heartbeat_timeout=self._configurator.heartbeat_timeout,
-            )
-            for rank in range(world_size)
-        ]
+                )
+                for _ in range(world_size)
+            ]
+            self._check_rank_component_plan(sessions[0], world_size)
+
+            wrappers = [
+                SessionProcessWrapper(
+                    session=session,
+                    rank=rank,
+                    **self._wrapper_kwargs(topology),
+                )
+                for rank, session in enumerate(sessions)
+            ]
+        except BaseException:
+            if hosted is not None:
+                hosted.close()
+            raise
+        if hosted is not None:
+            self._rendezvous.append(hosted)
         self._session_process_wrappers.extend(wrappers)
 
     @staticmethod
@@ -141,15 +277,15 @@ class TrainingEngine:
             wrappers: list[SessionProcessWrapper] | None = None,
             timeout: float = 5.0,
     ) -> None:
-        selected = (
-            wrappers
-            if wrappers is not None
-            else [
-                wrapper
-                for wrapper in self._session_process_wrappers
-                if wrapper.started
-            ]
-        )
+        # A worker that was never started has nothing to join, and trying
+        # would raise over whatever error brought us here.
+        selected = [
+            wrapper
+            for wrapper in (
+                self._session_process_wrappers if wrappers is None else wrappers
+            )
+            if wrapper.started
+        ]
         join_or_terminate(selected, timeout)
 
     def _close_resources(self) -> None:
@@ -157,9 +293,29 @@ class TrainingEngine:
             process = wrapper.process
             if wrapper.started and not process.is_alive():
                 process.close()
+        # Only after every worker has joined: a worker still in its process
+        # group may yet need the store.
+        self._release_rendezvous()
+
+    def _release_rendezvous(self) -> None:
+        for hosted in self._rendezvous:
+            hosted.close()
+        self._rendezvous = []
 
     @context_entry
     def __enter__(self):
+        try:
+            self._register_configured_sessions()
+        except BaseException:
+            # `__exit__` never runs when entry fails, so undo it here: ports
+            # held for sessions registered before the failure would
+            # otherwise stay bound.
+            self._release_rendezvous()
+            self._session_process_wrappers = []
+            raise
+        return self
+
+    def _register_configured_sessions(self) -> None:
         if self._configurator.mode == "new":
             for definition in self._configurator.session_configs:
                 config, session_type, session_kwargs = (
@@ -171,18 +327,30 @@ class TrainingEngine:
                     session_kwargs=session_kwargs,
                 )
         elif self._configurator.mode == "extend":
+            overrides = getattr(
+                self._configurator,
+                "extension_overrides",
+                None,
+            )
+            if overrides:
+                update_params = {"overrides": overrides}
+            elif hasattr(self._configurator, "extension_overrides"):
+                # Only launch-topology overrides were given, and those are
+                # applied when the workers are built, not by extending the
+                # session configuration.
+                update_params = None
+            else:
+                update_params = {
+                    "max_iterations": self._configurator.new_max_iters,
+                }
             self.load_session(
                 checkpoint_path=self._configurator.checkpoint_path,
-                session_update_params={
-                    "max_iterations": self._configurator.new_max_iters,
-                },
+                session_update_params=update_params,
             )
         elif self._configurator.mode == "resume":
             self.load_session(self._configurator.checkpoint_path)
         else:
             raise RuntimeError("Invalid operation!")
-
-        return self
 
     def _process_ready_waitables(self, waitables, ready_waitables):
         return process_ready_waitables(waitables, ready_waitables)

@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+from torch import nn
+
+from training_framework.components import (
+    LifecycleHook,
+    Resource,
+    Stateful,
+    Step,
+    writes,
+)
 
 
 COMPONENTS_PACKAGE = "tests.test_components"
@@ -84,3 +95,233 @@ def make_config(tmp_path, max_iterations=2, seed=123):
             "components_package": "training_framework.components.builtin",
         }
     }
+
+
+def build_session(
+        tmp_path,
+        components=None,
+        *,
+        session_type="training",
+        bindings=None,
+):
+    """Build a session holding `components`, the way configuration does.
+
+    `components` maps top-level config keys to their mappings. An analysis
+    session needs a `trained_model` mapping to construct at all. Unless the
+    caller configures or binds one, it gets an empty placeholder file:
+    construction only checks that the file exists, and the checkpoint is not
+    read until `setup`.
+    """
+    from training_framework.session import AnalysisSession, TrainingSession
+
+    config = make_config(tmp_path)
+    config["session_config"]["show_execution_graph"] = False
+    if bindings is not None:
+        config["component_bindings"] = bindings
+    config.update(components or {})
+    if session_type == "training":
+        return TrainingSession(config)
+    if "trained_model" not in config and "trained_model" not in (bindings or {}):
+        placeholder = tmp_path / "placeholder-checkpoint.pt"
+        placeholder.touch()
+        config["trained_model"] = {"model_checkpoint_path": str(placeholder)}
+    return AnalysisSession(config)
+
+
+def configurator_for(tmp_path, monkeypatch, *sessions):
+    """Return a `Configurator` reading `sessions` from a config file, the way
+    the command line hands it one."""
+    import yaml
+
+    from training_framework.engine import Configurator
+
+    path = tmp_path / "configurator.yaml"
+    path.write_text(yaml.safe_dump({"sessions": list(sessions)}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["train", "--config", str(path)])
+    return Configurator()
+
+
+def inject_dependencies(component, **dependencies):
+    """Give a hand-built component the prerequisites a session would inject.
+
+    Mirrors what `SessionComponents` does when a component built outside it
+    is registered: the prerequisites go into the instance `__dict__`, where
+    `Component.get_dependency` finds them. Lets a test drive one lifecycle
+    method with a fake session and stub prerequisites.
+    """
+    from training_framework.components import Component
+
+    component.__dict__[Component.DEPENDENCIES_ATTR] = dict(dependencies)
+    return component
+
+
+def _named(components, session, name, kind):
+    target = session.resolve_component_name(name)
+    for component in components:
+        if component.name == target:
+            return component
+    raise KeyError(f"{name} not found in {kind}!")
+
+
+def all_components(session):
+    """Every resource, hook and step the session holds."""
+    return (
+        session.get_all_resources()
+        + session.get_all_hooks()
+        + session.get_all_steps()
+    )
+
+
+def component_names(session) -> set[str]:
+    """The instance names of everything the session holds."""
+    return {component.name for component in all_components(session)}
+
+
+def resource_named(session, name):
+    """Return the resource `name` refers to, for a test to inspect.
+
+    Code outside a component has no consumer to resolve for, so this applies
+    the session-wide bindings -- a role such as `model` finds the
+    implementation bound to it -- and matches the instance name exactly.
+    Components take their prerequisites with `get_dependency` instead.
+    """
+    return _named(session.get_all_resources(), session, name, "resources")
+
+
+def component_named(session, name):
+    """Like `resource_named`, but also finds hooks and steps."""
+    return _named(all_components(session), session, name, "components")
+
+
+def has_resource_named(session, name) -> bool:
+    """Whether `resource_named(session, name)` would find a resource."""
+    try:
+        resource_named(session, name)
+    except KeyError:
+        return False
+    return True
+
+
+# -- test doubles recording their lifecycle and state -----------------------
+
+
+@writes("step_called", "step_index")
+class AdditionalStepBase(Step, Stateful):
+    def __init__(self):
+        self.calls = 0
+        self.last_seen_loss = None
+
+    def run(self, session: TrainingSession) -> tuple[bool, int]:
+        self.calls += 1
+        self.last_seen_loss = self.calls * 1.0
+        return True, self.calls
+
+    def get_state(self) -> Any:
+        return {"calls": self.calls, "last_seen_loss": self.last_seen_loss}
+
+    def set_state(self, state: Any) -> None:
+        self.calls = state["calls"]
+        self.last_seen_loss = state["last_seen_loss"]
+
+
+class AdditionalResourceBase(Resource, Stateful):
+    def __init__(self):
+        self.setup_calls = 0
+        self.teardown_calls = 0
+        self.events: list[str] = []
+        self.session_dirs: list[str] = []
+
+    def setup(self, session: TrainingSession):
+        self.setup_calls += 1
+        self.events.append("setup")
+        self.session_dirs.append(session.session_config.session_dir)
+
+    def teardown(self, session):
+        self.teardown_calls += 1
+        self.events.append("teardown")
+
+    def get_state(self) -> Any:
+        return {
+            "setup_calls": self.setup_calls,
+            "teardown_calls": self.teardown_calls,
+            "events": list(self.events),
+            "session_dirs": list(self.session_dirs),
+        }
+
+    def set_state(self, state: Any) -> None:
+        self.setup_calls = state["setup_calls"]
+        self.teardown_calls = state["teardown_calls"]
+        self.events = list(state["events"])
+        self.session_dirs = list(state["session_dirs"])
+
+
+class AdditionalHookBase(LifecycleHook, Stateful):
+    def __init__(self, call_every: int = 1):
+        self.call_every = call_every
+        self.events: list[str] = []
+        self.pre_iterations: list[int] = []
+        self.post_iterations: list[int] = []
+
+    def pre_session(self, session: TrainingSession):
+        self.events.append("setup")
+
+    def post_session(self, session):
+        self.events.append("teardown")
+
+    def pre_iteration_callback(self, session: TrainingSession) -> None:
+        self.events.append(f"pre:{session.iteration}")
+        self.pre_iterations.append(session.iteration)
+
+    def post_iteration_callback(self, session: TrainingSession) -> None:
+        self.events.append(f"post:{session.iteration}")
+        self.post_iterations.append(session.iteration)
+
+    def get_state(self) -> Any:
+        return {
+            "call_every": self.call_every,
+            "events": list(self.events),
+            "pre_iterations": list(self.pre_iterations),
+            "post_iterations": list(self.post_iterations),
+        }
+
+    def set_state(self, state: Any) -> None:
+        self.call_every = state["call_every"]
+        self.events = list(state["events"])
+        self.pre_iterations = list(state["pre_iterations"])
+        self.post_iterations = list(state["post_iterations"])
+
+
+# -- distributed stand-ins -------------------------------------------------------
+
+
+class RecordingDistributedDataParallel(nn.Module):
+    """Stands in for DDP: forwards to the model, records calls and `no_sync`."""
+
+    def __init__(self, module, device_ids=None):
+        super().__init__()
+        self.module = module
+        self.syncing = True
+        self.calls = 0
+
+    def forward(self, *args, **kwargs):
+        self.calls += 1
+        return self.module(*args, **kwargs)
+
+    @contextlib.contextmanager
+    def no_sync(self):
+        self.syncing = False
+        try:
+            yield
+        finally:
+            self.syncing = True
+
+
+def stub_process_group(monkeypatch) -> None:
+    """Run the `ddp` resource in one process: DDP is the recording stand-in
+    and no process group is created."""
+    import torch
+    from training_framework.components.builtin import distributed
+
+    monkeypatch.setattr(distributed, "DDP", RecordingDistributedDataParallel)
+    monkeypatch.setattr(torch.distributed, "init_process_group", lambda **_: None)
+    monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: None)
