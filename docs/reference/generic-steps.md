@@ -142,7 +142,7 @@ Calls a function, or an instance of a class, on context keys.
 | [call settings](#call-settings) | | | |
 | `function` | string | required | What to call; see below |
 | `init` | mapping | none | Constructor arguments; see below |
-| `training` | bool | `true`; `false` in an analysis session | Train or eval mode of a module built here (`Dropout`, `BatchNorm`); an error for anything that is not an `nn.Module` -- pass a function's own `training` argument through `constants` |
+| `training` | bool | `false` in an analysis session, `true` otherwise (settled when the step runs, so an instance moved to another session follows it) | Train or eval mode of a module built here (`Dropout`, `BatchNorm`); an error for anything that is not an `nn.Module` -- pass a function's own `training` argument through `constants` |
 
 **Finding `function`.** A name without a dot is looked up in these modules, in
 order, and the first match wins:

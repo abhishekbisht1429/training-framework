@@ -1097,3 +1097,116 @@ def test_a_compute_module_is_in_the_mode_of_its_session_unless_set(
 def test_training_for_something_that_is_not_a_module_is_refused():
     with pytest.raises(ValueError, match=r"not an nn\.Module.*constants"):
         Compute({"function": "dropout", "training": False, "outputs": "x"})
+
+
+def test_a_pickled_forward_checks_its_route_where_it_is_registered(tmp_path):
+    _register()
+    resource("cmp_teacher", overwrite=True)(EncodingTeacher)
+    _recorder("other")
+    safe = _gradient_config(tmp_path, method="encode")
+    safe["cmp_teacher"] = {}
+    safe["component_bindings"]["forward#other"] = {"model": "cmp_teacher"}
+    with _session(safe) as session:
+        next(session)
+        checked = next(s for s in session.get_all_steps() if s.name == "forward#other")
+
+    session = _session(_gradient_config(tmp_path, method="encode"))
+    session.remove_step("forward#other")
+    session.add_step(_pickled(checked))
+    with session:
+        with pytest.raises(RuntimeError, match=r"forward#other calls Model\.encode"):
+            next(session)
+
+
+class EncodingTeacher(nn.Module, _InertResource):
+    """A separate model with an `encode` method (module level, so that
+    nothing about it stops a step from pickling)."""
+
+    def __init__(self, config=None):
+        nn.Module.__init__(self)
+        self.linear = nn.Linear(2, 1)
+
+    def encode(self, x):
+        return self.linear(x)
+
+
+def _analysis_session(tmp_path, **components):
+    """An analysis session over the four samples; its `cmp_probe` keeps the
+    inputs and what became of them (`dropped`)."""
+    _register()
+
+    @resource("cmp_trained", session_type="analysis", overwrite=True)
+    class Trained(_InertResource):
+        model = _fresh_linear()
+
+    seen = []
+
+    @reads("inputs", "dropped")
+    @step("cmp_probe", session_type="analysis", overwrite=True)
+    class Probe(Step):
+        def run(self, session, inputs, dropped):
+            seen.append((inputs, dropped))
+
+    config = make_config(tmp_path, max_iterations=1)
+    config["session_config"]["show_execution_graph"] = False
+    config.update({
+        "component_bindings": {
+            "trained_model": "cmp_trained", "dataset": "cmp_dataset",
+        },
+        "cmp_trained": {},
+        "cmp_dataset": {},
+        "cmp_probe": {},
+        "data_manager": {"batch_size": 4},
+        "load_batch": {"fields": ["inputs", "targets"]},
+        **components,
+    })
+    return _session(config), seen
+
+
+def _run_in_analysis(tmp_path, compute):
+    """The inputs, and what `compute` -- built elsewhere -- makes of them
+    once it takes the place of the analysis session's own."""
+    session, seen = _analysis_session(tmp_path, compute=DROPOUT)
+    session.remove_step("compute")
+    session.add_step(compute)
+    with session:
+        next(session)
+    return seen[0]
+
+
+DROPOUT = {
+    "function": "Dropout",
+    "init": {"p": 0.9},
+    "args": ["inputs"],
+    "outputs": "dropped",
+}
+
+
+@pytest.mark.parametrize("pickled", [False, True])
+def test_a_compute_built_for_training_runs_in_eval_mode_in_analysis(
+        tmp_path, pickled,
+):
+    compute = Compute(DROPOUT)
+    if pickled:
+        compute = _pickled(compute)
+
+    inputs, dropped = _run_in_analysis(tmp_path, compute)
+
+    assert torch.equal(dropped, inputs)
+
+
+def test_an_explicit_mode_follows_a_compute_into_analysis(tmp_path):
+    compute = _pickled(Compute({**DROPOUT, "training": True}))
+
+    inputs, dropped = _run_in_analysis(tmp_path, compute)
+
+    assert not torch.equal(dropped, inputs)
+
+
+def test_a_compute_pickled_from_an_analysis_session_runs_in_eval_mode(tmp_path):
+    source, _ = _analysis_session(tmp_path, compute=DROPOUT)
+    built = next(s for s in source.get_all_steps() if s.name == "compute")
+
+    inputs, dropped = _run_in_analysis(tmp_path, _pickled(built))
+
+    assert torch.equal(dropped, inputs)

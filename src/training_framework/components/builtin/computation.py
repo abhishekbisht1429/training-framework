@@ -14,7 +14,7 @@ import contextlib
 import copy
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, override
+from typing import TYPE_CHECKING, Any, override
 
 import torch
 from torch import nn
@@ -565,7 +565,8 @@ class ComputeConfig(CallConfig):
     init: Any = None
     """Constructor arguments; present (even `{}`) means "construct once"."""
     training: bool | None = None
-    """The module's train/eval mode; None is the session type's default."""
+    """The module's train/eval mode; None: eval in an analysis session,
+    train otherwise."""
 
     def __post_init__(self):
         super().__post_init__()
@@ -587,8 +588,10 @@ class Compute(_CallStep):
     constructed once and the instance is called (a module is moved to the
     session's device); any other class is called directly, like a function.
 
-    A module is put in train mode, or eval mode with `training: false`; in
-    an analysis session the default is eval mode.
+    A module runs in eval mode in an analysis session and in train mode
+    otherwise, unless `training` says which. That default depends on the
+    session, so it is settled when the step runs there: an instance can be
+    pickled or registered into another type of session.
 
     Meant for stateless callables. The instance persists across iterations
     but is not checkpointed, and a module's parameters are not trained: keep
@@ -597,19 +600,14 @@ class Compute(_CallStep):
     """
 
     config_schema = ComputeConfig
-    default_training: ClassVar[bool] = True
-    """The module's mode when `training` is not set."""
 
     def __init__(self, config=None):
         super().__init__(config)
         self._function = _resolve_function(self._cfg.function, self._cfg.init)
         self._device = None
-        training = self._cfg.training
-        if isinstance(self._function, nn.Module):
-            self._function.train(
-                self.default_training if training is None else training
-            )
-        elif training is not None:
+        if self._cfg.training is not None and not isinstance(
+                self._function, nn.Module,
+        ):
             raise ValueError(
                 f"compute.training sets the mode of an nn.Module, but "
                 f"{self._cfg.function!r} is not an nn.Module, so it would do "
@@ -619,22 +617,19 @@ class Compute(_CallStep):
 
     @override
     def run(self, session: Session, /, *args: Any, **inputs: Any) -> Any:
-        if isinstance(self._function, nn.Module) and self._device != session.device:
-            self._function.to(session.device)
-            self._device = session.device
+        if isinstance(self._function, nn.Module):
+            if self._device != session.device:
+                self._function.to(session.device)
+                self._device = session.device
+            training = self._cfg.training
+            if training is None:
+                training = session.session_type != ANALYSIS_SESSION_TYPE
+            if self._function.training != training:
+                self._function.train(training)
         return self._call(self._function, inputs)
 
 
-@step("compute", session_type=ANALYSIS_SESSION_TYPE)
-class AnalysisCompute(Compute):
-    """`compute` in an analysis session: a module is in eval mode unless
-    `training: true` asks otherwise."""
-
-    default_training = False
-
-
 __all__ = [
-    "AnalysisCompute",
     "AnalysisForward",
     "Compute",
     "Forward",

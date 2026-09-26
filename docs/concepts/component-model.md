@@ -85,6 +85,21 @@ What `get_dependency` hands out is recorded, so the framework knows the two
 components are wired together wherever the reference ends up -- an attribute, a
 container module, or nowhere at all.
 
+Prerequisites belong to the session, not to the component. A component pickled
+or copied on its own leaves them behind -- the injected ones and the record of
+those it asked for -- whatever pickle protocol it uses, and is given the new
+session's when it is registered there (the record starts over). Two limits:
+
+- A stateful component is rebuilt from a pickle by running its constructor
+  outside any session, so one whose constructor takes a prerequisite (the
+  `CaptionedImageModel` above) cannot be: pickling it on its own raises,
+  naming the prerequisite. Save it with `Checkpointer.save_checkpoint` and
+  read it back with `Checkpointer.load_component`, which rebuild it with its
+  prerequisites. One that takes them in `setup` or later pickles as usual.
+- What a component keeps in its own attributes is pickled with it, so a
+  component that is not stateful takes a prerequisite from `get_dependency`
+  when it needs it rather than keeping it.
+
 Lookup is restricted to declared prerequisites. Asking for a resource the
 class did not declare raises `ComponentDependencyError` naming the
 `@requires_resource` to add, and `self.has_dependency(name)` reports whether a

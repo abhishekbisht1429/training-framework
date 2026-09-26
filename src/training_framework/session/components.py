@@ -14,7 +14,11 @@ from training_framework.components import (
     Stateful,
     Step,
 )
-from training_framework.components.base import _DEPENDENCIES_KEYWORD
+from training_framework.components.base import (
+    _DEPENDENCIES_KEYWORD,
+    _give_prerequisites,
+    _given_prerequisites,
+)
 from training_framework.components.config_schema import has_all_defaults
 from training_framework.components.edges import (
     Edge,
@@ -1536,7 +1540,7 @@ class SessionComponents:
         for consumer in self.components.values():
             if consumer is replacement:
                 continue
-            injected = consumer.__dict__.get(Component.DEPENDENCIES_ATTR)
+            injected = _given_prerequisites(consumer)
             if injected is None:
                 continue
             for edge in declared_edges(type(consumer)):
@@ -1565,13 +1569,14 @@ class SessionComponents:
         one does not hold.
 
         Available from `setup` onwards. A component that needs a prerequisite
-        in `__init__` must still be activated by the session.
+        in `__init__` must still be activated by the session. The record of
+        what it asked for starts over with them.
         """
-        component.__dict__[Component.DEPENDENCIES_ATTR] = {
+        _give_prerequisites(component, {
             edge.asked: self.get_resource(edge.asked, consumer=component.name)
             for edge in declared_edges(type(component))
             if edge.injects
-        }
+        })
 
     def _validate_component(
             self,
@@ -1654,7 +1659,7 @@ class SessionComponents:
         # session no longer owns. A later registration under the name puts
         # it back.
         for consumer in self.components.values():
-            injected = consumer.__dict__.get(Component.DEPENDENCIES_ATTR)
+            injected = _given_prerequisites(consumer)
             if not injected:
                 continue
             for asked in [

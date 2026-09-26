@@ -22,6 +22,7 @@ from training_framework.components.base import (
     IterationHook,
     Resource,
     Step,
+    _given_prerequisites,
 )
 from training_framework.components.naming import (
     implementation_of,
@@ -256,7 +257,7 @@ def given_instance(consumer: Any, name: str) -> str | None:
     """
     if isinstance(consumer, type):
         return None
-    injected = getattr(consumer, "__dict__", {}).get(Component.DEPENDENCIES_ATTR)
+    injected = _given_prerequisites(consumer)
     if not injected or name not in injected:
         return None
     dependency = injected[name]
