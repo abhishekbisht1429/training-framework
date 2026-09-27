@@ -85,20 +85,36 @@ What `get_dependency` hands out is recorded, so the framework knows the two
 components are wired together wherever the reference ends up -- an attribute, a
 container module, or nowhere at all.
 
-Prerequisites belong to the session, not to the component. A component pickled
-or copied on its own leaves them behind -- the injected ones and the record of
-those it asked for -- whatever pickle protocol it uses, and is given the new
-session's when it is registered there (the record starts over). Two limits:
+Prerequisites belong to the session, not to the component. The one thing the
+framework promises about a component pickled or copied on its own (`pickle`,
+`copy.copy`, `copy.deepcopy`) is that **what the session injected never
+travels**: the injected prerequisites and the record of those it asked for
+stay behind, whatever pickle protocol the component uses, and it is given the
+new session's when it is registered there (the record starts over).
+Everything else follows the ordinary Python / PyTorch rules for the
+component's class. To persist a component, use a checkpoint
+(`Checkpointer.save_checkpoint` / `load_component`), which saves `get_state()`
+and rebuilds the component with its prerequisites.
 
-- A stateful component is rebuilt from a pickle by running its constructor
-  outside any session, so one whose constructor takes a prerequisite (the
-  `CaptionedImageModel` above) cannot be: pickling it on its own raises,
-  naming the prerequisite. Save it with `Checkpointer.save_checkpoint` and
-  read it back with `Checkpointer.load_component`, which rebuild it with its
-  prerequisites. One that takes them in `setup` or later pickles as usual.
-- What a component keeps in its own attributes is pickled with it, so a
-  component that is not stateful takes a prerequisite from `get_dependency`
-  when it needs it rather than keeping it.
+What the ordinary rules mean here:
+
+- A `ModuleResource`, and any class listing `nn.Module` before a stateful
+  base, pickles and copies as a module: its attributes. A copy keeps its
+  device, frozen parameters, hooks and any weight it shares with something
+  else in the same pickle or copy; a composed model (the
+  `CaptionedImageModel` above) copies together with the parts it holds as
+  submodules. `get_state` is not involved. A `ModuleResource` pickled by
+  0.5.0 or earlier still loads.
+- Any other stateful component is rebuilt: its constructor runs again,
+  outside any session, then `set_state(get_state())`. So one whose
+  constructor consulted a prerequisite -- `get_dependency`, or only
+  `has_dependency` -- cannot be rebuilt, and pickling or copying it on its
+  own (`copy.copy` and `copy.deepcopy` rebuild it too) raises, naming the
+  prerequisite. Consult prerequisites in `setup` instead. A
+  `__new__` that requires arguments cannot be rebuilt from a pickle.
+- A prerequisite that a component keeps for itself (in an attribute, rather
+  than taking it from `get_dependency` when needed) is ordinary state: it is
+  pickled or copied along with the component, like any other attribute.
 
 Lookup is restricted to declared prerequisites. Asking for a resource the
 class did not declare raises `ComponentDependencyError` naming the

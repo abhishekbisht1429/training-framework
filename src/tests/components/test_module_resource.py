@@ -428,16 +428,17 @@ def test_a_child_shared_by_two_models_is_restored_as_one_instance(tmp_path):
     assert resource_named(restored, "mr_second_model").mr_encoder is encoder
 
 
-def test_pickling_uses_the_stateful_reconstruction_envelope():
-    # nn.Module defines __getstate__/__setstate__ and would otherwise shadow
-    # Stateful's envelope through the MRO.
+def test_a_module_resource_pickles_as_a_module():
+    # Its attributes, as any module is pickled -- not rebuilt from get_state.
     encoder = PicklableEncoder({})
+    with torch.no_grad():
+        encoder.linear.weight.fill_(0.5)
+    encoder.note = "set after construction"
 
-    state = encoder.__getstate__()
+    restored = pickle.loads(pickle.dumps(encoder))
 
-    assert state["__training_framework_pickle_version__"] == 1
-    assert state["init_args"] == {"args": ({},), "kwargs": {}}
-    assert set(state["state"]["state_dict"]) == {"linear.weight", "linear.bias"}
+    assert restored.note == "set after construction"
+    torch.testing.assert_close(restored.linear.weight, encoder.linear.weight)
 
 
 def test_a_saved_checkpoint_restores_the_composed_model(tmp_path):

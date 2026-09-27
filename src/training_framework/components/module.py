@@ -24,6 +24,7 @@ from torch import nn
 from training_framework.components.base import (
     Component,
     ComponentDependencyError,
+    Stateful,
     StatefulResource,
 )
 
@@ -230,13 +231,23 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
                 f"{self._component_name()} could not load its state: {error}"
             ) from error
 
-    def __getstate__(self) -> Any:
-        # nn.Module defines __getstate__/__setstate__, which would otherwise
-        # shadow Stateful's versioned reconstruction envelope through the MRO.
-        return StatefulResource.__getstate__(self)
-
+    # Pickled and copied as a module -- its attributes, through
+    # nn.Module.__getstate__ -- not rebuilt from get_state: a copy keeps its
+    # device, frozen parameters, hooks and the weights it shares with
+    # anything else in the same pickle or copy, and a composed model copies
+    # with its parts. What the session gave it is left behind (see
+    # `_SessionBound`); checkpoints still go through get_state / set_state.
     def __setstate__(self, state: Any) -> None:
-        StatefulResource.__setstate__(self, state)
+        # A pickle written up to 0.5.0 on `main` holds Stateful's rebuild
+        # envelope; read it as that version did.
+        if (
+                isinstance(state, Mapping)
+                and state.get(Stateful._PICKLE_VERSION_KEY)
+                == Stateful._PICKLE_VERSION
+        ):
+            StatefulResource.__setstate__(self, state)
+            return
+        nn.Module.__setstate__(self, state)
 
     # -- lifecycle --------------------------------------------------------
 

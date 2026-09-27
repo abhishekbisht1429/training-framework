@@ -1,3 +1,4 @@
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -16,56 +17,97 @@ _SESSION_BOUND_ATTR = "_session_bound"
 """Instance ``__dict__`` key holding what a session gave the component."""
 
 _CONSTRUCTOR_PREREQUISITES_ATTR = "_constructor_prerequisites"
-"""Instance ``__dict__`` key naming the prerequisites its constructor took."""
+"""Instance ``__dict__`` key naming the prerequisites its constructor
+consulted."""
 
 
 class _SessionBound:
     """What one session gives one component: the prerequisites it was handed
-    (None: given none), and the record of those it has asked for.
+    (None: given none), the record of those it has asked for, and -- while
+    its constructor runs -- every prerequisite the constructor consulted.
 
-    It belongs to that session, not to the component, so it pickles and
-    copies as an empty holder. Whatever protocol pickles the component --
-    object's, `nn.Module`'s, a base's own -- the copy leaves the session
-    behind, with nothing having to strip it. Registering the component
-    elsewhere replaces the whole holder, so no record outlives the
-    prerequisites it describes.
+    It lives in the component's `__dict__`, so it lives and dies with the
+    component like any attribute. It belongs to that one object and that
+    session, though:
+
+    - it pickles and deep-copies as an empty, ownerless holder (its own
+      `__reduce__`), so whatever protocol pickles or copies the component,
+      no prerequisite travels, and nothing has to strip it;
+    - it keeps a weak reference to its owner and is only used by that
+      object, so a shallow copy -- which shares the `__dict__` entry -- has
+      no session either. A reference rather than an id: a copy can later sit
+      at the address of an original that has been collected.
+
+    Registering the component elsewhere replaces the whole holder, so no
+    record outlives the prerequisites it describes.
     """
 
-    __slots__ = ("dependencies", "linked")
+    __slots__ = ("owner", "dependencies", "linked", "constructing", "consulted")
 
-    def __init__(self, dependencies: dict[str, Any] | None = None):
+    def __init__(
+            self,
+            owner: Any = None,
+            dependencies: dict[str, Any] | None = None,
+    ):
+        self.owner = None if owner is None else weakref.ref(owner)
         self.dependencies = dependencies
         self.linked: dict[str, Any] = {}
+        self.constructing = False
+        self.consulted: dict[str, None] = {}
+
+    def belongs_to(self, component: Any) -> bool:
+        return self.owner is not None and self.owner() is component
+
+    def consult(self, name: str | None = None) -> dict[str, Any] | None:
+        """The prerequisites, as the component itself looks at them: for
+        `name`, or all of them. A look taken while its constructor runs is
+        recorded whatever it finds -- what the constructor did depends on
+        it."""
+        if self.constructing:
+            names = (name,) if name is not None else tuple(
+                self.dependencies or (),
+            )
+            self.consulted.update(dict.fromkeys(names))
+        return self.dependencies
 
     def __reduce__(self):
         return (_SessionBound, ())
 
 
-def _session_bound(component: Any) -> _SessionBound:
-    """The holder of what `component`'s session gave it, created empty on
-    first use -- through `__dict__`, so an `nn.Module` needs no
-    `nn.Module.__init__` to have run first."""
-    bound = component.__dict__.get(_SESSION_BOUND_ATTR)
-    if bound is None:
-        bound = component.__dict__[_SESSION_BOUND_ATTR] = _SessionBound()
+def _owned_holder(component: Any) -> _SessionBound | None:
+    """`component`'s own holder: None when it has none, or when the one in
+    its `__dict__` belongs to another object (it is a shallow copy)."""
+    bound = getattr(component, "__dict__", {}).get(_SESSION_BOUND_ATTR)
+    return bound if bound is not None and bound.belongs_to(component) else None
+
+
+def _bind(component: Any, bound: _SessionBound) -> _SessionBound:
+    # Through __dict__, which bypasses nn.Module.__setattr__ (so a
+    # prerequisite module is not registered as a submodule of its consumer)
+    # and needs no nn.Module.__init__ to have run first.
+    component.__dict__[_SESSION_BOUND_ATTR] = bound
     return bound
 
 
-def _give_prerequisites(component: Any, dependencies: Mapping[str, Any]) -> None:
-    """Hand `component` its prerequisites, replacing whatever an earlier
-    session gave it -- the prerequisites and the record alike.
+def _session_bound(component: Any) -> _SessionBound:
+    """The holder of what `component`'s session gave it, created empty on
+    first use."""
+    bound = _owned_holder(component)
+    return _bind(component, _SessionBound(component)) if bound is None else bound
 
-    Written through `__dict__`, which also bypasses `nn.Module.__setattr__`,
-    so a prerequisite module is not registered as a submodule of its
-    consumer.
-    """
-    component.__dict__[_SESSION_BOUND_ATTR] = _SessionBound(dict(dependencies))
+
+def _give_prerequisites(
+        component: Any, dependencies: Mapping[str, Any],
+) -> _SessionBound:
+    """Hand `component` its prerequisites, replacing whatever an earlier
+    session gave it -- the prerequisites and the record alike."""
+    return _bind(component, _SessionBound(component, dict(dependencies)))
 
 
 def _given_prerequisites(component: Any) -> dict[str, Any] | None:
     """The live prerequisites `component` was handed, or None if it was
-    handed none (or is a class)."""
-    bound = getattr(component, "__dict__", {}).get(_SESSION_BOUND_ATTR)
+    handed none (or is a class). The session's view: records nothing."""
+    bound = _owned_holder(component)
     return None if bound is None else bound.dependencies
 
 
@@ -89,13 +131,18 @@ class ComponentMeta(CaptureInitMeta):
         dependencies = kwargs.pop(_DEPENDENCIES_KEYWORD)
         instance = cls.__new__(cls, *args, **kwargs)
         if isinstance(instance, cls):
-            _give_prerequisites(instance, dependencies)
-            type(instance).__init__(instance, *args, **kwargs)
-            # Whatever it asked for so far, its constructor needed: a fact
-            # about how it was built, so it outlives any session.
-            asked = tuple(_session_bound(instance).linked)
-            if asked:
-                instance.__dict__[_CONSTRUCTOR_PREREQUISITES_ATTR] = asked
+            bound = _give_prerequisites(instance, dependencies)
+            bound.constructing = True
+            try:
+                type(instance).__init__(instance, *args, **kwargs)
+            finally:
+                bound.constructing = False
+            # What the constructor looked at, it depends on: a fact about
+            # how the instance was built, so it outlives any session.
+            if bound.consulted:
+                instance.__dict__[_CONSTRUCTOR_PREREQUISITES_ATTR] = tuple(
+                    bound.consulted,
+                )
         return instance
 
     def __new__(mcls, name, bases, namespace):
@@ -281,7 +328,7 @@ class Component(ABC, metaclass=ComponentMeta):
         Given by ``SessionComponents._construct`` *before* ``__init__`` runs,
         so a constructor may use them, or on registration.
         """
-        injected = _given_prerequisites(self)
+        injected = _session_bound(self).consult()
         return {} if injected is None else injected
 
     def get_dependency(self, name: str) -> "Resource":
@@ -296,7 +343,7 @@ class Component(ABC, metaclass=ComponentMeta):
         was wired to another one wherever the caller puts the reference --
         an attribute, a container module, or nowhere at all.
         """
-        injected = _given_prerequisites(self)
+        injected = _session_bound(self).consult(name)
         if injected is None:
             raise ComponentDependencyError(
                 f"{self._component_name()} requested resource '{name}' but "
@@ -340,7 +387,8 @@ class Component(ABC, metaclass=ComponentMeta):
 
     def has_dependency(self, name: str) -> bool:
         """Return whether a declared prerequisite was injected."""
-        return name in self._dependencies
+        injected = _session_bound(self).consult(name)
+        return injected is not None and name in injected
 
     @classmethod
     @abstractmethod
@@ -395,21 +443,24 @@ class Stateful(ABC):
         return envelope
 
     def _refuse_rebuild_without_prerequisites(self) -> None:
-        """Refuse a pickle this component could not be rebuilt from.
+        """Refuse a pickle or copy this component could not be rebuilt from.
 
         The envelope is rebuilt by running the constructor outside any
-        session, where no prerequisites exist; one the constructor took
-        would fail there, at `loads`. Refused here, where the mistake is.
+        session, where no prerequisites exist. A constructor that consulted
+        one -- took it, or only checked for it -- would fail there at
+        `loads`, or silently take another branch. Refused here, where the
+        mistake is.
         """
         asked = self.__dict__.get(_CONSTRUCTOR_PREREQUISITES_ATTR)
         if asked:
             name = self.__dict__.get("name", type(self).__name__)
             raise TypeError(
-                f"{name} cannot be pickled on its own: its constructor takes "
-                f"the prerequisites {list(asked)} (get_dependency in "
-                "__init__), and a pickle is rebuilt by running the "
-                "constructor outside any session, where there are none. "
-                "Save it with Checkpointer.save_checkpoint and read it back "
+                f"{name} cannot be pickled or copied on its own: its "
+                f"constructor consults the prerequisites {list(asked)} "
+                "(get_dependency or has_dependency in __init__), and a pickle "
+                "or copy is rebuilt by running the constructor outside any "
+                "session, where there are none. Consult them in setup instead, or save it with "
+                "Checkpointer.save_checkpoint and read it back "
                 "with Checkpointer.load_component, which rebuild it with its "
                 "prerequisites."
             )
