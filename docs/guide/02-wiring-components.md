@@ -152,6 +152,16 @@ to its constructor unchanged, and because the session has to know how things
 are wired before anything is constructed. The flat
 `role: implementation` form is unchanged and can be mixed with it freely.
 
+The consumer must be a component the session holds: wiring for
+`evaluater`, or for a component nothing activates, would do nothing, so it is
+an error that lists the instances of that implementation the session does
+hold. A consumer with an instance suffix is checked before anything is built;
+one without, when the session is first entered (or by the engine, before it
+starts the ranks), so a component added with `activate_component` in the
+meantime counts. `session.check_component_bindings()` runs the check earlier.
+A session restored from a checkpoint is not checked again -- including one
+saved before it was ever entered, which therefore skips the check.
+
 The wiring holds wherever the consumer takes its prerequisite with
 `self.get_dependency(name)` -- in its constructor, in `setup`, or while an
 iteration runs -- because the session resolves it for that consumer and hands

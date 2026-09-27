@@ -1,10 +1,13 @@
 """Fine-tuning on two real gloo ranks, spawned by the engine.
 
-A pretraining run is checkpointed; the fine-tuning run takes its encoder
-through `checkpoint_module`, freezes the first block, and trains a head on
-two ranks that see different data. Both ranks must end with the same
-weights, equal to the same fine-tuning written in plain torch with the
-gradient averaged over the ranks, and the frozen block must be untouched.
+A pretraining run is checkpointed; the fine-tuning run imports its model
+(`import_components`), takes the encoder through `module_part`, freezes the
+first block, and trains a head on two ranks that see different data. Both
+ranks must end with the same weights, equal to the same fine-tuning written
+in plain torch with the gradient averaged over the ranks, and the frozen
+block must be untouched. The source checkpoint is moved away once the
+engine has built the sessions and before it starts the ranks, so they run
+without it.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+import shutil
 import sys
 
 import pytest
@@ -69,16 +73,19 @@ def _pretrain(tmp_path):
 def _fine_tuning_config(tmp_path, checkpoint, output_dir):
     return {
         "session_config": _session_settings(tmp_path, "fine-tune"),
+        "import_components": {
+            "pretrained": {"checkpoint": str(checkpoint), "role": "source"},
+        },
         "component_bindings": {
             "model": "fine_tuned_model",
-            "backbone": "checkpoint_module",
+            "backbone": "module_part",
             "head": "ift_head",
         },
-        "checkpoint_module": {"checkpoint": str(checkpoint), "submodule": "encoder"},
+        "module_part": {"submodule": "encoder"},
         "fine_tuned_model": {"frozen": ["module.0.*", "module.1.*"]},
         "ift_head": {},
         "ift_loss": {},
-        "ift_results": {"output_dir": str(output_dir)},
+        "ift_results": {"output_dir": str(output_dir), "source": str(checkpoint)},
         "ddp": {"world_size": 2, "backend": "gloo", "master_addr": "127.0.0.1"},
         "optimizer": {"optimizer": {"name": "AdamW", "kwargs": {"lr": LR}}},
     }
@@ -107,12 +114,17 @@ def test_fine_tuning_on_two_ranks(tmp_path, monkeypatch):
         "--heartbeat-timeout", "30", "--process_timeout_on_join", "10",
     ])
     with TrainingEngine(Configurator()) as engine:
+        # The sessions are built; the ranks have not started.
+        shutil.move(checkpoint, tmp_path / "moved-source")
         engine.start_session()
 
     results = [
         json.loads((output_dir / f"rank_{rank}.json").read_text(encoding="utf-8"))
         for rank in range(2)
     ]
+
+    # The ranks ran without the source checkpoint.
+    assert not any(result["source_exists"] for result in results)
 
     # Both ranks hold the same model, with the first block frozen.
     assert results[0]["parameters"] == results[1]["parameters"]

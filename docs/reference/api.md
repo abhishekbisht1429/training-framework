@@ -51,7 +51,7 @@ every multi-process launch.
 `Compute`) and of the [optimization chain](optimization.md)
 (`OptimizerResource`, `ForwardContext`, `Backward`, `FreezeGradients`,
 `ClipGradients`, `OptimizerStep`, `GradientProcessor`), and the
-[fine-tuning](fine-tuning.md) resources (`CheckpointModule`,
+[fine-tuning](fine-tuning.md) resources (`ModulePart`,
 `FineTunedModel`). They are configured by name in YAML; only
 `GradientProcessor` is meant to be subclassed.
 
@@ -159,6 +159,7 @@ The engine monitors workers while leaving the context.
 | `Checkpointer.load_component_state(path, name)` | Return one component's saved state without building anything |
 | `Checkpointer.read_manifest(path)` | Return a checkpoint's `manifest.json` |
 | `Component.state_version` / `migrate_state(from_version, state)` / `migrate_init_args(from_version, init_args)` | Version what a component checkpoints, and bring an older checkpoint forward |
+| `Stateful.rename_instances(state, names)` | Rename the component instances a (migrated) state names, when [imported](import-components.md#instance-names-inside-a-saved-state) under other names; `ModuleResource` renames `linked` |
 
 `get_dependency` is the one way a component takes a prerequisite, whether in
 `__init__` or at run time; see

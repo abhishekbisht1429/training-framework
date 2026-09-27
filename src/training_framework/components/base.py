@@ -422,6 +422,21 @@ class Stateful(ABC):
     def set_state(self, state: Any) -> None:
         raise NotImplementedError
 
+    @classmethod
+    def rename_instances(cls, state: Any, names: Mapping[str, str]) -> Any:
+        """Return `state` with the component instance names it holds renamed.
+
+        `names` maps an instance name of the session the state was saved in
+        to this session's name for the same component. It is used when
+        components are imported from another run under other names, or wired
+        to this session's own components. The state has already been brought
+        to the current `state_version` by `migrate_state`, so only the
+        current format needs handling. The default holds no instance names
+        and returns the state unchanged; a component whose state names
+        instances overrides it.
+        """
+        return state
+
     def __getstate__(self) -> Any:
         if not isinstance(self, Component):
             return self.get_state()

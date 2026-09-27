@@ -1,15 +1,16 @@
-"""Fine-tuning: `checkpoint_module` and `fine_tuned_model`, through real sessions.
+"""Fine-tuning: `import_components`, `module_part` and `fine_tuned_model`,
+through real sessions.
 
-A pretraining session is checkpointed to disk; a fine-tuning session takes
-part of its model through `checkpoint_module`, puts a head on it through
-`fine_tuned_model`, and trains with the built-in optimizer chain. DDP is
-replaced by the recording stand-in, as the other built-in tests do.
+A pretraining session is checkpointed to disk; a fine-tuning session imports
+its model (`import_components`), takes a part of it through `module_part`,
+puts a head on it through `fine_tuned_model`, and trains with the built-in
+optimizer chain. DDP is replaced by the recording stand-in, as the other
+built-in tests do.
 """
 
 from __future__ import annotations
 
 import copy
-import pickle
 import shutil
 
 import pytest
@@ -19,9 +20,9 @@ from torch.nn import functional
 
 from tests.test_utils import make_config, resource_named, stub_process_group
 from training_framework.components import (
-    ComponentDependencyError,
     ModuleResource,
     Resource,
+    StatefulResource,
     Step,
     requires_resource,
     resource,
@@ -64,14 +65,16 @@ class PretrainModel(ModuleResource):
 
 
 class DrivenModel(ModuleResource):
-    """A model the session sets up: it cannot be held as a plain module."""
+    """A model the session must set up."""
 
     def __init__(self, config=None):
         super().__init__(config)
         self.linear = nn.Linear(4, 5)
+        self.set_up = False
 
     def setup(self, session):
         super().setup(session)
+        self.set_up = True
 
 
 class ProbeHead(ModuleResource):
@@ -107,7 +110,7 @@ class DatasetSizedHead(ModuleResource):
 
 
 class PlainBackbone(ModuleResource):
-    """A backbone of the user's own, not from a checkpoint."""
+    """A backbone of the user's own, not from another run."""
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -131,6 +134,73 @@ class NotAModule(Resource):
 
     def teardown(self, session):
         pass
+
+
+class Block(ModuleResource):
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.linear = nn.Linear(4, 5)
+
+    def forward(self, x):
+        return self.linear(x)
+
+
+@requires_resource("block")
+class Composite(ModuleResource):
+    """Wired to a block, with one weight of its own, as a class token is."""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.block = self.get_dependency("block")
+        self.scale = nn.Parameter(torch.ones(5))
+
+    def forward(self, x):
+        return self.block(x) * self.scale
+
+
+@requires_resource("composite")
+class Outer(ModuleResource):
+    """Holds a wired composite, which a module_part can take out of it."""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.inner = self.get_dependency("composite")
+        self.extra = nn.Linear(5, 5)
+
+    def forward(self, x):
+        return self.extra(self.inner(x))
+
+
+class Counter(StatefulResource):
+    """A prerequisite that is not a module and has state of its own."""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.count = 0
+
+    def get_state(self):
+        return {"count": self.count}
+
+    def set_state(self, state):
+        self.count = state["count"]
+
+    def setup(self, session):
+        pass
+
+    def teardown(self, session):
+        pass
+
+
+@requires_resource("counter")
+class CountedModel(ModuleResource):
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.counter = self.get_dependency("counter")
+        self.linear = nn.Linear(4, 5)
+
+    def forward(self, x):
+        self.counter.count += 1
+        return self.linear(x)
 
 
 INPUTS = torch.tensor([
@@ -160,6 +230,11 @@ def _register():
     resource("ft_plain_backbone", overwrite=True)(PlainBackbone)
     resource("ft_resetting_backbone", overwrite=True)(ResettingBackbone)
     resource("ft_not_a_module", overwrite=True)(NotAModule)
+    resource("ft_block", overwrite=True)(Block)
+    resource("ft_composite", overwrite=True)(Composite)
+    resource("ft_outer", overwrite=True)(Outer)
+    resource("ft_counter", overwrite=True)(Counter)
+    resource("ft_counted_model", overwrite=True)(CountedModel)
     step("ft_loss", overwrite=True)(FineTuneLoss)
 
 
@@ -171,43 +246,53 @@ def _components():
 # -- helpers -----------------------------------------------------------------------
 
 
+def wired_checkpoint(tmp_path, bindings, **components):
+    """Write a pretraining run wired as `bindings` says, `components` giving
+    each implementation's config; return its path and its `model`."""
+    config = make_config(tmp_path / "pretrain", seed=7)
+    config["session_config"]["show_execution_graph"] = False
+    config["component_bindings"] = bindings
+    config.update(components)
+    session = TrainingSession(config)
+    path = Checkpointer.save_checkpoint(session, tmp_path / "pretrained")
+    return path, resource_named(session, bindings["model"])
+
+
 def pretrain_checkpoint(tmp_path, model="ft_pretrain_model", **model_config):
     """Write a pretraining run whose `model` is `model`; return its path and
     the pretrained model."""
-    config = make_config(tmp_path / "pretrain", seed=7)
-    config["session_config"]["show_execution_graph"] = False
-    config["component_bindings"] = {"model": model}
-    config[model] = model_config
-    session = TrainingSession(config)
-    path = Checkpointer.save_checkpoint(session, tmp_path / "pretrained")
-    return path, resource_named(session, model)
+    return wired_checkpoint(tmp_path, {"model": model}, **{model: model_config})
 
 
 def fine_tuning_config(
         tmp_path,
         checkpoint,
         *,
-        source=None,
+        part=None,
+        imports=None,
         model=None,
         bindings=None,
         optimizer=None,
         max_iterations=3,
         **extra,
 ):
+    """Import the pretrained `model` as `source`, and take its encoder
+    through `module_part` as the backbone."""
     config = make_config(tmp_path, max_iterations=max_iterations)
     config["session_config"]["show_execution_graph"] = False
+    config["import_components"] = {
+        "pretrained": {
+            "checkpoint": str(checkpoint), "role": "source", **(imports or {}),
+        },
+    }
     config["component_bindings"] = {
         "model": "fine_tuned_model",
-        "backbone": "checkpoint_module",
+        "backbone": "module_part",
         "head": "ft_probe_head",
         **(bindings or {}),
     }
     config.update({
-        "checkpoint_module": {
-            "checkpoint": str(checkpoint),
-            "submodule": "encoder",
-            **(source or {}),
-        },
+        "module_part": {"submodule": "encoder", **(part or {})},
         "fine_tuned_model": model or {},
         "ft_probe_head": {},
         "ft_loss": {},
@@ -225,11 +310,31 @@ def fine_tuning_config(
     return config
 
 
-def fine_tuning_session(tmp_path, checkpoint, **kwargs):
-    session = TrainingSession(fine_tuning_config(tmp_path, checkpoint, **kwargs))
+def imported_backbone_config(tmp_path, checkpoint, *, imports=None, **kwargs):
+    """The imported resource fills `backbone` itself, with no module_part."""
+    config = fine_tuning_config(
+        tmp_path, checkpoint,
+        imports={"role": "backbone", **(imports or {})}, **kwargs,
+    )
+    del config["component_bindings"]["backbone"]
+    del config["module_part"]
+    return config
+
+
+def without_import(config):
+    del config["import_components"]
+    del config["module_part"]
+    return config
+
+
+def quiet(session):
     session.unregister_hook("logger")
     session.unregister_hook("checkpointer")
     return session
+
+
+def fine_tuning_session(tmp_path, checkpoint, **kwargs):
+    return quiet(TrainingSession(fine_tuning_config(tmp_path, checkpoint, **kwargs)))
 
 
 def run(session, iterations=None):
@@ -253,44 +358,55 @@ def parameters(module: nn.Module) -> dict[str, torch.Tensor]:
 FROZEN_FIRST_BLOCK = {"frozen": ["module.0.*", "module.1.*"]}
 
 
-# -- checkpoint_module ----------------------------------------------------------------
+# -- module_part -----------------------------------------------------------------------
 
 
-def test_checkpoint_module_keeps_only_the_selected_submodule(tmp_path):
+def test_module_part_holds_the_selected_part_of_the_import(tmp_path):
     path, pretrained = pretrain_checkpoint(tmp_path)
     session = fine_tuning_session(tmp_path / "run", path)
-    source = resource_named(session, "checkpoint_module")
+    part = resource_named(session, "module_part")
+    imported = resource_named(session, "ft_pretrain_model")
 
-    names = [name for name, _ in source.named_parameters()]
+    assert part.module is imported.encoder
+    names = [name for name, _ in part.named_parameters()]
     assert names and all(name.startswith("module.") for name in names)
     assert not any("pretext_head" in name for name in names)
     for name, parameter in pretrained.encoder.named_parameters():
-        torch.testing.assert_close(source.module.get_parameter(name), parameter)
+        torch.testing.assert_close(part.module.get_parameter(name), parameter)
 
 
-def test_checkpoint_module_defaults_to_the_whole_model_resource(tmp_path):
+def test_module_part_owns_no_weights(tmp_path):
+    path, _ = pretrain_checkpoint(tmp_path)
+    session = fine_tuning_session(tmp_path / "run", path)
+
+    assert resource_named(session, "module_part").get_state()["state_dict"] == {}
+    owned = resource_named(session, "ft_pretrain_model").get_state()["state_dict"]
+    assert {name.split(".")[0] for name in owned} == {"encoder", "pretext_head"}
+
+
+def test_module_part_defaults_to_the_whole_source(tmp_path):
     path, pretrained = pretrain_checkpoint(tmp_path)
-    config = fine_tuning_config(tmp_path / "run", path, bindings={"head": "ft_probe_head"})
-    config["checkpoint_module"] = {"checkpoint": str(path)}
-    config["ft_probe_head"] = {"in_features": 7}
-    session = TrainingSession(config)
+    session = fine_tuning_session(
+        tmp_path / "run", path, part={"submodule": ""},
+        ft_probe_head={"in_features": 7},
+    )
 
-    held = resource_named(session, "checkpoint_module").module
-    assert isinstance(held, PretrainModel)
+    held = resource_named(session, "module_part").module
+    assert held is resource_named(session, "ft_pretrain_model")
     torch.testing.assert_close(
         held.pretext_head.weight, pretrained.pretext_head.weight,
     )
 
 
-def test_checkpoint_module_calls_the_configured_method(tmp_path):
+def test_module_part_calls_the_configured_method(tmp_path):
     path, _ = pretrain_checkpoint(tmp_path)
     session = fine_tuning_session(
         tmp_path / "run", path,
-        source={"submodule": "", "method": "features"},
+        part={"submodule": "", "method": "features"},
         model={"backbone_output": "pooled"},
     )
 
-    backbone = resource_named(session, "checkpoint_module").eval()
+    backbone = resource_named(session, "module_part").eval()
     output = backbone(INPUTS)
     assert set(output) == {"pooled", "twice"}
     torch.testing.assert_close(output["pooled"], backbone.module.encoder(INPUTS))
@@ -300,58 +416,190 @@ def test_a_missing_submodule_names_the_ones_that_exist(tmp_path):
     path, _ = pretrain_checkpoint(tmp_path)
 
     with pytest.raises(ValueError, match=r"no attribute 'encoderr'.*'encoder', 'pretext_head'"):
-        fine_tuning_session(tmp_path / "run", path, source={"submodule": "encoderr"})
+        fine_tuning_session(tmp_path / "run", path, part={"submodule": "encoderr"})
 
 
 def test_a_submodule_that_is_not_a_module_is_refused(tmp_path):
     path, _ = pretrain_checkpoint(tmp_path)
 
-    with pytest.raises(TypeError, match="model.training is a bool, not an nn.Module"):
-        fine_tuning_session(tmp_path / "run", path, source={"submodule": "training"})
+    with pytest.raises(TypeError, match="ft_pretrain_model.training is a bool, not an nn.Module"):
+        fine_tuning_session(tmp_path / "run", path, part={"submodule": "training"})
 
 
 def test_a_missing_method_is_refused(tmp_path):
     path, _ = pretrain_checkpoint(tmp_path)
 
     with pytest.raises(ValueError, match="has no method 'embed'"):
-        fine_tuning_session(tmp_path / "run", path, source={"method": "embed"})
+        fine_tuning_session(tmp_path / "run", path, part={"method": "embed"})
+
+
+def test_a_source_that_is_not_a_module_is_refused(tmp_path):
+    path, _ = pretrain_checkpoint(tmp_path)
+    config = without_import(fine_tuning_config(
+        tmp_path / "run", path,
+        bindings={"source": "ft_not_a_module"}, ft_not_a_module={},
+    ))
+    config["module_part"] = {}
+
+    with pytest.raises(TypeError, match="role 'source' is filled by NotAModule"):
+        TrainingSession(config)
+
+
+# -- the import -------------------------------------------------------------------------
+
+
+def test_the_imported_model_is_set_up_by_the_session(tmp_path):
+    path, _ = pretrain_checkpoint(tmp_path, model="ft_driven_model")
+    session = fine_tuning_session(
+        tmp_path / "run", path, part={"submodule": "linear"},
+    )
+    imported = resource_named(session, "ft_driven_model")
+    assert not imported.set_up
+
+    with session:
+        assert imported.set_up
 
 
 def test_a_resource_the_checkpoint_does_not_hold_is_refused(tmp_path):
     path, _ = pretrain_checkpoint(tmp_path)
 
-    with pytest.raises(ValueError, match="has no single resource 'teacher'"):
-        fine_tuning_session(tmp_path / "run", path, source={"resource": "teacher"})
+    with pytest.raises(ValueError, match="import_components.pretrained.resource: The checkpoint has no component 'teacher'"):
+        fine_tuning_session(tmp_path / "run", path, imports={"resource": "teacher"})
 
 
 def test_a_missing_checkpoint_is_refused(tmp_path):
-    with pytest.raises(FileNotFoundError, match="checkpoint_module.checkpoint does not exist"):
+    with pytest.raises(FileNotFoundError, match="import_components.pretrained.checkpoint does not exist"):
         fine_tuning_session(tmp_path / "run", tmp_path / "nowhere")
 
 
-def test_a_session_driven_source_must_be_narrowed_with_submodule(tmp_path):
-    path, _ = pretrain_checkpoint(tmp_path, model="ft_driven_model")
-
-    with pytest.raises(ComponentDependencyError, match="Pick a part of it with `submodule`"):
-        fine_tuning_session(tmp_path / "run", path, source={"submodule": ""})
-
-    # A part of it is a plain module, and is accepted.
-    session = fine_tuning_session(tmp_path / "run2", path, source={"submodule": "linear"})
-    assert isinstance(resource_named(session, "checkpoint_module").module, nn.Linear)
+def composite_checkpoint(tmp_path):
+    return wired_checkpoint(
+        tmp_path, {"model": "ft_composite", "block": "ft_block"},
+        ft_composite={}, ft_block={},
+    )
 
 
-def test_checkpoint_module_survives_a_pickle_round_trip(tmp_path):
-    path, _ = pretrain_checkpoint(tmp_path)
-    session = fine_tuning_session(tmp_path / "run", path, max_iterations=2)
+def test_a_wired_composite_is_imported_as_components(tmp_path):
+    path, pretrained = composite_checkpoint(tmp_path)
+    session = quiet(TrainingSession(imported_backbone_config(tmp_path / "run", path)))
+    composite = resource_named(session, "ft_composite")
+    model = model_of(session)
+
+    assert composite.block is resource_named(session, "ft_block")
+    assert model.backbone is composite
+    assert sorted(name for name, _ in model.backbone.named_parameters()) == [
+        "block.linear.bias", "block.linear.weight", "scale",
+    ]
+    for name, parameter in pretrained.named_parameters():
+        torch.testing.assert_close(composite.get_parameter(name), parameter)
+
+    before = parameters(composite)
     run(session)
-    source = resource_named(session, "checkpoint_module")
 
-    copied = pickle.loads(pickle.dumps(source))
+    # The prerequisite's weights and the composite's own are both trained.
+    for name, value in parameters(composite).items():
+        assert not torch.equal(value, before[name]), name
 
-    original = parameters(source)
-    assert parameters(copied).keys() == original.keys()
-    for name, value in parameters(copied).items():
-        torch.testing.assert_close(value, original[name])
+
+def test_module_part_can_take_a_wired_component_out_of_its_source(tmp_path):
+    path, _ = wired_checkpoint(
+        tmp_path,
+        {"model": "ft_outer", "composite": "ft_composite", "block": "ft_block"},
+        ft_outer={}, ft_composite={}, ft_block={},
+    )
+    session = fine_tuning_session(tmp_path / "run", path, part={"submodule": "inner"})
+    part = resource_named(session, "module_part")
+
+    # A component that declares prerequisites, held inside the source: it
+    # is the source's (and its own), never the part's.
+    assert part.module is resource_named(session, "ft_composite")
+    assert part.get_state()["state_dict"] == {}
+    run(session)
+
+
+def test_an_imported_stateful_prerequisite_keeps_its_state(tmp_path):
+    # The source run's counter has moved on when it is checkpointed.
+    config = make_config(tmp_path / "source", seed=7)
+    config["session_config"]["show_execution_graph"] = False
+    config["component_bindings"] = {"model": "ft_counted_model", "counter": "ft_counter"}
+    config.update(ft_counted_model={}, ft_counter={})
+    source = TrainingSession(config)
+    resource_named(source, "ft_counter").count = 5
+    path = Checkpointer.save_checkpoint(source, tmp_path / "counted")
+
+    session = quiet(TrainingSession(imported_backbone_config(tmp_path / "run", path)))
+    counter = resource_named(session, "ft_counter")
+
+    assert counter.count == 5
+    assert model_of(session).backbone.counter is counter
+    run(session)
+    saved = Checkpointer.save_checkpoint(session, tmp_path / "fine-tuned")
+    restored = resource_named(Checkpointer.load_checkpoint(saved), "ft_counter")
+    assert restored.count == counter.count > 5
+
+
+def test_a_bound_prerequisite_is_this_sessions_own(tmp_path):
+    path, _ = wired_checkpoint(
+        tmp_path, {"model": "ft_dataset_head", "dataset": "ft_toy_dataset"},
+        ft_dataset_head={}, ft_toy_dataset={},
+    )
+    config = imported_backbone_config(
+        tmp_path / "run", path,
+        imports={"bind": {"dataset": "dataset"}},
+        bindings={"dataset": "ft_toy_dataset"},
+        ft_toy_dataset={},
+        ft_probe_head={"in_features": ToyDataset.num_classes},
+    )
+    session = quiet(TrainingSession(config))
+    head = resource_named(session, "ft_dataset_head")
+
+    assert head.get_dependency("dataset") is resource_named(session, "ft_toy_dataset")
+    # Saved and restored with the wiring it was given here.
+    saved = Checkpointer.save_checkpoint(session, tmp_path / "fine-tuned")
+    Checkpointer.load_checkpoint(saved)
+
+
+EMBED_DIM = 8
+POOLED_BLOCKS = {
+    "conv_patch_embedding": {"in_channels": 3, "patch_size": 4, "embed_dim": EMBED_DIM},
+    "learned_positional_embedding_2d": {"grid_size": [2, 2], "embed_dim": EMBED_DIM},
+    "torch_transformer_encoder": {
+        "embed_dim": EMBED_DIM, "num_heads": 2, "num_layers": 1,
+        "dim_feedforward": 16, "dropout": 0.0,
+    },
+    "attention_pooling": {"embed_dim": EMBED_DIM, "num_heads": 2},
+    "learned_pooling_query": {"embed_dim": EMBED_DIM, "num_queries": 2},
+}
+
+
+def test_a_pooled_patch_transformer_is_imported_as_its_blocks(tmp_path):
+    path, pretrained = wired_checkpoint(
+        tmp_path,
+        {
+            "model": "pooled_patch_transformer",
+            "patch_embedding": "conv_patch_embedding",
+            "positional_embedding": "learned_positional_embedding_2d",
+            "sequence_encoder": "torch_transformer_encoder",
+            "pooling": "attention_pooling",
+            "pooling_query": "learned_pooling_query",
+        },
+        pooled_patch_transformer={"class_token": True},
+        **POOLED_BLOCKS,
+    )
+    session = quiet(TrainingSession(imported_backbone_config(
+        tmp_path / "run", path, ft_probe_head={"in_features": EMBED_DIM},
+    )))
+    backbone = model_of(session).backbone.eval()
+
+    for block in POOLED_BLOCKS:
+        assert resource_named(session, block) in list(backbone.children())
+    prefixes = {name.split(".")[0] for name, _ in backbone.named_parameters()}
+    assert prefixes == {
+        "patch_embedding", "positional_embedding", "sequence_encoder",
+        "pooling", "pooling_query", "class_token",
+    }
+    images = torch.randn(2, 3, 8, 8)
+    torch.testing.assert_close(backbone(images), pretrained.eval()(images))
 
 
 # -- fine_tuned_model: wiring -----------------------------------------------------------
@@ -385,7 +633,7 @@ def test_a_backbone_of_the_users_own_fills_the_role(tmp_path):
         model={"frozen": ["layer.bias"]},
         ft_plain_backbone={},
     )
-    del config["checkpoint_module"]
+    without_import(config)
     session = TrainingSession(config)
     backbone = resource_named(session, "ft_plain_backbone")
     before = parameters(backbone)
@@ -500,10 +748,8 @@ def test_frozen_blocks_stay_in_eval_mode_when_the_backbone_resets_itself(tmp_pat
         model={"frozen": ["layer.*"]},
         ft_resetting_backbone={},
     )
-    del config["checkpoint_module"]
-    session = TrainingSession(config)
-    session.unregister_hook("logger")
-    session.unregister_hook("checkpointer")
+    without_import(config)
+    session = quiet(TrainingSession(config))
 
     with session:
         assert not model_of(session).backbone.layer.training
@@ -574,7 +820,7 @@ def test_backbone_output_picks_a_key(tmp_path, selector, expected):
     path, _ = pretrain_checkpoint(tmp_path)
     session = fine_tuning_session(
         tmp_path / "run", path,
-        source={"submodule": "", "method": "features"},
+        part={"submodule": "", "method": "features"},
         model={"backbone_output": selector},
     )
     model = model_of(session).eval()
@@ -674,7 +920,7 @@ def test_backbone_output_names_the_keys_it_had(tmp_path):
     path, _ = pretrain_checkpoint(tmp_path)
     session = fine_tuning_session(
         tmp_path / "run", path,
-        source={"submodule": "", "method": "features"},
+        part={"submodule": "", "method": "features"},
         model={"backbone_output": "hidden"},
     )
 
@@ -685,19 +931,22 @@ def test_backbone_output_names_the_keys_it_had(tmp_path):
 # -- checkpoints ------------------------------------------------------------------------
 
 
-def test_each_part_checkpoints_its_own_weights(tmp_path):
+def test_each_component_checkpoints_its_own_weights(tmp_path):
     path, _ = pretrain_checkpoint(tmp_path)
     session = fine_tuning_session(tmp_path / "run", path, model=FROZEN_FIRST_BLOCK)
     run(session)
     saved = Checkpointer.save_checkpoint(session, tmp_path / "fine-tuned")
 
-    backbone = Checkpointer.load_component_state(saved, "checkpoint_module")
+    imported = Checkpointer.load_component_state(saved, "ft_pretrain_model")
+    part = Checkpointer.load_component_state(saved, "module_part")
     head = Checkpointer.load_component_state(saved, "ft_probe_head")
     composite = Checkpointer.load_component_state(saved, "fine_tuned_model")
 
-    assert set(backbone["state_dict"]) == set(
-        model_of(session).backbone.state_dict()
+    # The whole imported model, including the part no one uses.
+    assert set(imported["state_dict"]) == set(
+        resource_named(session, "ft_pretrain_model").state_dict()
     )
+    assert part["state_dict"] == {}
     assert set(head["state_dict"]) == {"linear.weight", "linear.bias"}
     assert composite["state_dict"] == {}
 
@@ -731,12 +980,19 @@ def test_a_resumed_run_matches_an_uninterrupted_one(tmp_path):
         torch.testing.assert_close(value, model_of(uninterrupted).get_parameter(name))
 
 
-def test_resuming_needs_the_source_checkpoint(tmp_path):
-    path, _ = pretrain_checkpoint(tmp_path)
-    session = fine_tuning_session(tmp_path / "run", path, max_iterations=2)
-    run(session, 1)
-    saved = Checkpointer.save_checkpoint(session, tmp_path / "paused")
+def test_resuming_does_not_need_the_source_checkpoint(tmp_path):
+    path, _ = composite_checkpoint(tmp_path)
+    paused = quiet(TrainingSession(imported_backbone_config(
+        tmp_path / "run", path, max_iterations=4,
+    )))
+    run(paused, 2)
+    trained = parameters(model_of(paused))
+    saved = Checkpointer.save_checkpoint(paused, tmp_path / "paused")
     shutil.move(path, tmp_path / "moved")
 
-    with pytest.raises(FileNotFoundError, match="checkpoint_module.checkpoint does not exist"):
-        Checkpointer.load_checkpoint(saved)
+    resumed = Checkpointer.load_checkpoint(saved)
+
+    for name, value in parameters(model_of(resumed)).items():
+        torch.testing.assert_close(value, trained[name])
+    with resumed:
+        assert list(resumed) == [3, 4]

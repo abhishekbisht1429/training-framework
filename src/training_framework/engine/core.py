@@ -214,6 +214,8 @@ class TrainingEngine:
                 )
                 for _ in range(world_size)
             ]
+            for session in sessions:
+                session.check_component_bindings()
             self._check_rank_component_plan(sessions[0], world_size)
 
             wrappers = [

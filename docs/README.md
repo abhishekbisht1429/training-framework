@@ -39,7 +39,10 @@ A task-ordered path. It picks up where the
 - [Optimization](reference/optimization.md) — `optimizer`, the steps from
   `backward` to `optimizer_step`, accumulation, precision, custom gradient
   stages.
-- [Fine-tuning](reference/fine-tuning.md) — `checkpoint_module` and
+- [Importing components](reference/import-components.md) —
+  `import_components`: another run's model, and what it was wired to, as this
+  session's own components.
+- [Fine-tuning](reference/fine-tuning.md) — `module_part` and
   `fine_tuned_model`: a pretrained backbone from another run, frozen layers,
   and your own head.
 - [Transformer blocks](reference/transformer-blocks.md) — the swappable

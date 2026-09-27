@@ -7,7 +7,6 @@ from collections.abc import Mapping
 import torch
 from torch import distributed, multiprocessing
 
-from training_framework.components.config import component_bindings_from_config
 from training_framework.components.edges import (
     recorded_context_keys,
     recorded_wiring,
@@ -17,6 +16,7 @@ from training_framework.engine.topology import (
     pin_process_device,
 )
 from training_framework.session import Session, TrainingSession
+from training_framework.session.imports import stored_bindings
 from training_framework.session.components import SessionComponents
 from training_framework.session.config import normalize_session_type
 from training_framework.session.progress import ProgressBeacon
@@ -52,9 +52,7 @@ def prepare_worker_state(
     _, session_settings, _ = configuration_from_state(session_state)
     import_all_modules(session_settings["components_package"])
     components = SessionComponents(
-        component_bindings=component_bindings_from_config(
-            session_state["config"],
-        ),
+        component_bindings=stored_bindings(session_state),
         session_type=normalize_session_type(session_state["session_type"]),
     )
     ddp_name = components.resolve_name("ddp")

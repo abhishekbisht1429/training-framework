@@ -16,8 +16,6 @@ from training_framework.components import (
 )
 from training_framework.components import hook, rank_zero_only
 from training_framework.components.base import ComponentDependencyError
-from training_framework.components.config import component_bindings_from_config
-from training_framework.components.edges import instances_of
 from training_framework.session.checkpoint_format import (
     is_checkpoint_directory,
     read_checkpoint,
@@ -29,6 +27,10 @@ from training_framework.session.checkpoint_format import (
 from training_framework.session.components import (
     ComponentNotFoundError,
     SessionComponents,
+)
+from training_framework.session.imports import (
+    instance_named_in_manifest,
+    stored_bindings,
 )
 from training_framework.session.state import (
     configuration_from_state,
@@ -220,7 +222,7 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
         package declares needs `load_component`.
         """
         if is_checkpoint_directory(path):
-            instance = _instance_named_in_manifest(read_manifest(path), name)
+            instance = instance_named_in_manifest(read_manifest(path), name)
             return read_component_state(
                 path, instance, map_location=map_location,
             )
@@ -275,10 +277,10 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
 
         record = read_session_record(path, map_location=map_location)
         _check_session_type(record.get("session_type"), session_type)
-        config, session_settings, _ = configuration_from_state(record)
+        _, session_settings, _ = configuration_from_state(record)
         import_all_modules(session_settings["components_package"])
         components = SessionComponents(
-            component_bindings=component_bindings_from_config(config),
+            component_bindings=stored_bindings(record),
             session_type=record["session_type"],
         )
         component_records = record["components"]
@@ -361,36 +363,3 @@ def _wired_closure(records: Mapping[str, Mapping], root: str) -> set[str]:
     return needed
 
 
-def _instance_named_in_manifest(manifest: Mapping, name: str) -> str:
-    """Resolve `name` from what a checkpoint recorded, importing nothing.
-
-    In order: an instance name; a top-level `component_bindings` entry; the
-    instance the checkpoint's components were given when they asked for
-    `name`; the sole instance of that implementation.
-    """
-    records = manifest["components"]
-    if name in records:
-        return name
-    config = manifest.get("config") or {}
-    bindings = config.get("component_bindings") or config.get("aliases") or {}
-    bound = bindings.get(name) if isinstance(bindings, Mapping) else None
-    if isinstance(bound, str):
-        candidates = instances_of(bound, records)
-    else:
-        given = sorted({
-            (record.get("dependencies") or {})[name]
-            for record in records.values()
-            if name in (record.get("dependencies") or {})
-        })
-        candidates = given or instances_of(name, records)
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
-        raise ComponentNotFoundError(
-            f"The checkpoint has no component '{name}'; it holds "
-            f"{sorted(records)}"
-        )
-    raise ComponentDependencyError(
-        f"'{name}' could be any of {candidates} in this checkpoint; name "
-        "the instance"
-    )

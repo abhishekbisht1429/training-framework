@@ -135,6 +135,9 @@ def _manifest(state: Mapping[str, Any], records: Mapping[str, Mapping]) -> dict:
         "session_type": state.get("session_type"),
         "iteration": state.get("iteration"),
         "config": state.get("config"),
+        # What the session's imports added to its bindings, which the
+        # configuration alone does not say. Absent from older checkpoints.
+        "imports": state.get("imports"),
         "components": {
             name: {
                 key: record[key]
@@ -143,6 +146,7 @@ def _manifest(state: Mapping[str, Any], records: Mapping[str, Mapping]) -> dict:
                     "component_type",
                     "state_version",
                     "dependencies",
+                    "imported_by",
                     "context_reads",
                     "context_writes",
                     "file",

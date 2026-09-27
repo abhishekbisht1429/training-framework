@@ -111,10 +111,15 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
         # Walks the whole tree, not just direct children: a component nested
         # inside an nn.Sequential or ModuleList would otherwise escape the
         # check. Prerequisites are recognised by identity, so one may be held
-        # anywhere in the tree rather than only under its own attribute.
-        attached = {
-            id(component) for component in self._linked_components.values()
-        }
+        # anywhere in the tree rather than only under its own attribute --
+        # and so may any module inside one (a part of a prerequisite), which
+        # is the prerequisite's own, as `_tensors_owned_by_children` also
+        # counts it.
+        attached: set[int] = set()
+        for component in self._linked_components.values():
+            attached.add(id(component))
+            if isinstance(component, nn.Module):
+                attached.update(id(module) for module in component.modules())
 
         def visit(module: nn.Module, prefix: str) -> None:
             for attribute, child in module.named_children():
@@ -200,6 +205,24 @@ class ModuleResource(nn.Module, StatefulResource, ABC):
                 f"{self._component_name()} was checkpointed with linked "
                 f"components {stored} but is now wired to {given}"
             )
+
+    @classmethod
+    def rename_instances(
+            cls,
+            state: Mapping[str, Any] | None,
+            names: Mapping[str, str],
+    ) -> Mapping[str, Any] | None:
+        """Rename the instances `linked` records, so a component imported
+        under another name, or wired to this session's own instance, still
+        matches the wiring it is restored with."""
+        if state is None or "linked" not in state:
+            return state
+        renamed = dict(state)
+        renamed["linked"] = {
+            asked: names.get(instance, instance)
+            for asked, instance in dict(state["linked"]).items()
+        }
+        return renamed
 
     def set_state(self, state: Mapping[str, Any] | None) -> None:
         if state is None:

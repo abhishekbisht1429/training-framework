@@ -14,8 +14,8 @@ from training_framework.components.builtin.data import (
 )
 from training_framework.components.builtin.distributed import DDPResource
 from training_framework.components.builtin.fine_tuning import (
-    CheckpointModule,
     FineTunedModel,
+    ModulePart,
 )
 from training_framework.components.builtin.layer_inspection import (
     LayerCapture,
@@ -46,7 +46,6 @@ __all__ = [
     "AnalysisForward",
     "AnalysisLogger",
     "Backward",
-    "CheckpointModule",
     "Checkpointer",
     "ClipGradients",
     "Compute",
@@ -61,6 +60,7 @@ __all__ = [
     "LayerInspector",
     "LoadBatch",
     "Logger",
+    "ModulePart",
     "OptimizerResource",
     "OptimizerStep",
     "PatchTransformer",

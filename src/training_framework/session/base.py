@@ -19,6 +19,7 @@ from training_framework.components import (
     format_execution_graph,
 )
 from training_framework.components.config import component_bindings_from_config
+from training_framework.session.imports import IMPORTS_STATE_KEY, stored_bindings
 from training_framework.session.components import SessionComponents
 from training_framework.session.config import (
     SessionConfig,
@@ -182,6 +183,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             "session_config": asdict(self._session_config),
             "iteration": self._iteration,
             "components_state": self._components.get_state(),
+            IMPORTS_STATE_KEY: self._components.imports_state(),
             "session_context": deepcopy(self._session_context),
             "init_args": self._init_args,
             "extension_config_history_pending": (
@@ -220,8 +222,9 @@ class Session(Stateful, metaclass=CaptureInitMeta):
 
         self._init_transient_infra()
         restored_components = SessionComponents(
-            component_bindings=component_bindings_from_config(self._config),
+            component_bindings=stored_bindings(state),
             session_type=self._session_type,
+            imports=state.get(IMPORTS_STATE_KEY),
         )
         restored_components.set_state(
             state["components_state"],
@@ -484,9 +487,16 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _teardown_session_hooks(self, *, after_exception: bool = False) -> None:
         teardown_session_hooks(self, after_exception=after_exception)
 
+    def check_component_bindings(self) -> None:
+        """Refuse a per-consumer binding for a component this session does
+        not hold. Runs once, on a session built from configuration; entering
+        the session runs it, so call it only to check earlier."""
+        self._components.check_component_bindings()
+
     @context_entry
     def __enter__(self):
         self._raise_if_finished()
+        self.check_component_bindings()
 
         ddp_resource = (
             self._components.get_resource("ddp")

@@ -6,6 +6,7 @@ COMMON_RESERVED_CONFIG_NAMES = frozenset({
     "aliases",
     "component_bindings",
     "components",
+    "import_components",
     "session_config",
     "session_kwargs",
     "session_type",

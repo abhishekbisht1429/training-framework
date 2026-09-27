@@ -1,12 +1,14 @@
-"""Fine-tuning: a module from another run, partly frozen, and a new head.
+"""Fine-tuning: a model from another run, partly frozen, and a new head.
 
-Two resources. `checkpoint_module` takes a module out of another run's
-checkpoint and owns it from then on: it is trained and checkpointed here.
+A pretrained model comes in through `import_components`, which makes it --
+and everything it was wired to -- components of this session. Two resources
+build on that. `module_part` takes a part of a module resource (an encoder
+out of a whole pretrained model, say) and calls one of its methods.
 `fine_tuned_model` composes whatever fills the `backbone` and `head` roles,
 freezes part of the backbone, and runs `head(backbone(x))`; bound as
 `model`, `ddp`, `forward` and `optimizer` use it like any other model.
 
-The backbone need not come from a checkpoint -- any resource that is an
+The backbone need not come from another run -- any resource that is an
 `nn.Module` can fill the role -- and the head is always the user's own
 resource, which declares whatever it needs (a `dataset` for its class
 count, say) itself.
@@ -14,7 +16,6 @@ count, say) itself.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -24,14 +25,12 @@ from torch import Tensor, nn
 from training_framework.components import (
     ANALYSIS_SESSION_TYPE,
     TRAINING_SESSION_TYPE,
-    ComponentDependencyError,
     ModuleResource,
     Resource,
     requires_resource,
     resource,
     role,
 )
-from training_framework.components.builtin.checkpointing import Checkpointer
 from training_framework.components.builtin.parameter_patterns import (
     check_patterns_match,
     matches_any,
@@ -46,14 +45,19 @@ role(
     "backbone",
     Resource,
     description=(
-        "an nn.Module resource whose output the head reads, e.g. "
-        "checkpoint_module"
+        "an nn.Module resource whose output the head reads, e.g. an imported "
+        "model or a module_part of one"
     ),
 )
 role(
     "head",
     Resource,
     description="an nn.Module resource applied to the backbone's output",
+)
+role(
+    "source",
+    Resource,
+    description="the nn.Module resource a module_part takes a part of",
 )
 
 
@@ -66,31 +70,19 @@ def _non_empty_string(value: Any, name: str) -> str:
     return value
 
 
-# -- checkpoint_module ----------------------------------------------------
+# -- module_part ----------------------------------------------------------
 
 
 @dataclass
-class CheckpointModuleConfig:
-    checkpoint: Any
-    resource: Any = "model"
+class ModulePartConfig:
     submodule: Any = ""
     method: Any = "forward"
 
     def __post_init__(self):
-        try:
-            checkpoint = os.fspath(self.checkpoint)
-        except TypeError as error:
-            raise TypeError(
-                f"checkpoint must be a path; got {self.checkpoint!r}"
-            ) from error
-        if not isinstance(checkpoint, str) or not checkpoint:
-            raise TypeError(f"checkpoint must be a path; got {self.checkpoint!r}")
-        self.checkpoint = checkpoint
-        self.resource = _non_empty_string(self.resource, "resource")
         if not isinstance(self.submodule, str):
             raise ValueError(
                 "submodule must be an attribute path such as "
-                f"'encoder.blocks', or '' for the whole resource; got "
+                f"'encoder.blocks', or '' for the whole source; got "
                 f"{self.submodule!r}"
             )
         if self.submodule and not all(self.submodule.split(".")):
@@ -100,67 +92,45 @@ class CheckpointModuleConfig:
         self.method = _non_empty_string(self.method, "method")
 
 
-@resource("checkpoint_module")
-class CheckpointModule(ModuleResource):
-    """A module taken out of another run's checkpoint, trained from here on.
+@requires_resource("source")
+@resource("module_part", session_type=TRAINING_SESSION_TYPE)
+@resource("module_part", session_type=ANALYSIS_SESSION_TYPE)
+class ModulePart(ModuleResource):
+    """A part of the module resource bound to `source`, and one method of it.
 
-    `resource` names a resource of that run the way that run named it -- a
-    role such as `model` resolves through its own bindings, or an instance
-    such as `model#teacher` -- and `submodule` is an attribute path inside
-    it (`''`, the default, keeps the whole resource). Only that module is
-    kept, under the attribute `module` (as `DistributedDataParallel` does),
-    so parts of the source model left out are neither trained nor saved.
-    Calling this resource calls the module's `method` (default `forward`).
+    `submodule` is an attribute path inside the source (`''`, the default,
+    is the whole source); the part is held under the attribute `module`, so
+    its parameter names start with `module.`. Calling this resource calls
+    the part's `method` (default `forward`).
 
-    The source checkpoint is read on every construction -- a fresh run, a
-    resume, each worker -- for the module's architecture; a restored
-    component's own state then replaces the weights. It must therefore stay
-    where `checkpoint` points for as long as this run's checkpoints are used.
+    The part stays the source's: the source trains, saves and restores its
+    weights, and this component owns none. What the source holds outside
+    the part stays in the session, unused by anything that only calls this
+    component.
     """
 
-    config_schema = CheckpointModuleConfig
+    config_schema = ModulePartConfig
 
     def __init__(self, config: Mapping | None = None) -> None:
         super().__init__(config)
         name = self._component_name()
-        path = self._cfg.checkpoint
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"{name}.checkpoint does not exist: {path}")
-        try:
-            loaded = Checkpointer.load_component(
-                path, self._cfg.resource, map_location="cpu",
+        source = self.get_dependency("source")
+        if not isinstance(source, nn.Module):
+            raise TypeError(
+                f"{name} role 'source' is filled by {type(source).__name__}, "
+                "which is not an nn.Module"
             )
-        except (KeyError, ComponentDependencyError) as error:
-            raise ValueError(
-                f"{name}: checkpoint {path} has no single resource "
-                f"{self._cfg.resource!r}: {error}"
-            ) from error
-
-        self.module = self._select_submodule(loaded)
+        self.module = self._select_submodule(source)
         if not callable(getattr(self.module, self._cfg.method, None)):
             raise ValueError(
                 f"{name}.method: {type(self.module).__name__} has no method "
                 f"{self._cfg.method!r}"
             )
-        try:
-            self._check_child_ownership()
-        except ComponentDependencyError as error:
-            raise ComponentDependencyError(
-                f"{name}: {self._source_label()} cannot be held as a plain "
-                "module. Pick a part of it with `submodule`. "
-                f"{error}"
-            ) from error
 
-    def _source_label(self) -> str:
-        label = self._cfg.resource
-        if self._cfg.submodule:
-            label = f"{label}.{self._cfg.submodule}"
-        return label
-
-    def _select_submodule(self, loaded: Any) -> nn.Module:
+    def _select_submodule(self, source: nn.Module) -> nn.Module:
         name = self._component_name()
-        current = loaded
-        walked = self._cfg.resource
+        current: Any = source
+        walked = getattr(source, "name", "source")
         for attribute in self._cfg.submodule.split(".") if self._cfg.submodule else ():
             try:
                 child = getattr(current, attribute)
@@ -243,7 +213,7 @@ class FineTunedModel(ModuleResource):
 
     Config:
     - `frozen`: glob patterns over the backbone's parameter names (relative
-      to the backbone; `checkpoint_module` names start with `module.`).
+      to the backbone; a `module_part`'s names start with `module.`).
       Each must match. Matching parameters get `requires_grad=False` when
       this component is built -- before `ddp` wraps the model -- so they get
       no gradient, cost no backward pass, and are never updated. Re-applied
@@ -367,4 +337,4 @@ class FineTunedModel(ModuleResource):
         return value
 
 
-__all__ = ["CheckpointModule", "FineTunedModel"]
+__all__ = ["FineTunedModel", "ModulePart"]

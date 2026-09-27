@@ -22,6 +22,8 @@ options are in the
 - component constructor arguments;
 - each component's wiring -- the instance it was given for every resource it
   asked for -- and its `state_version`;
+- the role bindings its [imports](../reference/import-components.md) added,
+  and, on each imported component, which import brought it in;
 - state from `Stateful` resources, hooks, and steps;
 - `session_context`;
 - Python RNG state;
@@ -56,9 +58,11 @@ checkpoints/<timestamp>/
   components/<name>.pt     one component's state, one file per instance
 ```
 
-`manifest.json` is plain JSON: the session type, iteration, configuration, and
+`manifest.json` is plain JSON: the session type, iteration, configuration, the
+role bindings its [imports](../reference/import-components.md) added, and
 for every component its implementation, kind, `state_version`, the instances
-it was wired to, its file and that file's SHA-256. Anything can read it,
+it was wired to, the import that brought it in (`imported_by`, if one did),
+its file and that file's SHA-256. Anything can read it,
 without the framework; `Checkpointer.read_manifest(path)` returns it.
 
 Every `.pt` file holds plain data only -- tensors, dicts, lists, tuples, sets,

@@ -109,6 +109,7 @@ class TrainingSession(Session):
             "aliases",
             "component_bindings",
             "components",
+            "import_components",
             "session_kwargs",
             "session_type",
         }

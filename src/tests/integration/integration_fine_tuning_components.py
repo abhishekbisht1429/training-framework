@@ -77,6 +77,7 @@ class RankResults(SessionHook):
 
     def __init__(self, config):
         self._output_dir = Path(config["output_dir"])
+        self._source = Path(config["source"])
 
     def pre_session(self, session):
         return None
@@ -96,6 +97,7 @@ class RankResults(SessionHook):
                 for name, parameter in model.named_parameters()
             },
             "running_mean": batch_norm.running_mean.tolist(),
+            "source_exists": self._source.exists(),
         }
         self._output_dir.mkdir(parents=True, exist_ok=True)
         (self._output_dir / f"rank_{ddp.rank}.json").write_text(

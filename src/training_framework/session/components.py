@@ -26,6 +26,7 @@ from training_framework.components.edges import (
     context_keys,
     context_keys_of,
     declared_edges,
+    instances_of,
     wiring_of,
     resolve_component_name,
     resolve_edges,
@@ -103,8 +104,23 @@ class SessionComponents:
             component_bindings: Mapping[str, str] | None = None,
             session_type: str = TRAINING_SESSION_TYPE,
             aliases: Mapping[str, str] | None = None,
+            imports: Mapping[str, Any] | None = None,
     ):
+        """`imports` is a stored session state's record of its imports; its
+        role bindings must already be in `component_bindings`."""
         self.session_type = normalize_session_type(session_type)
+        imports = imports or {}
+        # The role bindings this session's imports added, saved with the
+        # session state: the configuration does not say them.
+        self.import_bindings: dict[str, str] = dict(imports.get("bindings") or {})
+        # The instances imports brought in (instance -> import key). Each
+        # is saved on its own component's entry (`imported_by`), and read
+        # back when that component is restored.
+        self.imported: dict[str, str] = {}
+        # Set once a session is built from configuration: its per-consumer
+        # bindings still have to name components it holds, which is known
+        # only once nothing more is activated by hand.
+        self._binding_check_pending = False
         self.registry = component_registry(self.session_type)
         self.roles = role_registry(self.session_type)
         self.components: dict[str, Component] = {}
@@ -125,7 +141,15 @@ class SessionComponents:
         if "component_bindings" not in state and legacy_bindings is not None:
             state["component_bindings"] = legacy_bindings
         state.pop("_links_dirty", None)
+        state.setdefault("import_bindings", {})
+        state.setdefault("imported", {})
+        state.setdefault("_binding_check_pending", False)
         self.__dict__.update(state)
+
+    def imports_state(self) -> dict[str, dict[str, str]]:
+        """What the session state records about this session's imports, apart
+        from each component's own entry: the role bindings they added."""
+        return {"bindings": dict(self.import_bindings)}
 
     def _check_tensor_ownership(self) -> None:
         """Check no tensor is about to be checkpointed by two components.
@@ -181,6 +205,11 @@ class SessionComponents:
                     for asked, dependency in component._dependencies.items()
                 },
                 "state_version": type(component).state_version,
+                # Which import brought it in, if one did.
+                **(
+                    {"imported_by": self.imported[name]}
+                    if name in self.imported else {}
+                ),
             }
             for name, component in self.components.items()
         }
@@ -191,6 +220,9 @@ class SessionComponents:
             *,
             on_mismatch: str | Iterable[str] = "raise",
             partial: bool = False,
+            wired_to: Iterable[str] | None = None,
+            names: Mapping[str, str] | None = None,
+            wiring: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         """Rebuild the components a state holds and restore their state.
 
@@ -205,12 +237,33 @@ class SessionComponents:
 
         `partial` says the state holds a chosen subset of a session's
         components (each with what it depends on), not a whole session.
+
+        `wired_to`, for an import: the state is another run's components,
+        restored *into* this session next to the components it already
+        holds, and may be wired to the ones named here as well as to each
+        other. A prerequisite a class declares that the stored wiring lacks
+        must then be wired by a per-consumer binding of this session, never
+        resolved on its own; `wiring` (instance -> asked name -> target) is
+        that binding, already resolved, and is used as it is. `names` (source instance -> this session's
+        name) is handed to each component's `rename_instances`, after its
+        state is migrated.
         """
-        restored_components: dict[str, Component] = {}
-        # Components are rebuilt into a fresh mapping, but a component being
-        # constructed must see the ones already rebuilt, so the view reads
-        # through to it. The previous mapping is put back if the restore fails.
+        # Components are rebuilt into a fresh mapping -- or, for an import,
+        # one that starts with this session's components -- and a component
+        # being constructed must see the ones already rebuilt, so the view
+        # reads through to it. The previous mapping is put back if the
+        # restore fails.
         previous_components = self.components
+        if wired_to is None:
+            restored_components: dict[str, Component] = {}
+        else:
+            clashes = sorted(set(component_states) & set(previous_components))
+            if clashes:
+                raise ValueError(
+                    f"Cannot restore {clashes} into this session: it already "
+                    "holds components with those names"
+                )
+            restored_components = dict(previous_components)
         self.components = restored_components
         try:
             self._restore_components(
@@ -218,10 +271,18 @@ class SessionComponents:
                 restored_components,
                 on_mismatch=on_mismatch,
                 partial=partial,
+                wired_to=None if wired_to is None else frozenset(wired_to),
+                names=names or {},
+                wiring=wiring or {},
             )
         except BaseException:
             self.components = previous_components
             raise
+        self.imported.update(
+            (name, info["imported_by"])
+            for name, info in component_states.items()
+            if info.get("imported_by")
+        )
 
     def _restore_components(
             self,
@@ -230,15 +291,24 @@ class SessionComponents:
             *,
             on_mismatch: str | Iterable[str] = "raise",
             partial: bool = False,
+            wired_to: frozenset[str] | None = None,
+            names: Mapping[str, str] | None = None,
+            wiring: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         # A checkpoint is not a trusted plan: it may predate a component being
         # marked @singleton, or have been edited. Checked before anything is
         # built; set_state restores the previous components if it raises.
-        self._check_instance_limits(component_states)
+        # Restored into a session, against everything it will then hold.
+        self._check_instance_limits(
+            set(component_states) | set(restored_components),
+        )
 
         # Every component is checked before any is built, and every problem
         # is reported at once rather than the first one only.
-        plans = self._plan_restore(component_states, on_mismatch)
+        plans = self._plan_restore(
+            component_states, on_mismatch,
+            wired_to=wired_to, names=names, wiring=wiring,
+        )
 
         # Pass 1: rebuild every component from its constructor arguments,
         # prerequisites first. The stored order is usually already
@@ -328,6 +398,10 @@ class SessionComponents:
             self,
             component_states: Mapping[str, Mapping[str, Any]],
             on_mismatch: str | Iterable[str],
+            *,
+            wired_to: frozenset[str] | None = None,
+            names: Mapping[str, str] | None = None,
+            wiring: Mapping[str, Mapping[str, str]] | None = None,
     ) -> dict[str, "_RestorePlan"]:
         """Check every checkpointed component and decide how to rebuild it.
 
@@ -356,10 +430,16 @@ class SessionComponents:
 
         plans: dict[str, _RestorePlan] = {}
         problems: list[str] = []
-        active = set(component_states)
+        active = set(component_states) | set(wired_to or ())
         for name, component_info in component_states.items():
             try:
                 component_class = self._restorable_class(name, component_info)
+                if wired_to is not None:
+                    self._check_imported_wiring(
+                        name,
+                        component_class,
+                        component_info.get("dependencies") or {},
+                    )
                 # Resolved against every name in the checkpoint, not just the
                 # ones rebuilt so far, so a sibling instance not yet rebuilt
                 # cannot make this one look like the only one.
@@ -367,10 +447,13 @@ class SessionComponents:
                     component_class,
                     name,
                     active=active,
-                    recorded=component_info.get("dependencies"),
+                    recorded={
+                        **(component_info.get("dependencies") or {}),
+                        **(wiring or {}).get(name, {}),
+                    },
                 )
                 for asked, target in dependencies.items():
-                    if target not in component_states:
+                    if target not in active:
                         raise ValueError(
                             f"Checkpoint component '{name}' requires "
                             f"'{asked}', which resolves to '{target}', but the "
@@ -425,6 +508,19 @@ class SessionComponents:
                         problems.append(described(error))
                         continue
 
+            if names and state is not None and reinitialized is None and (
+                    issubclass(component_class, Stateful)
+            ):
+                # After migration: the hook only knows the current format.
+                try:
+                    state = component_class.rename_instances(state, names)
+                except Exception as error:
+                    problems.append(
+                        f"Checkpoint component '{name}': renaming the "
+                        f"instances its state names failed: {error}"
+                    )
+                    continue
+
             plans[name] = _RestorePlan(
                 component_class=component_class,
                 dependencies=dependencies,
@@ -441,6 +537,55 @@ class SessionComponents:
                 + "\n".join(f"  - {problem}" for problem in problems)
             )
         return plans
+
+    def _check_imported_wiring(
+            self,
+            name: str,
+            component_class: type[Component],
+            stored_wiring: Mapping[str, str],
+    ) -> None:
+        """Refuse an imported component's prerequisite that nothing wires.
+
+        A prerequisite its class declares now but the run it comes from never
+        wired it to would otherwise be resolved in this session on its own:
+        an unannounced rewiring. It must be named by a per-consumer binding.
+        """
+        wiring = self.component_bindings.instance_bindings.get(name, {})
+        declared = {
+            edge.asked for edge in declared_edges(component_class)
+            if edge.injects
+        }
+        # Restore follows the stored wiring, so a binding for a name it holds
+        # would be ignored; and one for a name the class never asks for does
+        # nothing. Both are refused rather than silently dropped.
+        stored = sorted(set(wiring) & set(stored_wiring))
+        if stored:
+            raise ComponentDependencyError(
+                f"component_bindings wires {stored} of imported component "
+                f"'{name}', which the run it comes from already wired, and "
+                "the import keeps that wiring. To give it this session's "
+                "component instead, use the import's `bind`."
+            )
+        undeclared = sorted(set(wiring) - declared)
+        if undeclared:
+            raise ComponentDependencyError(
+                f"component_bindings wires {undeclared} of imported component "
+                f"'{name}', which {component_class.__name__} does not declare; "
+                f"it declares {sorted(declared)}."
+            )
+        unwired = [
+            edge.asked for edge in declared_edges(component_class)
+            if edge.injects
+            and edge.asked not in stored_wiring
+            and edge.asked not in wiring
+        ]
+        if unwired:
+            raise ComponentDependencyError(
+                f"Imported component '{name}' declares {unwired}, which the "
+                "run it comes from never wired it to, so the import cannot "
+                "know what to give it. Wire it explicitly: component_bindings: "
+                f"{{'{name}': {{'{unwired[0]}': '<instance>'}}}}."
+            )
 
     def _restorable_class(
             self,
@@ -614,6 +759,13 @@ class SessionComponents:
         if component is None:
             raise ValueError(
                 f"Component '{name}' is not active and cannot be extended"
+            )
+        if resolved_name in self.imported:
+            # Its key would enter the stored configuration, and a fresh run
+            # from that configuration would then clash with the import.
+            raise ValueError(
+                f"Component '{resolved_name}' is imported "
+                f"({self.imported[resolved_name]}) and cannot be extended"
             )
         if not isinstance(component, ExtendableComponent):
             raise ValueError(
@@ -796,7 +948,54 @@ class SessionComponents:
                 )
 
         roots.extend(configured_roots)
+
+        # Imported lazily: the imports module uses this one's error types.
+        from training_framework.session.imports import (
+            IMPORT_COMPONENTS_KEY,
+            parse_imports,
+            plan_import,
+        )
+        # A `bind` target is resolved like a dependency, against this
+        # session's own instances; an earlier import's only when named.
+        own = set(component_configs) | set(self.components)
+        earlier: dict[str, str] = {}
+        imports = []
+        specs = parse_imports(config.get(IMPORT_COMPONENTS_KEY))
+        for index, spec in enumerate(specs):
+            # Roles are bound in listing order, each as soon as its import
+            # is planned, so a later `bind` can name an earlier import's.
+            unbound = {
+                other.role: other.key for other in specs[index:] if other.role
+            }
+
+            def resolve(target, spec=spec, unbound=unbound):
+                if target in unbound:
+                    owner = unbound[target]
+                    raise ComponentDependencyError(
+                        f"'{target}' is the role {owner} binds to its own "
+                        "resource, so the import would be wired to itself"
+                        if owner == spec.key else
+                        f"'{target}' is the role {owner} binds, and imports "
+                        f"are planned in the order they are listed. List "
+                        f"{owner} before {spec.key}."
+                    )
+                return self._resolve_import_target(target, own, earlier)
+
+            planned = plan_import(spec, self.registry, resolve)
+            imports.append(planned)
+            # A clash is reported before the role is bound: it is the cause
+            # of what binding would otherwise refuse.
+            earlier = self._check_imported_names(imports, component_configs)
+            self._bind_import_role(planned, config)
+        self.imported.update(earlier)
+        self._check_bind_targets(imports)
+        self._check_binding_consumers(
+            set(component_configs) | set(self.imported), suffixed=True,
+        )
+        if imports:
+            self._restore_imports(imports, component_configs)
         self._activate_all(roots, component_configs)
+        self._binding_check_pending = True
         # Validate the whole graph -- requirements, wrapping, companions and
         # dataflow -- while the session is being built, which with the engine
         # is in the parent process, instead of when a worker first enters it.
@@ -820,6 +1019,19 @@ class SessionComponents:
         )
         self._activate_all([name], component_configs)
         return resolved_name
+
+    def check_component_bindings(self) -> None:
+        """Refuse a per-consumer binding for a component this session does
+        not hold, once, for a session built from configuration.
+
+        Checked when the session is first entered, and by the engine before it
+        starts the ranks -- after anything activated by hand -- and never on a
+        restored session: a rank holds only part of the components.
+        """
+        if not self._binding_check_pending:
+            return
+        self._check_binding_consumers(set(self.components), suffixed=False)
+        self._binding_check_pending = False
 
     def _resolved_edges(
             self,
@@ -869,6 +1081,7 @@ class SessionComponents:
         """
         roots = list(roots)
         plan = self._plan_activation(roots, component_configs)
+        self._check_imports_reached_by_binding(plan)
         for name in self._construction_order(plan, roots):
             planned = plan[name]
             component = self._construct(
@@ -883,10 +1096,269 @@ class SessionComponents:
             )
             self._register_component_instance(component)
 
+    # -- imports ---------------------------------------------------------------
+
+    def _check_imported_names(
+            self,
+            imports,
+            component_configs: Mapping[str, Mapping],
+    ) -> dict[str, str]:
+        """Return imported instance -> its import's key, refusing a clash.
+
+        An import keeps its source's instance names unless it has a `suffix`,
+        so they may meet this session's own instances or another import's.
+        """
+        imported: dict[str, str] = {}
+        for planned in imports:
+            for name in planned.instances:
+                if name in component_configs or name in self.components:
+                    other = "this session configures one"
+                elif name in imported:
+                    other = f"{imported[name]} imports one too"
+                else:
+                    imported[name] = planned.spec.key
+                    continue
+                raise ValueError(
+                    f"{planned.spec.key} imports '{name}', but {other}. Give "
+                    "the import a `suffix:` so its instances get names of "
+                    "their own, or, if this session's component should serve "
+                    "instead, name it in the import's `bind`."
+                )
+        return imported
+
+    def _bind_import_role(self, planned, config: Mapping) -> None:
+        """Bind an import's `role` to its resource, in this session's
+        bindings and the session state's record of them -- not in the
+        configuration."""
+        role = planned.spec.role
+        if role is None:
+            return
+        bindings = self.component_bindings.bindings
+        if role in bindings:
+            raise ValueError(
+                f"{planned.spec.key}.role binds '{role}', which is already "
+                f"bound to '{bindings[role]}'"
+            )
+        if role in config:
+            raise ValueError(
+                f"{planned.spec.key}.role binds '{role}', which is also "
+                "configured as a component"
+            )
+        bindings[role] = planned.root
+        self.import_bindings[role] = planned.root
+        self.component_bindings = ComponentBindings(
+            {**bindings, **self.component_bindings.instance_bindings},
+            session_type=self.session_type,
+        )
+
+    def _restore_imports(
+            self,
+            imports,
+            component_configs: Mapping[str, Mapping],
+    ) -> None:
+        """Build what each import is wired to, then restore the import into
+        this session next to it, in the order the imports are listed."""
+        instance_bindings = self.component_bindings.instance_bindings
+        for planned in imports:
+            own = (
+                set(component_configs) | set(self.components)
+            ) - set(self.imported)
+            wired_to = list(planned.bind.values())
+            # Resolved here, once, and handed to the restore as they are.
+            wiring: dict[str, dict[str, str]] = {}
+            for name in planned.instances:
+                for asked in instance_bindings.get(name, {}):
+                    try:
+                        target = self._resolve_import_target(
+                            asked, own, self.imported, consumer=name,
+                        )
+                        wiring.setdefault(name, {})[asked] = target
+                        wired_to.append(target)
+                    except ComponentDependencyError as error:
+                        raise ComponentDependencyError(
+                            f"component_bindings wires '{asked}' of imported "
+                            f"component '{name}': {error}"
+                        ) from None
+            wired_to = list(dict.fromkeys(wired_to))
+            # Planned first, so what an import is wired to cannot need an
+            # import not restored yet -- this one included: that would have
+            # no construction order.
+            pending = {
+                instance: key for instance, key in self.imported.items()
+                if instance not in self.components
+            }
+            self._plan_activation(
+                wired_to, component_configs, pending,
+                importing=planned.spec.key,
+            )
+            self._activate_all(wired_to, component_configs)
+            self.set_state(
+                planned.components_state,
+                partial=True,
+                wired_to=set(wired_to),
+                names=planned.names,
+                wiring=wiring,
+            )
+
+    def _resolve_import_target(
+            self,
+            name: str,
+            own: set[str],
+            imported: Mapping[str, str],
+            *,
+            consumer: str | None = None,
+    ) -> str:
+        """Resolve what an import is wired to: a `bind` target, or a
+        per-consumer binding of an imported instance.
+
+        Resolved like a dependency against this session's own instances. An
+        imported instance -- another import's -- is never handed over on its
+        own, as the sole instance of an implementation: only named exactly,
+        and only by a suffixed name, since an unsuffixed one is also what
+        this session would build itself.
+        """
+        target = self.component_bindings.resolve(name, consumer=consumer)
+        if target in imported:
+            if is_instance_name(target):
+                return target
+            raise ComponentDependencyError(
+                f"'{target}' is also an instance {imported[target]} imports "
+                "under its source name, so it cannot be told whether that one "
+                f"or one of this session's is meant. Give {imported[target]} "
+                "a `suffix` and name the suffixed instance."
+            )
+        candidates = instances_of(target, own)
+        if len(candidates) > 1:
+            raise ComponentDependencyError(
+                f"'{target}' could be any of {candidates}; name the instance "
+                "that is meant."
+            )
+        return candidates[0] if candidates else target
+
+    def _check_bind_targets(self, imports) -> None:
+        """Refuse a `bind` target that is not a resource, naming the key."""
+        for planned in imports:
+            for key, target in planned.bind.items():
+                try:
+                    self._registered_component_class(target, Resource)
+                except (ValueError, RuntimeError) as error:
+                    raise ValueError(
+                        f"{planned.spec.key}.bind.{key} names '{target}', "
+                        f"which cannot serve as a prerequisite: {error}"
+                    ) from None
+
+    @staticmethod
+    def _raise_needs_import(
+            chain: list[str],
+            owner: str,
+            importing: str | None,
+    ) -> None:
+        if importing is None or owner == importing:
+            raise ComponentDependencyError(
+                f"{owner}: '{chain[0]}' is wired to the import (by `bind` or "
+                "a per-consumer binding), so it is built before the import, "
+                f"but it needs the imported '{chain[-1]}': "
+                f"{' -> '.join(chain)}. What an import is wired to cannot "
+                "depend on the import."
+            )
+        raise ComponentDependencyError(
+            f"{importing}: '{chain[0]}' is wired to the import (by `bind` or a "
+            f"per-consumer binding), but it needs '{chain[-1]}', which {owner} "
+            f"imports, and imports are restored in the order they are listed: "
+            f"{' -> '.join(chain)}. List {owner} before {importing}."
+        )
+
+    def _check_binding_consumers(
+            self,
+            known: set[str],
+            *,
+            suffixed: bool,
+    ) -> None:
+        """Refuse a per-consumer binding for a component the session does not
+        hold: it would be ignored, which a misspelt name makes likely.
+
+        A suffixed consumer names an instance, and only a configured key or
+        an import creates one, so it is checked before anything is built. An
+        unsuffixed one may be activated as a prerequisite, so it is checked
+        once activation is done.
+        """
+        for consumer in self.component_bindings.instance_bindings:
+            if is_instance_name(consumer) != suffixed or consumer in known:
+                continue
+            implementation = implementation_of(consumer)
+            siblings = sorted(
+                name for name in known
+                if implementation_of(name) == implementation
+            )
+            raise ValueError(
+                f"component_bindings wires '{consumer}', which this session "
+                "does not hold, so the binding would do nothing. Instances of "
+                f"'{implementation}' here: {siblings or 'none'}."
+            )
+
+    def _check_imports_reached_by_binding(
+            self,
+            plan: Mapping[str, "_PlannedComponent"],
+    ) -> None:
+        """Refuse planned wiring that gives this session's own component an
+        imported instance by anything but a binding that names it.
+
+        Checked on the plan, before anything is constructed, so a refusal
+        leaves nothing behind. Resolution would otherwise hand one over on
+        its own -- by exact name, or as the sole instance of an
+        implementation -- and an import would quietly rewire the session.
+
+        The import's `role` names its instance. Any other binding names one
+        only by a suffixed name, which nothing but the import creates: an
+        unsuffixed one is also what this session would build on its own, so
+        which of the two is meant cannot be told.
+        """
+        imported = self.imported
+        if not imported:
+            return
+        bindings = self.component_bindings.bindings
+        instance_bindings = self.component_bindings.instance_bindings
+        for name, planned in plan.items():
+            for edge in planned.edges:
+                instance = edge.target
+                if not edge.injects or instance not in imported:
+                    continue
+                asked = edge.asked
+                per_consumer = instance_bindings.get(name, {}).get(asked)
+                if per_consumer is None and self.import_bindings.get(asked) == instance:
+                    continue
+                bound = per_consumer if per_consumer is not None else bindings.get(asked)
+                if bound == instance and is_instance_name(instance):
+                    continue
+                if bound == instance:
+                    raise ComponentDependencyError(
+                        f"'{name}' is bound to '{instance}' for '{asked}', and "
+                        f"{imported[instance]} imports an instance of that name, "
+                        "so it cannot be told whether a new one or the "
+                        "imported one is meant. Reach the imported one through "
+                        "the import's `role`, or give the import a `suffix` "
+                        "and bind the suffixed name."
+                    )
+                how = (
+                    f"component_bindings: {{'{name}': {{'{asked}': '{instance}'}}}}"
+                    if is_instance_name(instance)
+                    else "or give the import a `suffix` and bind the suffixed name"
+                )
+                raise ComponentDependencyError(
+                    f"'{name}' asks for '{asked}' and would be given "
+                    f"'{instance}', which {imported[instance]} imports, "
+                    "though no binding names it. An import fills this "
+                    "session's own dependencies only when a binding says so: "
+                    f"the import's `role`, {how}."
+                )
+
     def _plan_activation(
             self,
             roots: list[str],
             component_configs: Mapping[str, Mapping],
+            forbidden: Mapping[str, str] | None = None,
+            *,
+            importing: str | None = None,
     ) -> dict[str, "_PlannedComponent"]:
         """Return every component to build, in discovery order, validated.
 
@@ -906,7 +1378,11 @@ class SessionComponents:
         )
         plan: dict[str, _PlannedComponent] = {}
 
-        def visit(name: str, component_class: type[Component]) -> None:
+        def visit(
+                name: str,
+                component_class: type[Component],
+                path: tuple[str, ...] = (),
+        ) -> None:
             if name in self.components or name in plan:
                 return
             edges = [
@@ -927,13 +1403,24 @@ class SessionComponents:
                     consumer=component_class,
                     resolved_name=edge.target,
                 )
+                if edge.target in forbidden:
+                    self._raise_needs_import(
+                        [*path, name, edge.target], forbidden[edge.target],
+                        importing,
+                    )
                 known.add(edge.target)
-                visit(edge.target, target_class)
+                visit(edge.target, target_class, (*path, name))
 
+        forbidden = forbidden or {}
         for root in roots:
             # A configured name says which instance to create, so it is taken
             # literally. Only a *dependency* is resolved to an instance.
-            visit(*self._registered_component_class(root))
+            resolved, root_class = self._registered_component_class(root)
+            if resolved in forbidden:
+                self._raise_needs_import(
+                    [resolved], forbidden[resolved], importing,
+                )
+            visit(resolved, root_class)
 
         # Checked against everything the session will hold -- what this call
         # plans, companions included, and what an earlier call added -- or a

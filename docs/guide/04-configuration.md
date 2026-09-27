@@ -52,6 +52,11 @@ A session directory is created as:
 
 The resolved session configuration is written to `config.yaml` in that directory.
 
+Besides `session_config` and component mappings, a session entry may hold
+`component_bindings` ([wiring](02-wiring-components.md)) and
+`import_components`, which takes components of an earlier run into the session
+([importing components](../reference/import-components.md)).
+
 Every `sessions[]` entry is registered for the same engine run. Entries may use different registered session types; all resulting worker wrappers start together.
 
 ## New session
