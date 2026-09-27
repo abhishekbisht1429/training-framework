@@ -198,8 +198,8 @@ class ScaleGradients(GradientProcessor):
 ```
 
 ```yaml
-component_bindings:
-  optimizer_step: {clip_gradients: scale_gradients}
+optimizer_step:
+  dependencies_role_bindings: {clip_gradients: scale_gradients}
 scale_gradients: {}
 ```
 

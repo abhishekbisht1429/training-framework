@@ -109,7 +109,7 @@ def test_component_bindings_substitute_dependencies_and_public_names(tmp_path):
     assert "optimizer_step" not in step_names
 
     graph = session.execution_graph()
-    assert "COMPONENT BINDINGS" in graph
+    assert "ROLE BINDINGS" in graph
     assert "optimizer_step -> custom_optimizer" in graph
     assert "requires: Resource.custom_model" in graph
     assert "requires: Hook.custom_metrics" in graph

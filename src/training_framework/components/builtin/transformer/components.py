@@ -5,7 +5,7 @@ like any other PyTorch module, and declares its configuration with a
 `config_schema`. The composite models (`patch_transformer`,
 `pooled_patch_transformer`) depend on block *roles* and attach whatever is
 bound to them during construction, so they are wiring plus a forward pass.
-`component_bindings` chooses which implementation fills each role.
+`role_bindings` chooses which implementation fills each role.
 """
 
 from __future__ import annotations

@@ -545,7 +545,7 @@ def test_a_bound_prerequisite_is_this_sessions_own(tmp_path):
     )
     config = imported_backbone_config(
         tmp_path / "run", path,
-        imports={"bind": {"dataset": "dataset"}},
+        imports={"overwritten_dependencies": {"dataset": "dataset"}},
         bindings={"dataset": "ft_toy_dataset"},
         ft_toy_dataset={},
         ft_probe_head={"in_features": ToyDataset.num_classes},

@@ -31,7 +31,7 @@ from training_framework.components import (
 )
 from training_framework.components.builtin import Checkpointer
 from training_framework.engine import TrainingEngine, load_session_for_worker
-from training_framework.session import TrainingSession
+from training_framework.session import SessionComponents, TrainingSession
 
 
 # -- components ------------------------------------------------------------------
@@ -262,7 +262,7 @@ def test_a_clash_with_another_import_suggests_a_suffix(tmp_path):
 def test_a_clash_with_a_configured_instance_suggests_a_suffix(tmp_path):
     path, _ = composite_run(tmp_path)
 
-    with pytest.raises(ValueError, match=r"imports 'imp_block', but this session configures one.*suffix.*bind"):
+    with pytest.raises(ValueError, match=r"imports 'imp_block', but this session configures one.*suffix.*overwritten_dependencies"):
         importing(tmp_path, imported_as_model(path), imp_block={})
 
 
@@ -357,7 +357,7 @@ def test_bind_gives_the_import_this_sessions_component(tmp_path):
     path, _ = composite_run(tmp_path)
 
     session = importing(
-        tmp_path, imported_as_model(path, bind={"block": "imp_needy_block#mine"}),
+        tmp_path, imported_as_model(path, overwritten_dependencies={"block": "imp_needy_block#mine"}),
         {"net": "imp_block#other"},
         **{"imp_needy_block#mine": {}, "imp_block#other": {}},
     )
@@ -376,8 +376,8 @@ def test_a_bind_key_the_import_never_reaches_is_refused(tmp_path):
         imp_composite={}, imp_block={}, imp_tokenizer={},
     )
 
-    with pytest.raises(ValueError, match=r"bind names \['imp_tokenizer'\], which 'imp_composite' is not wired to.*\['imp_block', 'imp_composite'\]"):
-        importing(tmp_path, imported_as_model(path, bind={"imp_tokenizer": "imp_tokenizer"}))
+    with pytest.raises(ValueError, match=r"overwritten_dependencies names \['imp_tokenizer'\], which 'imp_composite' is not wired to.*\['imp_block', 'imp_composite'\]"):
+        importing(tmp_path, imported_as_model(path, overwritten_dependencies={"imp_tokenizer": "imp_tokenizer"}))
 
 
 def test_a_prerequisite_declared_since_the_source_run_must_be_wired(tmp_path):
@@ -389,43 +389,35 @@ def test_a_prerequisite_declared_since_the_source_run_must_be_wired(tmp_path):
 
     resource("imp_block", overwrite=True)(GrownBlock)
     # Reported through restore, which gathers every problem into one error.
-    with pytest.raises(ValueError, match=r"'imp_block' declares \['tokenizer'\], which the run it comes from never wired"):
+    with pytest.raises(ValueError, match=r"'imp_block' declares \['tokenizer'\], which the run it comes from never wired.*has changed since that checkpoint was saved"):
         importing(tmp_path, imported_as_model(path), imp_tokenizer={})
 
-    session = importing(
-        tmp_path, imported_as_model(path),
-        {"imp_block": {"tokenizer": "imp_tokenizer"}}, imp_tokenizer={},
-    )
-    assert resource_named(session, "imp_block").get_dependency("tokenizer") is (
-        resource_named(session, "imp_tokenizer")
-    )
 
-
-def test_a_binding_for_wiring_the_source_already_made_is_refused(tmp_path):
+@pytest.mark.parametrize("asked", ("block", "blok"), ids=("wired", "undeclared"))
+def test_this_sessions_bindings_cannot_wire_an_imported_component(tmp_path, asked):
     path, _ = composite_run(tmp_path)
 
-    with pytest.raises(ValueError, match=r"wires \['block'\] of imported component 'imp_composite', which the run it comes from already wired.*`bind`"):
+    with pytest.raises(ValueError, match=r"'imp_composite' is imported, and an imported component keeps the wiring its checkpoint recorded.*`overwritten_dependencies`"):
         importing(
             tmp_path, imported_as_model(path),
-            {"imp_composite": {"block": "imp_block#mine"}}, **{"imp_block#mine": {}},
+            {"imp_composite": {asked: "imp_block#mine"}}, **{"imp_block#mine": {}},
         )
 
 
-def test_a_binding_for_a_name_the_import_does_not_declare_is_refused(tmp_path):
+def test_role_bindings_given_in_python_cannot_wire_an_imported_component(tmp_path):
     path, _ = composite_run(tmp_path)
+    config = importing_config(tmp_path, imported_as_model(path), **{"imp_block#mine": {}})
+    held = SessionComponents(role_bindings={"imp_composite": {"block": "imp_block#mine"}})
 
-    with pytest.raises(ValueError, match=r"wires \['blok'\] of imported component 'imp_composite', which Composite does not declare"):
-        importing(
-            tmp_path, imported_as_model(path),
-            {"imp_composite": {"blok": "imp_block#mine"}}, **{"imp_block#mine": {}},
-        )
+    with pytest.raises(ValueError, match=r"'imp_composite' is imported.*`overwritten_dependencies`"):
+        held.register_from_config(config)
 
 
 def test_what_the_import_is_wired_to_cannot_need_the_import(tmp_path):
     path, _ = composite_run(tmp_path)
     imports = {"p": {
         "checkpoint": str(path), "role": "net",
-        "bind": {"block": "imp_needy_block#mine"},
+        "overwritten_dependencies": {"block": "imp_needy_block#mine"},
     }}
 
     with pytest.raises(ComponentDependencyError, match=r"import_components.p: 'imp_needy_block#mine' is wired to the import.*imp_needy_block#mine -> imp_composite"):
@@ -476,7 +468,7 @@ def test_a_singleton_is_refused(tmp_path):
         tmp_path, {"model": "imp_needs_only"}, imp_needs_only={}, only={},
     )
 
-    with pytest.raises(ComponentDependencyError, match=r"'only' is @singleton.*`bind`"):
+    with pytest.raises(ComponentDependencyError, match=r"'only' is @singleton.*`overwritten_dependencies`"):
         importing(tmp_path, imported_as_model(path))
 
 
@@ -543,7 +535,7 @@ def test_a_binding_for_a_component_never_activated_is_refused(tmp_path):
     # Checked once nothing more can be activated by hand: on entering the
     # session (or earlier, when asked; the engine asks before the ranks start).
     with pytest.raises(ValueError, match="wires 'imp_consumer', which this session does not hold"):
-        session.check_component_bindings()
+        session.check_role_bindings()
 
 
 def stale_binding_config(tmp_path):
@@ -585,7 +577,7 @@ def test_a_binding_for_a_component_activated_by_hand_is_accepted(tmp_path):
 
     session.activate_component("imp_consumer", {})
 
-    session.check_component_bindings()
+    session.check_role_bindings()
     assert resource_named(session, "imp_consumer").net is resource_named(session, "imp_block")
 
 
@@ -745,7 +737,7 @@ def test_an_import_can_bind_to_what_an_earlier_import_brought(tmp_path):
     second, _ = composite_run(tmp_path, "second")
     imports = {
         "a": {"checkpoint": str(first), "role": "model", "suffix": "a"},
-        "b": {"checkpoint": str(second), "suffix": "b", "bind": {"block": "imp_block#a"}},
+        "b": {"checkpoint": str(second), "suffix": "b", "overwritten_dependencies": {"block": "imp_block#a"}},
     }
 
     session = importing(tmp_path, imports)
@@ -761,10 +753,10 @@ def test_binding_an_earlier_imports_unsuffixed_instance_is_ambiguous(tmp_path):
     second, _ = composite_run(tmp_path, "second")
     imports = {
         "a": {"checkpoint": str(first), "role": "model"},
-        "b": {"checkpoint": str(second), "suffix": "b", "bind": {"block": "imp_block"}},
+        "b": {"checkpoint": str(second), "suffix": "b", "overwritten_dependencies": {"block": "imp_block"}},
     }
 
-    with pytest.raises(ComponentDependencyError, match=r"import_components.b.bind.block: 'imp_block' is also an instance import_components.a imports under its source name.*`suffix`"):
+    with pytest.raises(ComponentDependencyError, match=r"import_components.b.overwritten_dependencies.block: 'imp_block' is also an instance import_components.a imports under its source name.*`suffix`"):
         importing(tmp_path, imports)
 
 
@@ -773,7 +765,7 @@ def test_an_earlier_import_is_never_bound_as_the_sole_instance(tmp_path):
     second, _ = composite_run(tmp_path, "second")
     imports = {
         "a": {"checkpoint": str(first), "role": "model", "suffix": "pre"},
-        "b": {"checkpoint": str(second), "suffix": "b", "bind": {"block": "imp_block"}},
+        "b": {"checkpoint": str(second), "suffix": "b", "overwritten_dependencies": {"block": "imp_block"}},
     }
 
     # `imp_block#pre` is the only instance of `imp_block` there is, but the
@@ -782,33 +774,12 @@ def test_an_earlier_import_is_never_bound_as_the_sole_instance(tmp_path):
         importing(tmp_path, imports)
 
 
-def test_a_per_consumer_binding_never_takes_an_earlier_import_as_the_sole_instance(tmp_path):
-    tokenizer_run, _ = source_run(
-        tmp_path, {"model": "imp_tokenized_block", "tokenizer": "imp_tokenizer"},
-        "tokenized", imp_tokenized_block={}, imp_tokenizer={},
-    )
-    block_run, _ = source_run(tmp_path, {"model": "imp_block"}, "block", imp_block={})
-
-    @requires_resource("tokenizer")
-    class GrownBlock(Block):
-        pass
-
-    resource("imp_block", overwrite=True)(GrownBlock)
-    imports = {
-        "tok": {"checkpoint": str(tokenizer_run), "resource": "imp_tokenizer", "suffix": "pre"},
-        "blk": {"checkpoint": str(block_run), "role": "model"},
-    }
-
-    with pytest.raises(RuntimeError, match="Component 'imp_tokenizer' is required but defines a custom constructor"):
-        importing(tmp_path, imports, {"imp_block": {"tokenizer": "imp_tokenizer"}})
-
-
 def test_an_ambiguous_bind_target_names_the_bind_key(tmp_path):
     path, _ = composite_run(tmp_path)
 
-    with pytest.raises(ComponentDependencyError, match=r"import_components.pretrained.bind.block: 'imp_block' could be any of \['imp_block#x', 'imp_block#y'\]; name the instance"):
+    with pytest.raises(ComponentDependencyError, match=r"import_components.pretrained.overwritten_dependencies.block: 'imp_block' could be any of \['imp_block#x', 'imp_block#y'\]; name the instance"):
         importing(
-            tmp_path, imported_as_model(path, bind={"block": "imp_block"}),
+            tmp_path, imported_as_model(path, overwritten_dependencies={"block": "imp_block"}),
             **{"imp_block#x": {}, "imp_block#y": {}},
         )
 
@@ -817,7 +788,7 @@ def test_binding_to_what_a_later_import_brings_says_to_reorder(tmp_path):
     first, _ = composite_run(tmp_path, "first")
     second, _ = composite_run(tmp_path, "second")
     imports = {
-        "b": {"checkpoint": str(second), "suffix": "b", "bind": {"block": "imp_block"}},
+        "b": {"checkpoint": str(second), "suffix": "b", "overwritten_dependencies": {"block": "imp_block"}},
         "a": {"checkpoint": str(first), "role": "model"},
     }
 
@@ -829,7 +800,7 @@ def test_a_bind_target_is_resolved_like_a_dependency(tmp_path):
     path, _ = composite_run(tmp_path)
 
     session = importing(
-        tmp_path, imported_as_model(path, bind={"block": "imp_block"}),
+        tmp_path, imported_as_model(path, overwritten_dependencies={"block": "imp_block"}),
         **{"imp_block#mine": {}},
     )
 
@@ -843,8 +814,8 @@ def test_a_bind_target_is_resolved_like_a_dependency(tmp_path):
 def test_a_bind_target_that_is_not_a_resource_is_refused(tmp_path):
     path, _ = composite_run(tmp_path)
 
-    with pytest.raises(ValueError, match="import_components.pretrained.bind.block names 'logger', which cannot serve as a prerequisite"):
-        importing(tmp_path, imported_as_model(path, bind={"block": "logger"}))
+    with pytest.raises(ValueError, match="import_components.pretrained.overwritten_dependencies.block names 'logger', which cannot serve as a prerequisite"):
+        importing(tmp_path, imported_as_model(path, overwritten_dependencies={"block": "logger"}))
 
 
 def test_an_imported_component_cannot_be_extended(tmp_path):
@@ -855,52 +826,23 @@ def test_an_imported_component_cannot_be_extended(tmp_path):
         session.apply_extension_overrides(["imp_block.width=3"])
 
 
-def test_a_per_consumer_target_of_an_import_is_resolved_once(tmp_path):
-    # The source's composite reaches a tokenizer through its block, so the
-    # import brings `imp_tokenizer#pre` along with it.
-    path, _ = source_run(
-        tmp_path,
-        {"model": "imp_composite", "block": "imp_tokenized_block", "tokenizer": "imp_tokenizer"},
-        imp_composite={}, imp_tokenized_block={}, imp_tokenizer={},
-    )
-
-    @requires_resource("block")
-    @requires_resource("tokenizer")
-    class GrownComposite(Composite):
-        pass
-
-    resource("imp_composite", overwrite=True)(GrownComposite)
-
-    # `imp_tokenizer` means this session's own; the imported one is never a
-    # candidate, also not when the restore wires the composite.
-    session = importing(
-        tmp_path, imported_as_model(path, suffix="pre"),
-        {"imp_composite#pre": {"tokenizer": "imp_tokenizer"}},
-        **{"imp_tokenizer#mine": {}},
-    )
-
-    assert resource_named(session, "imp_composite#pre").get_dependency("tokenizer") is (
-        resource_named(session, "imp_tokenizer#mine")
-    )
-
-
 def test_a_bind_can_name_an_earlier_imports_role(tmp_path):
     first, _ = composite_run(tmp_path, "first")
     second, _ = composite_run(tmp_path, "second")
 
     session = importing(tmp_path, {
         "a": {"checkpoint": str(first), "role": "net", "suffix": "pre"},
-        "b": {"checkpoint": str(second), "role": "model", "suffix": "b", "bind": {"block": "net"}},
+        "b": {"checkpoint": str(second), "role": "model", "suffix": "b", "overwritten_dependencies": {"block": "net"}},
     })
     assert resource_named(session, "imp_composite#b").block is (
         resource_named(session, "imp_composite#pre")
     )
 
     # Unsuffixed, the role's instance is ambiguous, as its name would be.
-    with pytest.raises(ComponentDependencyError, match=r"import_components.b.bind.block: 'imp_composite' is also an instance import_components.a imports under its source name"):
+    with pytest.raises(ComponentDependencyError, match=r"import_components.b.overwritten_dependencies.block: 'imp_composite' is also an instance import_components.a imports under its source name"):
         importing(tmp_path, {
             "a": {"checkpoint": str(first), "role": "net"},
-            "b": {"checkpoint": str(second), "role": "model", "suffix": "b", "bind": {"block": "net"}},
+            "b": {"checkpoint": str(second), "role": "model", "suffix": "b", "overwritten_dependencies": {"block": "net"}},
         })
 
 
@@ -908,9 +850,9 @@ def test_a_bind_naming_a_later_imports_role_says_to_reorder(tmp_path):
     first, _ = composite_run(tmp_path, "first")
     second, _ = composite_run(tmp_path, "second")
 
-    with pytest.raises(ComponentDependencyError, match=r"import_components.b.bind.block: 'net' is the role import_components.a binds.*List import_components.a before import_components.b"):
+    with pytest.raises(ComponentDependencyError, match=r"import_components.b.overwritten_dependencies.block: 'net' is the role import_components.a binds.*List import_components.a before import_components.b"):
         importing(tmp_path, {
-            "b": {"checkpoint": str(second), "role": "model", "suffix": "b", "bind": {"block": "net"}},
+            "b": {"checkpoint": str(second), "role": "model", "suffix": "b", "overwritten_dependencies": {"block": "net"}},
             "a": {"checkpoint": str(first), "role": "net", "suffix": "pre"},
         })
 
@@ -918,5 +860,12 @@ def test_a_bind_naming_a_later_imports_role_says_to_reorder(tmp_path):
 def test_a_bind_naming_the_imports_own_role_is_refused(tmp_path):
     path, _ = composite_run(tmp_path)
 
-    with pytest.raises(ComponentDependencyError, match=r"import_components.pretrained.bind.block: 'model' is the role import_components.pretrained binds to its own resource"):
-        importing(tmp_path, imported_as_model(path, bind={"block": "model"}))
+    with pytest.raises(ComponentDependencyError, match=r"import_components.pretrained.overwritten_dependencies.block: 'model' is the role import_components.pretrained binds to its own resource"):
+        importing(tmp_path, imported_as_model(path, overwritten_dependencies={"block": "model"}))
+
+
+def test_the_former_bind_key_is_refused(tmp_path):
+    path, _ = composite_run(tmp_path)
+
+    with pytest.raises(ValueError, match=r"import_components.pretrained has unknown keys \['bind'\].*'overwritten_dependencies'"):
+        importing(tmp_path, imported_as_model(path, bind={"block": "imp_block"}))

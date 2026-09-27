@@ -24,7 +24,7 @@ from training_framework.components.registry import (
     ANALYSIS_SESSION_TYPE,
     TRAINING_SESSION_TYPE,
     ComponentAliases,
-    ComponentBindings,
+    RoleBindings,
     RoleDeclaration,
     activates,
     component_registry,
@@ -50,7 +50,6 @@ __all__ = [
     "TRAINING_SESSION_TYPE",
     "Component",
     "ComponentAliases",
-    "ComponentBindings",
     "ComponentDependencyError",
     "ExtendableComponent",
     "Hook",
@@ -59,6 +58,7 @@ __all__ = [
     "ModuleResource",
     "parse_component_config",
     "Resource",
+    "RoleBindings",
     "RoleDeclaration",
     "SessionHook",
     "Stateful",
@@ -89,3 +89,16 @@ __all__ = [
 ]
 
 from training_framework.components import builtin as builtin
+
+
+def __getattr__(name):
+    if name == "ComponentBindings":
+        import warnings
+
+        warnings.warn(
+            "ComponentBindings is deprecated; use RoleBindings",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return RoleBindings
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -17,10 +17,10 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from training_framework.components.base import ComponentDependencyError
-from training_framework.components.config import component_bindings_from_config
+from training_framework.components.config import parse_session_config
 from training_framework.components.edges import (
     EdgeKind,
     declared_edges,
@@ -45,13 +45,15 @@ IMPORTS_STATE_KEY = "imports"
 (`bindings`). Which import brought a component in is on that component's
 own entry (`imported_by`)."""
 
-_IMPORT_KEYS = frozenset({"checkpoint", "resource", "role", "bind", "suffix"})
+_IMPORT_KEYS = frozenset({
+    "checkpoint", "resource", "role", "overwritten_dependencies", "suffix",
+})
 
 
 def instance_named_in_manifest(manifest: Mapping, name: str) -> str:
     """Resolve `name` from what a checkpoint stored, importing nothing.
 
-    In order: an instance name; a top-level `component_bindings` entry, or a
+    In order: an instance name; a session-wide `role_bindings` entry, or a
     role an import of that run bound; the instance the checkpoint's
     components were given when they asked for `name`; the sole instance of
     that implementation.
@@ -59,13 +61,7 @@ def instance_named_in_manifest(manifest: Mapping, name: str) -> str:
     stored = manifest["components"]
     if name in stored:
         return name
-    config = manifest.get("config") or {}
-    bindings = config.get("component_bindings") or config.get("aliases") or {}
-    bindings = {
-        **(bindings if isinstance(bindings, Mapping) else {}),
-        **((manifest.get(IMPORTS_STATE_KEY) or {}).get("bindings") or {}),
-    }
-    bound = bindings.get(name)
+    bound = stored_bindings(manifest).roles.get(name)
     if isinstance(bound, str):
         candidates = instances_of(bound, stored)
     else:
@@ -96,7 +92,7 @@ class ComponentImport:
     checkpoint: str
     resource: str = "model"
     role: str | None = None
-    bind: dict[str, str] = field(default_factory=dict)
+    overwritten_dependencies: dict[str, str] = field(default_factory=dict)
     suffix: str | None = None
 
     @property
@@ -151,15 +147,15 @@ def _parse_import(name: Any, entry: Any) -> ComponentImport:
             raise ValueError(
                 f"{key}.role must be a role name, not an instance; got {role!r}"
             )
-    bind = entry.get("bind", {})
-    if not isinstance(bind, Mapping):
+    overwritten = entry.get("overwritten_dependencies", {})
+    if not isinstance(overwritten, Mapping):
         raise ValueError(
-            f"{key}.bind must map a prerequisite of the source run to a "
-            f"component of this one; got {bind!r}"
+            f"{key}.overwritten_dependencies must map a dependency of the "
+            f"source run to a component of this one; got {overwritten!r}"
         )
-    for source, target in bind.items():
-        _require_name(source, f"{key}.bind key")
-        _require_name(target, f"{key}.bind.{source}")
+    for source, target in overwritten.items():
+        _require_name(source, f"{key}.overwritten_dependencies key")
+        _require_name(target, f"{key}.overwritten_dependencies.{source}")
     suffix = entry.get("suffix")
     if suffix is not None and (
             not isinstance(suffix, str)
@@ -174,7 +170,7 @@ def _parse_import(name: Any, entry: Any) -> ComponentImport:
         checkpoint=checkpoint,
         resource=resource,
         role=role,
-        bind=dict(bind),
+        overwritten_dependencies=dict(overwritten),
         suffix=suffix,
     )
 
@@ -190,18 +186,18 @@ class PlannedImport:
 
     `components_state` is the part of the source's session state to restore,
     under this session's names, with each instance's wiring pointed at the
-    other imported instances or at the `bind` targets. `names` maps a source
-    instance to this session's name for it, for every renamed instance and
-    every `bind`; it is empty when neither is configured. `bind` maps each
-    `bind` key, as written, to the component of this session it resolved
-    to.
+    other imported instances or at the `overwritten_dependencies` targets.
+    `names` maps a source instance to this session's name for it, for every
+    renamed and every overwritten instance; it is empty when neither is
+    configured. `overwritten_dependencies` maps each key, as written, to the
+    component of this session it resolved to.
     """
 
     spec: ComponentImport
     root: str
     components_state: dict[str, dict[str, Any]]
     names: dict[str, str]
-    bind: dict[str, str]
+    overwritten_dependencies: dict[str, str]
 
     @property
     def instances(self) -> list[str]:
@@ -216,7 +212,8 @@ def plan_import(
     """Select, from the source checkpoint, what `spec` imports.
 
     `registry` is this session's component registry, for the checks a class
-    decides; `resolve_local` resolves a `bind` target in this session.
+    decides; `resolve_local` resolves an `overwritten_dependencies` target in
+    this session.
     """
     path = spec.checkpoint
     if not os.path.exists(path):
@@ -232,28 +229,29 @@ def plan_import(
     stored = manifest["components"]
 
     root = _resolve_in_source(manifest, spec.resource, f"{spec.key}.resource")
+    where = f"{spec.key}.overwritten_dependencies"
     bound: dict[str, str] = {}
-    bind_keys: dict[str, str] = {}
-    for source_name, target in spec.bind.items():
+    overwritten_keys: dict[str, str] = {}
+    for source_name, target in spec.overwritten_dependencies.items():
         instance = _resolve_in_source(
-            manifest, source_name, f"{spec.key}.bind key '{source_name}'",
+            manifest, source_name, f"{where} key '{source_name}'",
         )
         if instance in bound:
             raise ValueError(
-                f"{spec.key}.bind keys '{bind_keys[instance]}' and "
+                f"{where} keys '{overwritten_keys[instance]}' and "
                 f"'{source_name}' are both the source's '{instance}'"
             )
-        bind_keys[instance] = source_name
+        overwritten_keys[instance] = source_name
         if instance == root:
             raise ValueError(
-                f"{spec.key}.bind names '{source_name}', which is the imported "
+                f"{where} names '{source_name}', which is the imported "
                 f"resource '{root}' itself"
             )
         try:
             bound[instance] = resolve_local(target)
         except ComponentDependencyError as error:
             raise ComponentDependencyError(
-                f"{spec.key}.bind.{source_name}: {error}"
+                f"{where}.{source_name}: {error}"
             ) from None
 
     # The resource and every instance it was wired to, stopping at a bound
@@ -277,10 +275,10 @@ def plan_import(
 
     unreached = sorted(set(bound) - reached_bindings)
     if unreached:
-        keys = [bind_keys[instance] for instance in unreached]
+        keys = [overwritten_keys[instance] for instance in unreached]
         raise ValueError(
-            f"{spec.key}.bind names {keys}, which '{root}' is not wired to, "
-            "so nothing would be bound. The import brings in "
+            f"{where} names {keys}, which '{root}' is not wired to, "
+            "so nothing would be overwritten. The import brings in "
             f"{sorted(reached)}."
         )
 
@@ -319,20 +317,35 @@ def plan_import(
         root=renamed[root],
         components_state=components_state,
         names=names,
-        bind={bind_keys[instance]: target for instance, target in bound.items()},
+        overwritten_dependencies={
+            overwritten_keys[instance]: target
+            for instance, target in bound.items()
+        },
     )
 
 
-def stored_bindings(state: Mapping[str, Any]) -> dict[str, Any]:
-    """The bindings a stored session state was built with.
+class StoredBindings(NamedTuple):
+    """The bindings a stored session state was built with, kept apart as
+    `RoleBindings` takes them."""
 
-    Its configured `component_bindings`, plus the role bindings its imports
-    added (`import_components.<name>.role`), which the configuration does
-    not hold: they name the imported instance, which only the import knew.
-    """
-    bindings = dict(component_bindings_from_config(state["config"]))
-    bindings.update((state.get(IMPORTS_STATE_KEY) or {}).get("bindings") or {})
-    return bindings
+    roles: dict[str, Any]
+    """Session-wide: the configured `role_bindings` (or legacy
+    `component_bindings`), plus the roles its imports bound
+    (`import_components.<name>.role`), which the configuration does not
+    hold: they name the imported instance, which only the import knew."""
+    dependencies: dict[str, dict[str, Any]]
+    """Each component's own wiring (`dependencies_role_bindings`)."""
+
+
+def stored_bindings(state: Mapping[str, Any]) -> StoredBindings:
+    """The bindings a stored session state was built with."""
+    view = parse_session_config(
+        state.get("config") or {},
+        session_type=state.get("session_type"),
+    )
+    roles = dict(view.role_bindings)
+    roles.update((state.get(IMPORTS_STATE_KEY) or {}).get("bindings") or {})
+    return StoredBindings(roles=roles, dependencies=view.dependency_bindings)
 
 
 def _resolve_in_source(manifest: Mapping, name: str, where: str) -> str:
@@ -367,7 +380,7 @@ def _import_problem(
         return (
             f"'{name}' is @singleton: it belongs to the run it was built in, "
             "so it cannot be imported. Give what needs it this session's own "
-            "instance with `bind`."
+            "instance with `overwritten_dependencies`."
         )
     companions = sorted(
         edge.asked for edge in declared_edges(component_class)
@@ -378,7 +391,8 @@ def _import_problem(
             f"'{name}' activates {companions} (@activates): those carry out the "
             "source run's behaviour, and here they would be activated anew "
             "and wired by this session, so the import is refused. Give what "
-            "needs it this session's own instance with `bind`."
+            "needs it this session's own instance with "
+            "`overwritten_dependencies`."
         )
     return None
 

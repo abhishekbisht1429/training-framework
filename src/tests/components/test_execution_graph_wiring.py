@@ -79,7 +79,7 @@ def test_per_consumer_wiring_is_listed_with_the_bindings(tmp_path):
 def test_a_session_wired_only_per_consumer_still_shows_its_bindings(tmp_path):
     graph = wired_session(tmp_path, flat_binding=False).execution_graph()
 
-    assert "COMPONENT BINDINGS" in graph
+    assert "ROLE BINDINGS" in graph
     assert "  graph_consumer: graph_role -> graph_dep#b" in graph
 
 

@@ -3,6 +3,12 @@ from copy import deepcopy
 
 from omegaconf import OmegaConf
 
+from training_framework.components.config import (
+    COMPONENT_GROUPS,
+    DEPENDENCIES_BINDINGS_KEY,
+    ROLE_BINDINGS_KEY,
+)
+from training_framework.session.components import read_session_config
 from training_framework.session.base import Session
 from training_framework.session.config import (
     SessionConfig,
@@ -59,6 +65,51 @@ class TrainingSession(Session):
             return changed
         return set() if current == effective else {prefix}
 
+    def _fill_extended_entries(
+            self,
+            current_config: dict,
+            update_config: Mapping,
+    ) -> None:
+        """Give each component an override names but the configuration does
+        not list the configuration it was built with, where the override
+        puts it, so only what the override changes counts as changed.
+
+        An override that names a listed component somewhere other than where
+        it is listed is refused: merged, it would list the component twice.
+        """
+        listed = read_session_config(
+            current_config,
+            session_type=self._session_type,
+        )
+        named: list[tuple[str | None, str]] = []
+        for key, value in update_config.items():
+            if key in COMPONENT_GROUPS:
+                if isinstance(value, Mapping):
+                    named.extend((key, name) for name in value)
+            elif key != "session_config":
+                named.append((None, key))
+
+        for group, name in named:
+            if name in listed.components:
+                listed_group = listed.components[name].group
+                if listed_group != group:
+                    path = name if listed_group is None else f"{listed_group}.{name}"
+                    raise ValueError(
+                        f"'{name}' is listed {listed.where(name)}; override "
+                        f"'{path}.<key>' instead"
+                    )
+                continue
+            try:
+                built_with = self._components.config_for_extension(name)
+            except ValueError:
+                continue
+            if group is None:
+                current_config[name] = built_with
+            else:
+                if current_config.get(group) is None:
+                    current_config[group] = {}
+                current_config[group][name] = built_with
+
     def apply_extension_overrides(self, overrides: Sequence[str]) -> None:
         if not overrides:
             raise ValueError("Session extension requires at least one override")
@@ -71,13 +122,7 @@ class TrainingSession(Session):
             raise ValueError("Session extension overrides must form a mapping")
 
         current_config = deepcopy(self._config)
-        for name in update_config:
-            if name in current_config or name == "session_config":
-                continue
-            try:
-                current_config[name] = self._components.config_for_extension(name)
-            except ValueError:
-                pass
+        self._fill_extended_entries(current_config, update_config)
 
         effective = OmegaConf.to_container(
             OmegaConf.merge(
@@ -89,7 +134,19 @@ class TrainingSession(Session):
         if not isinstance(effective, Mapping):
             raise ValueError("Effective extension config must be a mapping")
         effective = dict(effective)
-        changed_paths = self._changed_paths(current_config, effective)
+        # Compared flattened, so the layout the configuration uses -- flat
+        # or grouped -- does not change which paths count as changed.
+        effective_view = read_session_config(
+            effective,
+            session_type=self._session_type,
+        )
+        changed_paths = self._changed_paths(
+            read_session_config(
+                current_config,
+                session_type=self._session_type,
+            ).comparable(),
+            effective_view.comparable(),
+        )
 
         session_paths = {
             path for path in changed_paths if path[0] == "session_config"
@@ -110,11 +167,14 @@ class TrainingSession(Session):
             "component_bindings",
             "components",
             "import_components",
+            ROLE_BINDINGS_KEY,
             "session_kwargs",
             "session_type",
         }
         reserved_changes = {
-            path for path in changed_paths if path[0] in reserved_names
+            path for path in changed_paths
+            if path[0] in reserved_names
+            or (len(path) > 1 and path[1] == DEPENDENCIES_BINDINGS_KEY)
         }
         if reserved_changes:
             names = ", ".join(
@@ -132,11 +192,7 @@ class TrainingSession(Session):
             component_paths = frozenset(
                 path[1:] for path in changed_paths if path[0] == name
             )
-            component_config = effective[name]
-            if not isinstance(component_config, Mapping):
-                raise ValueError(
-                    f"Extended component config '{name}' must be a mapping"
-                )
+            component_config = effective_view.components[name].config
             self._components.apply_extension_config(
                 name,
                 component_config,

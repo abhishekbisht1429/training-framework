@@ -62,7 +62,7 @@ def _missing_role_message(
         f"required{consumer_clause} but has no implementation registered. "
         f"Implement a {category.__name__} subclass and register it via "
         f"@{decorator_name}('{resolved_name}', ...), or bind an existing "
-        "implementation via component_bindings: "
+        "implementation via role_bindings: "
         f"{{'{name}': '<implementation_name>'}}."
     )
 
@@ -142,6 +142,14 @@ def _component(
         session_type: str | None = None,
 ):
     validate_component_name(name)
+    # Refused where it is declared: configured, a reserved name would be read
+    # as a framework entry, far from the component it was meant to be.
+    reserved = reserved_config_names(session_type)
+    if name in reserved:
+        raise ValueError(
+            f"Cannot register a component named '{name}': it is a reserved "
+            f"configuration key. Reserved: {', '.join(sorted(reserved))}."
+        )
     registry = _registration_registry(session_type)
 
     def wrapper(cls):
@@ -243,7 +251,7 @@ def role(
     Records that some component depends on `name` as a Resource, Hook, or
     Step without registering a concrete implementation. Application code
     satisfies the role with @resource/@hook/@step under the same name, or
-    under a different name bound via `component_bindings`. Declaring a role
+    under a different name bound via `role_bindings`. Declaring a role
     is optional: @requires_resource/@requires_hook/@requires_step accept any
     name whether or not it has been declared as a role.
     """
@@ -273,19 +281,21 @@ def role(
     return declaration
 
 
-class ComponentBindings:
+class RoleBindings:
     """Bind session-scoped component roles to registered implementations.
 
     Two forms share the mapping, told apart by the value:
 
-    * ``role: implementation`` binds a role for the whole session, which is
-      the original form and still the common one.
-    * ``consumer: {role: target}`` binds a role for one consumer only. It is
-      how a session says which instance a component was wired to when more
-      than one instance of a component exists, and it is kept here rather
-      than inside the consumer's own configuration because a component's
-      configuration is passed verbatim to its constructor -- and because the
-      wiring has to be readable before anything is constructed.
+    * ``role: implementation`` binds a role for the whole session: the
+      top-level ``role_bindings`` entry of a session configuration.
+    * ``consumer: {role: target}`` binds a role for one consumer only: the
+      ``dependencies_role_bindings`` entry inside that consumer's own
+      configuration (or, deprecated, a nested entry of a top-level
+      ``component_bindings``). It
+      is how a session says which instance a component was wired to when
+      more than one instance of a component exists. The configuration is
+      read before anything is constructed (`parse_session_config`), which
+      lifts it out of the consumer's entry, so the constructor never sees it.
 
     A target may name an instance (``model#b``); a role name may not, since a
     role is what a component class declares and a class cannot know which
@@ -296,13 +306,30 @@ class ComponentBindings:
             self,
             bindings: "Mapping[str, str | Mapping[str, str]] | None" = None,
             *,
+            dependency_bindings: "Mapping[str, Mapping[str, str]] | None" = None,
             session_type: str | None = None,
     ):
+        """`bindings` holds session-wide bindings; `dependency_bindings`
+        holds each consumer's own wiring (consumer -> role -> target).
+
+        The two are kept apart because they are keyed differently -- by role
+        and by consumer -- so a role and a consumer of the same name are two
+        entries, never one overwriting the other. `bindings` may still hold
+        the deprecated merged form, where a consumer's wiring is a nested
+        mapping; it is split here, once.
+        """
         if bindings is None:
             bindings = {}
         if not isinstance(bindings, Mapping):
             raise TypeError(
-                "'component_bindings' must be a mapping of strings to strings"
+                "'role_bindings' must be a mapping of strings to strings"
+            )
+        if dependency_bindings is None:
+            dependency_bindings = {}
+        if not isinstance(dependency_bindings, Mapping):
+            raise TypeError(
+                "dependency bindings must map a consumer to a mapping of its "
+                "roles to targets"
             )
 
         normalized = _normalize_component_session_type(session_type)
@@ -316,6 +343,18 @@ class ComponentBindings:
                 self._instance_bindings[key] = dict(value)
             else:
                 self._bindings[key] = value
+        for consumer, wiring in dict(dependency_bindings).items():
+            if not isinstance(wiring, Mapping):
+                raise TypeError(
+                    f"The dependency bindings of '{consumer}' must be a "
+                    "mapping of its roles to targets"
+                )
+            if consumer in self._instance_bindings:
+                raise ValueError(
+                    f"'{consumer}' is wired twice: in the deprecated merged "
+                    "bindings and in its own dependency bindings"
+                )
+            self._instance_bindings[consumer] = dict(wiring)
         self._validate()
         self._validate_instance_bindings()
 
@@ -365,7 +404,7 @@ class ComponentBindings:
             for role_name, target in wiring.items():
                 if not isinstance(role_name, str) or not isinstance(target, str):
                     raise TypeError(
-                        "'component_bindings' must be a mapping of strings "
+                        "'role_bindings' must be a mapping of strings "
                         "to strings"
                     )
                 if not role_name or not target:
@@ -395,7 +434,7 @@ class ComponentBindings:
                     or not isinstance(implementation_name, str)
             ):
                 raise TypeError(
-                    "'component_bindings' must be a mapping of strings to strings"
+                    "'role_bindings' must be a mapping of strings to strings"
                 )
             if not role_name or not implementation_name:
                 raise ValueError("Component binding names must not be empty")
@@ -488,7 +527,7 @@ class ComponentBindings:
 
     def is_alias(self, name: str) -> bool:
         warnings.warn(
-            "ComponentBindings.is_alias() is deprecated; use is_bound()",
+            "RoleBindings.is_alias() is deprecated; use is_bound()",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -524,8 +563,14 @@ class ComponentBindings:
         self.__dict__.update(state)
 
 
-class ComponentAliases(ComponentBindings):
-    """Deprecated compatibility name for ComponentBindings."""
+ComponentBindings = RoleBindings
+"""The former name of `RoleBindings`. Kept here without a warning so that
+anything pickled under it loads; the public name warns
+(`training_framework.components`)."""
+
+
+class ComponentAliases(RoleBindings):
+    """Deprecated compatibility name for RoleBindings."""
 
     def __init__(
             self,
@@ -534,49 +579,69 @@ class ComponentAliases(ComponentBindings):
             session_type: str | None = None,
     ):
         warnings.warn(
-            "ComponentAliases is deprecated; use ComponentBindings",
+            "ComponentAliases is deprecated; use RoleBindings",
             DeprecationWarning,
             stacklevel=2,
         )
         super().__init__(aliases, session_type=session_type)
 
 
-def _coalesce_component_bindings(
+def _coalesce_role_bindings(
+        role_bindings,
         component_bindings,
         aliases,
         *,
         stacklevel: int = 3,
 ):
-    if component_bindings is not None and aliases is not None:
-        raise ValueError(
-            "Provide either 'component_bindings' or deprecated 'aliases', "
-            "not both"
+    """Return whichever of the keyword's current and deprecated names was
+    given, refusing more than one."""
+    given = {
+        name: value
+        for name, value in (
+            ("role_bindings", role_bindings),
+            ("component_bindings", component_bindings),
+            ("aliases", aliases),
         )
-    if aliases is not None:
+        if value is not None
+    }
+    if len(given) > 1:
+        first, second = list(given)[:2]
+        raise ValueError(
+            f"Provide either '{first}' or '{second}', not both; "
+            "'component_bindings' and 'aliases' are deprecated names for "
+            "'role_bindings'"
+        )
+    if "aliases" in given:
         warnings.warn(
-            "'aliases' is deprecated; use 'component_bindings'",
+            "'aliases' is deprecated (as is 'component_bindings'); use "
+            "'role_bindings'",
             DeprecationWarning,
             stacklevel=stacklevel,
         )
-        return aliases
-    return component_bindings
+    elif "component_bindings" in given:
+        warnings.warn(
+            "'component_bindings' is deprecated; use 'role_bindings'",
+            DeprecationWarning,
+            stacklevel=stacklevel,
+        )
+    return next(iter(given.values()), None)
 
 
 def _binding_resolver(
-        component_bindings: ComponentBindings | Mapping[str, str] | None,
+        role_bindings: RoleBindings | Mapping[str, str] | None,
         *,
         session_type: str | None = None,
-) -> ComponentBindings:
-    if isinstance(component_bindings, ComponentBindings):
-        if component_bindings.session_type != session_type:
+) -> RoleBindings:
+    if isinstance(role_bindings, RoleBindings):
+        if role_bindings.session_type != session_type:
             raise ValueError(
-                "ComponentBindings uses session_type "
-                f"'{component_bindings.session_type}', "
+                "RoleBindings uses session_type "
+                f"'{role_bindings.session_type}', "
                 f"not '{session_type}'"
             )
-        return component_bindings
-    return ComponentBindings(
-        component_bindings,
+        return role_bindings
+    return RoleBindings(
+        role_bindings,
         session_type=session_type,
     )
 
@@ -787,19 +852,21 @@ def requires_resource(resource_name: str):
 
 
 def topological_sort_of_components(
-        component_bindings: ComponentBindings | Mapping[str, str] | None = None,
+        role_bindings: RoleBindings | Mapping[str, str] | None = None,
         *,
         components: Iterable | None = None,
         session_type: str | None = None,
-        aliases: ComponentBindings | Mapping[str, str] | None = None,
+        component_bindings: RoleBindings | Mapping[str, str] | None = None,
+        aliases: RoleBindings | Mapping[str, str] | None = None,
 ) -> dict[str, int]:
-    component_bindings = _coalesce_component_bindings(
+    role_bindings = _coalesce_role_bindings(
+        role_bindings,
         component_bindings,
         aliases,
     )
     normalized = _normalize_component_session_type(session_type)
     binding_resolver = _binding_resolver(
-        component_bindings,
+        role_bindings,
         session_type=normalized,
     )
     registry = component_registry(normalized)
@@ -819,21 +886,21 @@ def format_execution_graph(
         hooks: Iterable[Hook],
         steps: Iterable[Step],
         max_iterations: int,
-        component_bindings: (
-            ComponentBindings | Mapping[str, str] | None
-        ) = None,
+        role_bindings: RoleBindings | Mapping[str, str] | None = None,
         session_type: str = TRAINING_SESSION_TYPE,
-        aliases: ComponentBindings | Mapping[str, str] | None = None,
+        component_bindings: RoleBindings | Mapping[str, str] | None = None,
+        aliases: RoleBindings | Mapping[str, str] | None = None,
 ) -> str:
     """Return the session's component lifecycle as a readable execution graph."""
-    component_bindings = _coalesce_component_bindings(
+    role_bindings = _coalesce_role_bindings(
+        role_bindings,
         component_bindings,
         aliases,
     )
     normalized = _normalize_component_session_type(session_type)
     assert normalized is not None
     binding_resolver = _binding_resolver(
-        component_bindings,
+        role_bindings,
         session_type=normalized,
     )
     resources = list(resources)

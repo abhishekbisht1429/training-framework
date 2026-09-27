@@ -171,31 +171,34 @@ sessions:
       components_package: my_project.components
       device: cpu
 
-    counter:
-      start: 0
+    resources:
+      counter:
+        start: 0
 
-    increment:
-      amount: 2
+    steps:
+      increment:
+        amount: 2
 
-    progress:
-      call_every: 1
-
-    logger:
-      log_every: 1
-
-    checkpointer:
-      checkpoint_every: 5
+    hooks:
+      progress:
+        call_every: 1
+      logger:
+        log_every: 1
+      checkpointer:
+        checkpoint_every: 5
 ```
 
-Every top-level key inside a session, other than the reserved `session_type`,
-`session_config`, `session_kwargs`, and `component_bindings` entries, must
-match a component visible to the active session type. A binding maps a role name
-to a registered implementation, and component configuration belongs under that
-implementation name. The former `aliases` key remains accepted with a
-deprecation warning. Use an empty mapping for a config-free root.
-Required components that inherit `Component.__init__` are activated without a
-mapping; required components with a custom constructor must have one. The former
-top-level `components` list is rejected with migration guidance.
+Components are listed by kind under `resources`, `steps` and `hooks`, and each
+entry must name a component visible to the active session type; listing one
+under the wrong kind is an error. The groups are optional: a component may
+also be listed directly in the session entry, next to `session_config`, and the
+two layouts can be mixed. Listing order is not execution order -- steps run in
+the order their data flows. `role_bindings` maps a role name to a registered
+implementation, and configuration belongs under that implementation name (see
+[wiring](docs/guide/02-wiring-components.md)). An entry with an empty value
+(`counter:`) configures a component with no settings. Required components that
+inherit `Component.__init__` are activated without an entry; required
+components with a custom constructor must have one.
 
 ### 4. Create the entry point
 
@@ -283,16 +286,19 @@ class Classifier(ModuleResource):
 In the session's YAML, next to `session_config`:
 
 ```yaml
-    component_bindings: {model: classifier, dataset: toy_dataset}
-    classifier: {}
-    toy_dataset: {}
-    ddp: {world_size: 1, backend: gloo}
-    data_manager: {batch_size: 32, num_workers: 0, pin_memory: false}
+    role_bindings: {model: classifier, dataset: toy_dataset}
 
-    load_batch: {fields: [inputs, targets]}           # batch -> inputs, targets
-    forward: {args: [inputs], outputs: logits}        # classifier(inputs)
-    compute#loss: {function: cross_entropy, args: [logits, targets], outputs: loss}
-    optimizer: {optimizer: {name: AdamW, kwargs: {lr: 0.001}}}
+    resources:
+      classifier:
+      toy_dataset:
+      ddp: {world_size: 1, backend: gloo}
+      data_manager: {batch_size: 32, num_workers: 0, pin_memory: false}
+      optimizer: {optimizer: {name: AdamW, kwargs: {lr: 0.001}}}
+
+    steps:
+      load_batch: {fields: [inputs, targets]}         # batch -> inputs, targets
+      forward: {args: [inputs], outputs: logits}      # classifier(inputs)
+      compute#loss: {function: cross_entropy, args: [logits, targets], outputs: loss}
 ```
 
 Each step names the `iteration_context` keys it reads and writes, and the

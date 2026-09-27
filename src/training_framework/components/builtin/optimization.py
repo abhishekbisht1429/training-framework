@@ -1021,9 +1021,9 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             raise RuntimeError(
                 f"Gradient processors {late} had not run when optimizer_step "
                 "was about to step. Put each in the chain by binding "
-                "optimizer_step to it, e.g. component_bindings: "
-                f"{{optimizer_step: {{clip_gradients: {late[0]}}}}}, and "
-                "have it require the stage it follows."
+                "optimizer_step to it, e.g. optimizer_step: "
+                f"{{dependencies_role_bindings: {{clip_gradients: {late[0]}}}}}, "
+                "and have it require the stage it follows."
             )
 
     @property

@@ -123,7 +123,7 @@ and refuses one that was, since it could not be constructed without them; use
 `load_component` resolves `name` through the checkpoint's own bindings, as the
 session that wrote it did. `load_component_state` imports nothing, so it
 accepts an instance name, a name the checkpoint's top-level
-`component_bindings` bind, or a name one of its components asked for as a
+`role_bindings` bind, or a name one of its components asked for as a
 dependency (which resolves to the instance that component was given); a role
 declared only in your component package needs `load_component`.
 

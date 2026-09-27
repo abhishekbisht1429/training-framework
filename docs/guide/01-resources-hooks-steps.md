@@ -35,7 +35,7 @@ class DatasetResource(Resource):
 
 `dataset` above is an example of a declared role: the built-in `DataManager`
 requires a `dataset` Resource but the framework ships no implementation for
-it. See [Component bindings](02-wiring-components.md#component-bindings) for how such roles are
+it. See [Role bindings](02-wiring-components.md#role-bindings) for how such roles are
 declared and satisfied.
 
 Resources are set up before session hooks and torn down in reverse resource order.

@@ -28,7 +28,7 @@ import_components:
     checkpoint: runs/pretrain/checkpoints/last   # a checkpoint directory
     role: source                                 # that run's `model`
 
-component_bindings:
+role_bindings:
   model: fine_tuned_model
   backbone: module_part
   head: cifar_head
@@ -171,7 +171,7 @@ class TimmBackbone(ModuleResource):
 ```
 
 ```yaml
-component_bindings:
+role_bindings:
   backbone: timm_backbone
 fine_tuned_model:
   frozen: ["net.patch_embed.*", "net.blocks.[0-5].*"]

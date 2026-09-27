@@ -48,7 +48,7 @@ def _missing_role_message(
         f"required by {consumer_class.__name__} but has no implementation "
         f"registered. Implement a {category.__name__} subclass and register "
         f"it via @{decorator_name}('{resolved_name}', ...), or bind an "
-        "existing implementation via component_bindings: "
+        "existing implementation via role_bindings: "
         f"{{'{name}': '<implementation_name>'}}."
     )
 
@@ -576,7 +576,7 @@ def render_execution_graph(
         f"Max iterations: {max_iterations}",
     ]
     if binding_resolver:
-        lines.extend(["", "COMPONENT BINDINGS"])
+        lines.extend(["", "ROLE BINDINGS"])
         lines.extend(
             f"  {role_name} -> {implementation_name}"
             for role_name, implementation_name

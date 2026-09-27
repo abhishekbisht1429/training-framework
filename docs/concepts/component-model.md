@@ -49,8 +49,8 @@ point in the component's life -- in `__init__`, in `setup`, in a hook callback,
 in a running step.
 
 The session resolves each declared name **for the component that declared
-it**, honouring that component's own per-component wiring in
-`component_bindings`, and hands the results to the component *before* its
+it**, honouring the `dependencies_role_bindings` in that component's own entry, and
+hands the results to the component *before* its
 `__init__` runs. So construction, `setup` and every later call see the same
 instance, and a component wired to `dataset#b` is given `dataset#b` even when a
 session-wide binding points the role somewhere else.
@@ -208,7 +208,7 @@ component that understands them.
 When a dependency, wrapping target, configured root, binding target, or
 resource lookup cannot be satisfied, the error keeps its
 short headline and adds an indented explanation: which component required it,
-any `component_bindings` redirection, a `Reason:` and a `Fix:`. The reason
+any `role_bindings` redirection, a `Reason:` and a `Fix:`. The reason
 distinguishes:
 
 - **Not registered anywhere** — not in the shared registry, the session type's

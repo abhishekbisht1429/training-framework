@@ -3,6 +3,11 @@ from collections.abc import Mapping
 from copy import deepcopy
 
 from training_framework.components.builtin import Checkpointer
+from training_framework.components.config import (
+    component_entry,
+    find_component_entry,
+    with_component_entry,
+)
 from training_framework.engine.config import Configurator
 from training_framework.engine.supervision import (
     join_or_terminate,
@@ -185,11 +190,16 @@ class TrainingEngine:
         normalized_type = normalize_session_type(session_type)
         session_class = session_class_for_type(normalized_type)
 
-        if "ddp" in config and not isinstance(config["ddp"], Mapping):
+        # `ddp` may be listed at the top level or under `resources`; an
+        # empty value lists it with no settings.
+        ddp_config = component_entry(config, "ddp")
+        if ddp_config is None and find_component_entry(config, "ddp"):
+            ddp_config = {}
+        if ddp_config is not None and not isinstance(ddp_config, Mapping):
             raise ValueError("DDP configuration must contain ddp.world_size")
 
         topology = resolve_launch_topology(
-            config.get("ddp"),
+            ddp_config,
             overrides=self._topology_overrides,
             from_checkpoint=False,
         )
@@ -200,11 +210,10 @@ class TrainingEngine:
             topology = hosted.topology
             # Keep the parent's session agreeing with the workers when the
             # launch resolved a different topology than the file states.
-            config = dict(config)
-            config["ddp"] = {
-                **dict(config["ddp"]),
+            config = with_component_entry(config, "ddp", {
+                **dict(ddp_config or {}),
                 **topology.config_overlay(),
-            }
+            })
 
         try:
             sessions = [
@@ -215,7 +224,7 @@ class TrainingEngine:
                 for _ in range(world_size)
             ]
             for session in sessions:
-                session.check_component_bindings()
+                session.check_role_bindings()
             self._check_rank_component_plan(sessions[0], world_size)
 
             wrappers = [
@@ -389,3 +398,4 @@ class TrainingEngine:
         finally:
             self._close_resources()
         return False
+

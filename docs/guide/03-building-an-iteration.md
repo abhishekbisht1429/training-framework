@@ -99,40 +99,38 @@ sessions:
       device: cpu
       show_execution_graph: true
 
-    component_bindings:
+    role_bindings:
       model: classifier          # the roles data_manager and forward use
       dataset: toy_dataset
 
-    classifier: {}               # they have constructors, so they are listed
-    toy_dataset: {}
-    ddp: {world_size: 1, backend: gloo}
-
-    data_manager:
-      batch_size: 32
-      num_workers: 0
-      pin_memory: false
-
-    load_batch:
-      fields: [inputs, targets]  # the sample is a pair: name its two parts
-
-    forward:
-      args: [inputs]             # classifier(inputs) ...
-      outputs: logits            # ... stored as "logits"
-
-    compute#loss:
-      function: cross_entropy    # torch.nn.functional.cross_entropy
-      args: [logits, targets]
-      outputs: loss              # what backward reads
-
-    optimizer:
+    resources:
+      classifier:                # they have constructors, so they are listed
+      toy_dataset:
+      ddp: {world_size: 1, backend: gloo}
+      data_manager:
+        batch_size: 32
+        num_workers: 0
+        pin_memory: false
       optimizer:
-        name: AdamW
-        kwargs: {lr: 0.001}
+        optimizer:
+          name: AdamW
+          kwargs: {lr: 0.001}
+
+    steps:                       # listed in any order: dataflow orders them
+      load_batch:
+        fields: [inputs, targets]  # the sample is a pair: name its two parts
+      forward:
+        args: [inputs]             # classifier(inputs) ...
+        outputs: logits            # ... stored as "logits"
+      compute#loss:
+        function: cross_entropy    # torch.nn.functional.cross_entropy
+        args: [logits, targets]
+        outputs: loss              # what backward reads
 ```
 
 Reading it top to bottom:
 
-- **`component_bindings`** says which of your resources fills the `model` and
+- **`role_bindings`** says which of your resources fills the `model` and
   `dataset` roles. `ddp` is required because a training `forward` calls the
   model through the DDP wrapper, which synchronises gradients when you later
   run on several processes; with `world_size: 1` it is a single process.
@@ -241,11 +239,11 @@ wraps and gets gradients; the teacher is called directly, and `no_grad: true`
 keeps it out of the graph:
 
 ```yaml
-component_bindings:
+role_bindings:
   model: student_model
-  forward#teacher: {model: teacher_model}
 forward#student: {args: [inputs], outputs: student_logits}
-forward#teacher: {args: [inputs], outputs: teacher_logits, no_grad: true}
+forward#teacher: {dependencies_role_bindings: {model: teacher_model},
+                  args: [inputs], outputs: teacher_logits, no_grad: true}
 compute#loss: {function: my_project.losses.distill,
                args: [student_logits, teacher_logits, targets], outputs: loss}
 ```

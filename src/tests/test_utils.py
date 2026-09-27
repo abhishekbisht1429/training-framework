@@ -6,6 +6,7 @@ import contextlib
 import importlib
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -116,9 +117,27 @@ def build_session(
 
     config = make_config(tmp_path)
     config["session_config"]["show_execution_graph"] = False
-    if bindings is not None:
-        config["component_bindings"] = bindings
     config.update(components or {})
+    if bindings is not None:
+        # Session-wide bindings go to `role_bindings`; one component's go in
+        # its own entry, which the caller must configure.
+        flat = {
+            role: target for role, target in bindings.items()
+            if not isinstance(target, Mapping)
+        }
+        config["role_bindings"] = flat
+        for consumer, wiring in bindings.items():
+            if consumer in flat:
+                continue
+            if consumer not in config:
+                raise ValueError(
+                    f"build_session wires '{consumer}', which it does not "
+                    "configure"
+                )
+            config[consumer] = {
+                **config[consumer],
+                "dependencies_role_bindings": dict(wiring),
+            }
     if session_type == "training":
         return TrainingSession(config)
     if "trained_model" not in config and "trained_model" not in (bindings or {}):

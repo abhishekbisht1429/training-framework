@@ -106,7 +106,7 @@ def explain_missing_component(
         lines.append(f"Required by: {_consumer_label(consumer)}")
     if requested_name != resolved_name:
         lines.append(
-            f"Binding: component_bindings maps '{requested_name}' to "
+            f"Binding: role_bindings maps '{requested_name}' to "
             f"'{resolved_name}'."
         )
 
@@ -147,7 +147,7 @@ def explain_missing_component(
                 )
             fix = (
                 f"If {_article(expected)} {expected} is really needed, register "
-                "one under another name and bind it via component_bindings: "
+                "one under another name and bind it via role_bindings: "
                 f"{{'{requested_name}': '<implementation_name>'}}, or rename "
                 "the conflicting component."
             )
@@ -275,7 +275,7 @@ def explain_missing_component(
             if role is not None or role_scopes:
                 fix += (
                     ", or bind an existing implementation via "
-                    f"component_bindings: {{'{requested_name}': "
+                    f"role_bindings: {{'{requested_name}': "
                     "'<implementation_name>'}"
                 )
             fix += "."

@@ -33,10 +33,10 @@ which registers all built-ins. Their classes are also importable from
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
 
-`dataset` and `model` are declared roles (see [Component
-bindings](../guide/02-wiring-components.md#component-bindings)) with no default
+`dataset` and `model` are declared roles (see [Role
+bindings](../guide/02-wiring-components.md#role-bindings)) with no default
 implementation; register a `Resource` under that name, or bind one via
-`component_bindings`, before activating `data_manager` or `ddp`. Optional
+`role_bindings`, before activating `data_manager` or `ddp`. Optional
 torchvision [image datasets](datasets.md) can fill the `dataset` role.
 
 The training defaults are equivalent to:
@@ -239,7 +239,7 @@ separate from the training one. It does not use `ddp`, does not shuffle or
 repeat, and keeps no resumable state: each sample is delivered exactly once,
 in dataset order. `dataset` is also a declared role in the analysis scope;
 register an analysis-scoped or shared `Resource` under that name, or bind one
-with `component_bindings`.
+with `role_bindings`.
 
 ```yaml
 data_manager:

@@ -120,12 +120,12 @@ patch_transformer:
   class_token: true
 ```
 
-Bind the model and each role through `component_bindings`, and configure the
+Bind the model and each role through `role_bindings`, and configure the
 blocks by name. This example reproduces an image encoder whose output is
 pooled by a query built from an object crop and its 2D location:
 
 ```yaml
-component_bindings:
+role_bindings:
   model: pooled_patch_transformer
   patch_embedding: conv_patch_embedding
   positional_embedding: learned_positional_embedding_2d

@@ -105,8 +105,10 @@ The model is the `model` resource or, for one instance, whatever its
 names:
 
 ```yaml
-component_bindings:
-  forward#teacher: {model: teacher_model}
+forward#teacher:
+  dependencies_role_bindings: {model: teacher_model}
+  args: [inputs]
+  outputs: teacher_logits
 ```
 
 When the model is the one `ddp` wraps, `forward` calls it **through the DDP

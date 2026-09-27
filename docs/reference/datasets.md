@@ -44,7 +44,7 @@ the error says which import is missing.
 ## Configuration
 
 ```yaml
-component_bindings:
+role_bindings:
   dataset: cifar10#train
 
 cifar10#train:

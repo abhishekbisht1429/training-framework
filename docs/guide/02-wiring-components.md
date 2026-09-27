@@ -44,13 +44,13 @@ for a component added after the session was built.
 `logger`. Both special entries and component dependencies support component
 bindings.
 
-## Component bindings
+## Role bindings
 
-Use the session-level `component_bindings` mapping to bind a component role
+Use the session-level `role_bindings` mapping to bind a component role
 used by defaults and dependency decorators to a registered implementation:
 
 ```yaml
-component_bindings:
+role_bindings:
   optimizer: my_custom_optimizer
 
 my_custom_optimizer:
@@ -65,7 +65,7 @@ Without explicit configuration, the role may still be activated by a dependency
 or built-in default when normal constructor rules permit it. Dependencies such
 as `@requires_resource("optimizer")` resolve to `my_custom_optimizer`. The
 registered name is used in component state and shown in the execution graph,
-which also includes a `COMPONENT BINDINGS` section.
+which also includes a `ROLE BINDINGS` section.
 
 Bindings are session-scoped, and two roles may not bind to the same target. A
 target may name a particular *instance* of a component (see
@@ -78,10 +78,15 @@ through the same mechanism. `ddp.rank_zero_components` may contain either role
 or implementation names; a bound DDP resource must support the same `config`
 and `rank` construction interface as the built-in resource.
 
-The former `aliases` key is deprecated but temporarily accepted with the same
-role-to-implementation direction. It cannot be combined with
-`component_bindings`, and configuration still belongs under the implementation
-name.
+The top-level `role_bindings` holds session-wide bindings only; wiring for
+one component goes in that component's own `dependencies_role_bindings`
+([below](#naming-the-instance-a-component-should-use)).
+
+`component_bindings` and the older `aliases` are deprecated names for the
+top-level entry. Both are still accepted, with a `DeprecationWarning` when a
+session is built from them (a checkpoint that stored one restores without
+it), and `component_bindings` keeps its nested per-component form. Only one of
+the three may be configured.
 
 ## Configuring a component more than once
 
@@ -127,30 +132,56 @@ make an already-wired consumer ambiguous or move it to another instance.
 
 ### Naming the instance a component should use
 
-Wiring for one consumer is a nested entry in `component_bindings`, keyed by the
-consumer's instance name:
+Wiring for one consumer is a `dependencies_role_bindings` entry inside that
+consumer's own configuration:
 
 ```yaml
-component_bindings:
-  evaluator:
-    data_manager: data_manager#validation
-
 data_manager#train: {batch_size: 64}
 data_manager#validation: {batch_size: 256}
-evaluator: {}
+evaluator:
+  dependencies_role_bindings:
+    data_manager: data_manager#validation
+  every: 100
 ```
 
 `evaluator` is built with `data_manager#validation`; every other consumer of
 `data_manager` resolves on its own. A target that names an instance must be
 configured: wiring to `data_manager#valdation` is an error naming the
 configured instances, never a fresh instance and never a sibling. The
-execution graph lists this wiring under `COMPONENT BINDINGS` as
+execution graph lists this wiring under `ROLE BINDINGS` as
 `evaluator: data_manager -> data_manager#validation`, and each `requires:`
-annotation names the instance that component is actually given. The wiring lives here rather than inside
-`evaluator`'s own configuration because a component's configuration is passed
-to its constructor unchanged, and because the session has to know how things
-are wired before anything is constructed. The flat
-`role: implementation` form is unchanged and can be mixed with it freely.
+annotation names the instance that component is actually given.
+
+The session reads the wiring out of the entry before anything is constructed,
+and the constructor is given the rest: `evaluator` above is built with
+`{every: 100}`, and a `config_schema` never sees `dependencies_role_bindings`. The
+configuration itself keeps it as written, so a checkpoint restores the same
+wiring. For that component its own wiring wins over a session-wide
+`role_bindings` entry; every other component is unaffected. An instance entry
+(`evaluator#fast: {dependencies_role_bindings: ...}`) wires that instance alone.
+A component's `dependencies_role_bindings` cannot be changed by
+`--extend-session`.
+
+A component that is usually only pulled in as another's dependency -- such
+as `optimizer_step`, which `optimizer` activates -- is wired the same way,
+with an entry that holds only its `dependencies_role_bindings`:
+
+```yaml
+optimizer_step:
+  dependencies_role_bindings: {clip_gradients: scale_gradients}
+```
+
+Such a component can be activated without an entry only because it needs no
+settings, so building it with `{}` changes nothing about how it is built. The
+entry does make it a configured root: it stays active even if nothing needs
+it any more, and it is built in the order the entries are listed
+(prerequisites first). That order matters only when a constructor draws
+random numbers, such as one that creates layers; then listing it can change
+the seeded initial values of components built after it.
+
+The deprecated nested form of the top-level entry
+(`component_bindings: {evaluator: {data_manager: data_manager#validation}}`)
+is still accepted; wiring one component in both places is an error.
 
 The consumer must be a component the session holds: wiring for
 `evaluater`, or for a component nothing activates, would do nothing, so it is
@@ -158,7 +189,7 @@ an error that lists the instances of that implementation the session does
 hold. A consumer with an instance suffix is checked before anything is built;
 one without, when the session is first entered (or by the engine, before it
 starts the ranks), so a component added with `activate_component` in the
-meantime counts. `session.check_component_bindings()` runs the check earlier.
+meantime counts. `session.check_role_bindings()` runs the check earlier.
 A session restored from a checkpoint is not checked again -- including one
 saved before it was ever entered, which therefore skips the check.
 
@@ -226,7 +257,7 @@ Declaring a role is optional — `@requires_resource`, `@requires_hook`,
 declared — but a declared role improves the error raised when nothing
 satisfies it, naming the expected category and description and explaining
 how to implement it (`@resource('name', ...)`, etc.) or bind an existing
-implementation (`component_bindings: {name: implementation}`). Redeclaring a
+implementation (`role_bindings: {name: implementation}`). Redeclaring a
 name without `overwrite=True` raises `ValueError`, matching
 `@resource`/`@hook`/`@step`. `role_registry(session_type=None)` returns the
 roles declared and visible to a session type, mirroring `component_registry()`.
@@ -324,8 +355,9 @@ ordering edge -- so it may require the component that activates it, as
 `optimizer_step` requires `optimizer`, without forming a cycle. Two components
 may activate each other.
 
-The companion name is resolved like a dependency, so per-consumer
-`component_bindings` redirect it (`optimizer: {optimizer_step: my_step}`).
+The companion name is resolved like a dependency, so the activating
+component's own `dependencies_role_bindings` redirect it
+(`optimizer: {dependencies_role_bindings: {optimizer_step: my_step}, ...}`).
 It is kept on every rank that keeps the component activating it. A session
 that holds a component without its companion -- for instance one registered by
 hand -- is rejected when it orders its components, and the execution graph

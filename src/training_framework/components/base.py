@@ -335,7 +335,7 @@ class Component(ABC, metaclass=ComponentMeta):
         """Return a prerequisite resource declared with ``@requires_resource``.
 
         Valid at any point in a component's life. Prerequisites are resolved
-        for *this* consumer -- honouring its own ``component_bindings`` wiring
+        for *this* consumer -- honouring its own ``role_bindings`` wiring
         -- and injected before ``__init__`` runs, so construction, ``setup``
         and a running step all see the same instance.
 

@@ -166,7 +166,7 @@ def test_binding_is_named_when_the_bound_implementation_is_wrong(tmp_path):
         ),
     )
 
-    assert "Binding: component_bindings maps 'diag_role' to 'diag_bound_hook'" in message
+    assert "Binding: role_bindings maps 'diag_role' to 'diag_bound_hook'" in message
     assert "registered in the shared registry as a Hook" in message
 
 
@@ -224,7 +224,7 @@ def test_role_declared_only_for_another_session_type(tmp_path):
         "'diag_training_role' is declared as a role only for session type(s) "
         "'training'"
     ) in message
-    assert "component_bindings: {'diag_training_role'" in message
+    assert "role_bindings: {'diag_training_role'" in message
 
 
 def test_loading_a_registered_but_inactive_component(tmp_path):

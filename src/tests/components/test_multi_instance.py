@@ -151,7 +151,7 @@ def test_an_undecidable_dependency_is_rejected(tmp_path):
 
     message = str(error.value)
     assert "multi_dep#a" in message and "multi_dep#b" in message
-    assert "component_bindings" in message
+    assert "role_bindings" in message
 
 
 def test_ambiguity_is_reported_whatever_the_configuration_order(tmp_path):

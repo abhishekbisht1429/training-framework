@@ -119,8 +119,9 @@ The engine monitors workers while leaving the context.
 | `device` | Active `torch.device` |
 | `session_context` | Session-lifetime shared dictionary |
 | `send_heartbeat(stage)` | Mark worker progress with a stage label; call periodically inside long-running components (no-op outside a spawned worker) |
-| `component_bindings` | Copy of the session's role-to-implementation bindings |
-| `component_aliases` | Deprecated compatibility property for `component_bindings` |
+| `role_bindings` | Copy of the session's session-wide role-to-implementation bindings |
+| `component_bindings` | Deprecated name for `role_bindings` |
+| `component_aliases` | Deprecated name for `role_bindings` |
 | `resolve_component_name(name)` | Resolve an expected or actual component name to its registered name |
 | `get_all_resources()` | Return configured resources |
 | `get_all_hooks()` | Return configured hooks |
@@ -196,7 +197,9 @@ documented in [`ModuleResource`](../concepts/module-resource.md#members).
 | `@rank_zero_only` | Declare that a distributed session builds this component on rank 0 only |
 | `@singleton` | Declare that a session may hold only one instance of this component |
 | `component_registry(session_type)` | Return shared components overlaid by the matching scoped registry |
-| `topological_sort_of_components(..., session_type=...)` | Validate and order the selected session type's component graph |
+| `topological_sort_of_components(role_bindings, *, components, session_type)` | Validate and order the selected session type's component graph |
+| `format_execution_graph(*, ..., role_bindings, session_type)` | Render a session's components as its execution graph |
+| `RoleBindings(bindings, *, session_type)` | Role bindings as a session holds them: `role: implementation`, and `consumer: {role: target}` for one component. `ComponentBindings` is its deprecated name; the `component_bindings=` and `aliases=` keywords of the functions above and of `SessionComponents` are deprecated names for `role_bindings=` |
 | `@register_session_type(name)` | Register a concrete Session subclass for engine and checkpoint dispatch |
 
 ---

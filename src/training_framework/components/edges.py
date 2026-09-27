@@ -198,12 +198,9 @@ def resolve_component_name(
     raise ComponentDependencyError(with_explanation(
         f"Component '{name}' resolves to '{resolved}', which {len(candidates)} "
         f"active components implement: {candidates}.",
-        "Fix: name the one that is meant with per-component wiring, "
-        "component_bindings: {'"
-        f"{consumer if consumer is not None else '<component>'}"
-        "': {'"
-        f"{name}': '{candidates[0]}'"
-        "}}.",
+        "Fix: name the one that is meant in the consumer's own entry, "
+        f"{consumer if consumer is not None else '<component>'}: "
+        f"{{dependencies_role_bindings: {{{name}: {candidates[0]}}}}}.",
     ))
 
 

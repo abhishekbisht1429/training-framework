@@ -18,9 +18,11 @@ from training_framework.components import (
     Step,
     format_execution_graph,
 )
-from training_framework.components.config import component_bindings_from_config
 from training_framework.session.imports import IMPORTS_STATE_KEY, stored_bindings
-from training_framework.session.components import SessionComponents
+from training_framework.session.components import (
+    SessionComponents,
+    read_session_config,
+)
 from training_framework.session.config import (
     SessionConfig,
     SessionPhase,
@@ -99,33 +101,29 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         self._session_context: dict[str, Any] = {}
 
         self._init_transient_infra()
-        self._set_component_collections()
+        # Read once: a legacy bindings key warns here, not again on registering.
+        config_view = read_session_config(
+            self._config,
+            session_type=self._session_type,
+            warn_legacy=True,
+        )
+        self._components = SessionComponents(
+            role_bindings=config_view.role_bindings,
+            dependency_bindings=config_view.dependency_bindings,
+            session_type=self._session_type,
+        )
 
         self._phase = SessionPhase.NEW
-        self._register_components()
+        self._components.register_from_config(
+            self._config,
+            default_configs=self._default_component_configs(),
+            view=config_view,
+        )
 
     @classmethod
     @abstractmethod
     def _default_component_configs(cls) -> Mapping[str, Mapping]:
         raise NotImplementedError
-
-    def _set_component_collections(
-            self,
-            *,
-            component_bindings: Mapping[str, str] | None = None,
-    ) -> None:
-        if component_bindings is None:
-            component_bindings = component_bindings_from_config(self._config)
-        self._components = SessionComponents(
-            component_bindings=component_bindings,
-            session_type=self._session_type,
-        )
-
-    def _register_components(self) -> None:
-        self._components.register_from_config(
-            self._config,
-            default_configs=self._default_component_configs(),
-        )
 
     def _get_session_type_state(self) -> dict[str, Any]:
         return {}
@@ -221,8 +219,10 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         )
 
         self._init_transient_infra()
+        bindings = stored_bindings(state)
         restored_components = SessionComponents(
-            component_bindings=stored_bindings(state),
+            role_bindings=bindings.roles,
+            dependency_bindings=bindings.dependencies,
             session_type=self._session_type,
             imports=state.get(IMPORTS_STATE_KEY),
         )
@@ -362,14 +362,24 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     @property
     def component_aliases(self) -> dict[str, str]:
         warnings.warn(
-            "Session.component_aliases is deprecated; use component_bindings",
+            "Session.component_aliases is deprecated; use role_bindings",
             DeprecationWarning,
             stacklevel=2,
         )
-        return self.component_bindings
+        return self.role_bindings
 
     @property
     def component_bindings(self) -> dict[str, str]:
+        warnings.warn(
+            "Session.component_bindings is deprecated; use role_bindings",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.role_bindings
+
+    @property
+    def role_bindings(self) -> dict[str, str]:
+        """The session-wide role bindings (role -> implementation)."""
         return self._components.bindings
 
     def resolve_component_name(self, name: str) -> str:
@@ -417,7 +427,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             hooks=self.get_all_hooks(),
             steps=self.get_all_steps(),
             max_iterations=self.session_config.max_iterations,
-            component_bindings=self._components.component_bindings,
+            role_bindings=self._components.role_bindings,
             session_type=self._session_type,
         )
 
@@ -487,16 +497,16 @@ class Session(Stateful, metaclass=CaptureInitMeta):
     def _teardown_session_hooks(self, *, after_exception: bool = False) -> None:
         teardown_session_hooks(self, after_exception=after_exception)
 
-    def check_component_bindings(self) -> None:
+    def check_role_bindings(self) -> None:
         """Refuse a per-consumer binding for a component this session does
         not hold. Runs once, on a session built from configuration; entering
         the session runs it, so call it only to check earlier."""
-        self._components.check_component_bindings()
+        self._components.check_role_bindings()
 
     @context_entry
     def __enter__(self):
         self._raise_if_finished()
-        self.check_component_bindings()
+        self.check_role_bindings()
 
         ddp_resource = (
             self._components.get_resource("ddp")

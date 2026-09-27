@@ -24,7 +24,7 @@ import_components:
     resource: model                            # a resource of that run
     role: backbone                             # bind this run's `backbone` to it
 
-component_bindings:
+role_bindings:
   model: fine_tuned_model
   head: cifar_head
 ```
@@ -39,9 +39,9 @@ pretrained weights, each checkpointing its own.
 | Key | Default | Meaning |
 |---|---|---|
 | `checkpoint` | required | The source run's checkpoint directory |
-| `resource` | `model` | Which resource of that run to import, named as that run named it: an instance, a role of its `component_bindings`, a name one of its components asked for, or the only instance of an implementation |
+| `resource` | `model` | Which resource of that run to import, named as that run named it: an instance, a role of its `role_bindings`, a name one of its components asked for, or the only instance of an implementation |
 | `role` | none | A role of this session to bind to the imported resource; saved with the session state, so a resume and every rank resolve it too |
-| `bind` | `{}` | Source prerequisite -> this session's component (below) |
+| `overwritten_dependencies` | `{}` | A dependency the source run gave its components -> this session's component (below) |
 | `suffix` | none | Rename the imported instances (below) |
 
 `import_components` cannot be changed by a session extension, and neither
@@ -53,7 +53,8 @@ Imported instances keep the names they had in the source run. A name this
 session already configures, or that another import also brings in, is an
 error naming both. Two ways out:
 
-- `bind` it (below), when this session's component should serve instead;
+- overwrite it (`overwritten_dependencies`, below), when this session's
+  component should serve instead;
 - `suffix: s` renames every imported instance: `impl` becomes `impl#s`, and
   `impl#t` becomes `impl#s_t`. This is what two imports sharing an
   implementation need -- a teacher and a student, say -- since both names
@@ -64,7 +65,8 @@ error naming both. Two ways out:
 An imported component fills a dependency of this session's own components
 **only when a binding names it**: the import's `role`, or -- for an import
 with a `suffix` -- a binding naming the suffixed instance
-(`{my_model: {encoder: conv_patch_embedding#pre}}`). Resolution never hands
+(`my_model: {dependencies_role_bindings: {encoder: conv_patch_embedding#pre}}`).
+Resolution never hands
 one over by itself -- not by exact name, and not as the only instance of an
 implementation -- so importing never quietly rewires the session's own
 components. This also holds for a component activated later with
@@ -76,14 +78,14 @@ refused as ambiguous: without the import it would build a new
 `conv_patch_embedding`, so it cannot be told which is meant. Use the import's
 `role`, or give the import a `suffix` and bind the suffixed name.
 
-## `bind`: this session's component instead of the source's
+## `overwritten_dependencies`: this session's component instead of the source's
 
 ```yaml
 import_components:
   pretrained:
     checkpoint: runs/pretrain/checkpoints/last
     role: backbone
-    bind: {dataset: dataset}
+    overwritten_dependencies: {dataset: dataset}
 ```
 
 A key names a prerequisite of the source run (resolved there, like
@@ -92,8 +94,7 @@ dependency would be (a role, or the only configured instance of an
 implementation; several are an error asking to name one). An instance an
 earlier-listed import brought in is taken only when named exactly by its
 suffixed name -- never as the only instance there is, and an unsuffixed one
-is refused as ambiguous. The same holds for a per-consumer binding of an
-imported component. A `bind` target may also be the `role` of an import
+is refused as ambiguous. A target may also be the `role` of an import
 listed earlier (it names that import's instance, under the same rule); the
 role of a later import, or the import's own, is an error. The import stops
 there: the source's dataset is never built, and whatever was wired to it is
@@ -101,8 +102,8 @@ given this session's `dataset`. This is also how a `@singleton` such as `ddp`
 is handled -- it is never imported -- and how to avoid rebuilding a dataset
 just to count classes.
 
-A `bind` key the import never reaches is an error, so a misspelt one cannot
-silently import the source's component after all. What a `bind` target needs
+A key the import never reaches is an error, so a misspelt one cannot
+silently import the source's component after all. What a target needs
 cannot be one of this import's components, or a later import's: it is built
 first. For a later import's, the error says to list that import first.
 
@@ -110,11 +111,11 @@ first. For a later import's, the error says to list that import first.
 
 When the session is built, before anything is constructed:
 
-- a `bind` key the import never reaches;
+- an `overwritten_dependencies` key the import never reaches;
 - a hook or step: only resources are imported;
 - a `@singleton` component, and one that declares `@activates` companions
   (those carry out the source run's behaviour and would be activated anew
-  here); `bind` what needs it instead;
+  here); overwrite what needs it instead;
 - a name clash (above);
 - a single-file checkpoint written before 0.5.0 (convert it with
   `Checkpointer.save_checkpoint(Checkpointer.load_checkpoint(path), new_path)`).
@@ -125,16 +126,20 @@ current version cannot migrate (`migrate_state`, `migrate_init_args`).
 
 And, for the wiring:
 
-- a prerequisite a class declares now that the source run never wired it to
-  must be wired by a per-consumer binding --
-  `{imp_block: {tokenizer: my_tokenizer}}` -- or the import is refused;
-- a per-consumer binding for an imported component may only do that: one
-  for a name the source run already wired is refused (use `bind`), as is one
-  for a name the class does not declare.
+- an imported component is given exactly the wiring its checkpoint recorded.
+  A prerequisite its class declares now that the source run never wired is
+  refused: the class has changed since the checkpoint was saved, and an import
+  restores only what was recorded -- import from a checkpoint saved with this
+  class;
+- this session's bindings cannot wire an imported component (a legacy nested
+  `component_bindings` entry, or `role_bindings=` in Python, naming it): to
+  give it one of this session's components instead of one the source run gave
+  it, use `overwritten_dependencies`.
 
 ## Instance names inside a saved state
 
-When `bind` or `suffix` changes an instance's name, every saved state is
+When `overwritten_dependencies` or `suffix` changes an instance's name, every
+saved state is
 passed to its class's `Stateful.rename_instances(state, names)` after it is
 migrated, with `names` mapping the source's instance names to this session's.
 `ModuleResource` renames the prerequisites its state records (`linked`); the
@@ -146,7 +151,7 @@ naming another instance -- are not renamed.
 
 Building the imported components draws from this session's random state
 before their saved weights replace what was drawn, and so does building what
-a `bind` points at, which happens first. Every later draw -- the
+`overwritten_dependencies` points at, which happens first. Every later draw -- the
 initialisation of a new head, say -- shifts with it. A run is still
 deterministic, but it differs from the same configuration without the
 import.

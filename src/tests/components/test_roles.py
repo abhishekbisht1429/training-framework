@@ -122,7 +122,7 @@ def test_declared_role_without_implementation_raises_descriptive_error():
     assert "needs an implementation" in message
     assert "Consumer" in message
     assert "@resource('undone_role'" in message
-    assert "component_bindings" in message
+    assert "role_bindings" in message
 
 
 def test_undeclared_missing_dependency_still_uses_generic_message():

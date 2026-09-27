@@ -16,6 +16,11 @@ from training_framework.engine.topology import (
     pin_process_device,
 )
 from training_framework.session import Session, TrainingSession
+from training_framework.components.config import (
+    component_entry,
+    find_component_entry,
+    with_component_entry,
+)
 from training_framework.session.imports import stored_bindings
 from training_framework.session.components import SessionComponents
 from training_framework.session.config import normalize_session_type
@@ -51,8 +56,10 @@ def prepare_worker_state(
 
     _, session_settings, _ = configuration_from_state(session_state)
     import_all_modules(session_settings["components_package"])
+    bindings = stored_bindings(session_state)
     components = SessionComponents(
-        component_bindings=stored_bindings(session_state),
+        role_bindings=bindings.roles,
+        dependency_bindings=bindings.dependencies,
         session_type=normalize_session_type(session_state["session_type"]),
     )
     ddp_name = components.resolve_name("ddp")
@@ -115,15 +122,22 @@ def _topology_init_args(init_args, rank: int, topology) -> dict:
 
 
 def _topology_config(config, ddp_name: str, topology) -> Mapping:
-    if not isinstance(config, Mapping) or ddp_name not in config:
+    # `ddp` may be listed at the top level or under `resources`; an empty
+    # value lists it with no settings.
+    if not isinstance(config, Mapping):
         return config
-    ddp_config = config[ddp_name]
+    if find_component_entry(config, ddp_name) is None:
+        return config
+    ddp_config = component_entry(config, ddp_name)
+    if ddp_config is None:
+        ddp_config = {}
     if not isinstance(ddp_config, Mapping):
         return config
-
-    patched = dict(config)
-    patched[ddp_name] = {**dict(ddp_config), **topology.config_overlay()}
-    return patched
+    return with_component_entry(
+        config,
+        ddp_name,
+        {**dict(ddp_config), **topology.config_overlay()},
+    )
 
 
 def _ddp_config(init_args) -> dict:

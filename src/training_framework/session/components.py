@@ -33,8 +33,8 @@ from training_framework.components.edges import (
     writers_of,
 )
 from training_framework.components.config import (
-    reject_legacy_components_entry,
-    reserved_config_names,
+    SessionConfigView,
+    parse_session_config,
 )
 from training_framework.components.diagnostics import (
     explain_missing_component,
@@ -46,8 +46,8 @@ from training_framework.components.naming import (
     parse_instance_name,
 )
 from training_framework.components.registry import (
-    ComponentBindings,
-    _coalesce_component_bindings,
+    RoleBindings,
+    _coalesce_role_bindings,
     _component_type,
     _missing_role_message,
     component_registry,
@@ -55,6 +55,61 @@ from training_framework.components.registry import (
     topological_sort_of_components,
 )
 from training_framework.session.config import TRAINING_SESSION_TYPE, normalize_session_type
+
+
+_GROUP_KINDS = {"resources": Resource, "hooks": Hook, "steps": Step}
+
+
+def read_session_config(
+        config: Mapping,
+        *,
+        session_type: str | None,
+        warn_legacy: bool = False,
+) -> SessionConfigView:
+    """Read a session configuration and check what needs the registry.
+
+    The one way session code reads a configuration: `parse_session_config`
+    reads the layout, and this adds the checks that need to know which
+    components exist -- a component listed under a group of another kind is
+    refused. A build and an extension read alike, so neither can accept a
+    configuration the other would refuse.
+    """
+    view = parse_session_config(
+        config, session_type=session_type, warn_legacy=warn_legacy,
+    )
+    registry = component_registry(normalize_session_type(session_type))
+    for name, entry in view.components.items():
+        if entry.group is not None:
+            _check_component_group(registry, name, entry.group)
+    return view
+
+
+def _check_component_group(
+        registry: Mapping[str, type[Component]],
+        name: str,
+        group: str,
+) -> None:
+    """Refuse a component listed under a group of another kind.
+
+    A configured name is an implementation or one of its instances -- a
+    bound role cannot be configured -- so the registry answers directly. An
+    unregistered name is left to the diagnostics activation gives.
+    """
+    component_class = registry.get(implementation_of(name))
+    if component_class is None:
+        return
+    expected = _GROUP_KINDS[group]
+    if issubclass(component_class, expected):
+        return
+    actual = _component_type(component_class)
+    right_group = next(
+        key for key, kind in _GROUP_KINDS.items() if kind is actual
+    )
+    raise ValueError(
+        f"'{name}' is listed under '{group}', but it is a "
+        f"{actual.__name__}, not a {expected.__name__}. List it under "
+        f"'{right_group}'."
+    )
 
 
 @dataclass(frozen=True)
@@ -101,13 +156,18 @@ class SessionComponents:
             resources: dict[str, Resource] | None = None,
             steps: dict[str, Step] | None = None,
             hooks: dict[str, Hook] | None = None,
-            component_bindings: Mapping[str, str] | None = None,
+            role_bindings: Mapping[str, Any] | None = None,
             session_type: str = TRAINING_SESSION_TYPE,
-            aliases: Mapping[str, str] | None = None,
+            dependency_bindings: Mapping[str, Mapping[str, Any]] | None = None,
+            component_bindings: Mapping[str, Any] | None = None,
+            aliases: Mapping[str, Any] | None = None,
             imports: Mapping[str, Any] | None = None,
     ):
         """`imports` is a stored session state's record of its imports; its
-        role bindings must already be in `component_bindings`."""
+        role bindings must already be in `role_bindings`.
+
+        `component_bindings` and `aliases` are deprecated names for
+        `role_bindings`."""
         self.session_type = normalize_session_type(session_type)
         imports = imports or {}
         # The role bindings this session's imports added, saved with the
@@ -127,19 +187,26 @@ class SessionComponents:
         self._merge_components(resources, Resource)
         self._merge_components(hooks, Hook)
         self._merge_components(steps, Step)
-        component_bindings = _coalesce_component_bindings(
+        role_bindings = _coalesce_role_bindings(
+            role_bindings,
             component_bindings,
             aliases,
         )
-        self.component_bindings = ComponentBindings(
-            component_bindings,
+        self.role_bindings = RoleBindings(
+            role_bindings,
+            dependency_bindings=dependency_bindings,
             session_type=self.session_type,
         )
 
     def __setstate__(self, state) -> None:
-        legacy_bindings = state.pop("aliases", None)
-        if "component_bindings" not in state and legacy_bindings is not None:
-            state["component_bindings"] = legacy_bindings
+        # Pickled under the attribute's former names.
+        legacy_bindings = state.pop("component_bindings", None)
+        legacy_aliases = state.pop("aliases", None)
+        if "role_bindings" not in state:
+            state["role_bindings"] = (
+                legacy_bindings if legacy_bindings is not None
+                else legacy_aliases
+            )
         state.pop("_links_dirty", None)
         state.setdefault("import_bindings", {})
         state.setdefault("imported", {})
@@ -222,7 +289,6 @@ class SessionComponents:
             partial: bool = False,
             wired_to: Iterable[str] | None = None,
             names: Mapping[str, str] | None = None,
-            wiring: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         """Rebuild the components a state holds and restore their state.
 
@@ -241,12 +307,11 @@ class SessionComponents:
         `wired_to`, for an import: the state is another run's components,
         restored *into* this session next to the components it already
         holds, and may be wired to the ones named here as well as to each
-        other. A prerequisite a class declares that the stored wiring lacks
-        must then be wired by a per-consumer binding of this session, never
-        resolved on its own; `wiring` (instance -> asked name -> target) is
-        that binding, already resolved, and is used as it is. `names` (source instance -> this session's
-        name) is handed to each component's `rename_instances`, after its
-        state is migrated.
+        other. Each is given exactly the wiring the state recorded: a
+        prerequisite its class declares that the recorded wiring lacks is
+        refused, as is a binding of this session aimed at it. `names` (source
+        instance -> this session's name) is handed to each component's
+        `rename_instances`, after its state is migrated.
         """
         # Components are rebuilt into a fresh mapping -- or, for an import,
         # one that starts with this session's components -- and a component
@@ -273,7 +338,6 @@ class SessionComponents:
                 partial=partial,
                 wired_to=None if wired_to is None else frozenset(wired_to),
                 names=names or {},
-                wiring=wiring or {},
             )
         except BaseException:
             self.components = previous_components
@@ -293,7 +357,6 @@ class SessionComponents:
             partial: bool = False,
             wired_to: frozenset[str] | None = None,
             names: Mapping[str, str] | None = None,
-            wiring: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         # A checkpoint is not a trusted plan: it may predate a component being
         # marked @singleton, or have been edited. Checked before anything is
@@ -307,7 +370,7 @@ class SessionComponents:
         # is reported at once rather than the first one only.
         plans = self._plan_restore(
             component_states, on_mismatch,
-            wired_to=wired_to, names=names, wiring=wiring,
+            wired_to=wired_to, names=names,
         )
 
         # Pass 1: rebuild every component from its constructor arguments,
@@ -401,7 +464,6 @@ class SessionComponents:
             *,
             wired_to: frozenset[str] | None = None,
             names: Mapping[str, str] | None = None,
-            wiring: Mapping[str, Mapping[str, str]] | None = None,
     ) -> dict[str, "_RestorePlan"]:
         """Check every checkpointed component and decide how to rebuild it.
 
@@ -447,10 +509,7 @@ class SessionComponents:
                     component_class,
                     name,
                     active=active,
-                    recorded={
-                        **(component_info.get("dependencies") or {}),
-                        **(wiring or {}).get(name, {}),
-                    },
+                    recorded=component_info.get("dependencies") or {},
                 )
                 for asked, target in dependencies.items():
                     if target not in active:
@@ -544,47 +603,34 @@ class SessionComponents:
             component_class: type[Component],
             stored_wiring: Mapping[str, str],
     ) -> None:
-        """Refuse an imported component's prerequisite that nothing wires.
+        """Refuse wiring an imported component other than as it was recorded.
 
-        A prerequisite its class declares now but the run it comes from never
-        wired it to would otherwise be resolved in this session on its own:
-        an unannounced rewiring. It must be named by a per-consumer binding.
+        An import restores what its checkpoint recorded, and the framework
+        does not try to absorb code changes made since: a prerequisite the
+        class declares now but the source run never wired is refused, not
+        resolved here, and so is a binding of this session aimed at an
+        imported component. `overwritten_dependencies` is the one change an
+        import allows.
         """
-        wiring = self.component_bindings.instance_bindings.get(name, {})
-        declared = {
-            edge.asked for edge in declared_edges(component_class)
-            if edge.injects
-        }
-        # Restore follows the stored wiring, so a binding for a name it holds
-        # would be ignored; and one for a name the class never asks for does
-        # nothing. Both are refused rather than silently dropped.
-        stored = sorted(set(wiring) & set(stored_wiring))
-        if stored:
+        if name in self.role_bindings.instance_bindings:
             raise ComponentDependencyError(
-                f"component_bindings wires {stored} of imported component "
-                f"'{name}', which the run it comes from already wired, and "
-                "the import keeps that wiring. To give it this session's "
-                "component instead, use the import's `bind`."
-            )
-        undeclared = sorted(set(wiring) - declared)
-        if undeclared:
-            raise ComponentDependencyError(
-                f"component_bindings wires {undeclared} of imported component "
-                f"'{name}', which {component_class.__name__} does not declare; "
-                f"it declares {sorted(declared)}."
+                f"'{name}' is imported, and an imported component keeps the "
+                "wiring its checkpoint recorded, so this session's bindings "
+                f"cannot wire it. To give it one of this session's components "
+                "instead of one the source run gave it, name that dependency "
+                "in the import's `overwritten_dependencies`."
             )
         unwired = [
             edge.asked for edge in declared_edges(component_class)
-            if edge.injects
-            and edge.asked not in stored_wiring
-            and edge.asked not in wiring
+            if edge.injects and edge.asked not in stored_wiring
         ]
         if unwired:
             raise ComponentDependencyError(
                 f"Imported component '{name}' declares {unwired}, which the "
-                "run it comes from never wired it to, so the import cannot "
-                "know what to give it. Wire it explicitly: component_bindings: "
-                f"{{'{name}': {{'{unwired[0]}': '<instance>'}}}}."
+                "run it comes from never wired it to: "
+                f"{component_class.__name__} has changed since that "
+                "checkpoint was saved, and an import restores only what was "
+                "recorded. Import from a checkpoint saved with this class."
             )
 
     def _restorable_class(
@@ -918,22 +964,22 @@ class SessionComponents:
             config: Mapping,
             *,
             default_configs: Mapping[str, Mapping] | None = None,
+            view: SessionConfigView | None = None,
     ) -> None:
-        reject_legacy_components_entry(config)
-        self.component_bindings.validate_config(config)
-        reserved_names = reserved_config_names(self.session_type)
+        """Activate what `config` configures.
+
+        `view` is `config` already read by `read_session_config`; its
+        bindings must be the ones this instance was created with.
+        """
+        if view is None:
+            view = read_session_config(config, session_type=self.session_type)
+        self.role_bindings.validate_config(view.components)
 
         component_configs: dict[str, dict] = {}
         configured_roots: list[str] = []
-        for name, component_config in config.items():
-            if name in reserved_names:
-                continue
-            if not isinstance(component_config, Mapping):
-                raise ValueError(
-                    f"The value corresponding to the key '{name}' is not a mapping"
-                )
+        for name, entry in view.components.items():
             resolved_name = self.resolve_name(name)
-            component_configs[resolved_name] = dict(component_config)
+            component_configs[resolved_name] = dict(entry.config)
             configured_roots.append(name)
 
         roots: list[str] = []
@@ -955,15 +1001,17 @@ class SessionComponents:
             parse_imports,
             plan_import,
         )
-        # A `bind` target is resolved like a dependency, against this
-        # session's own instances; an earlier import's only when named.
+        # An `overwritten_dependencies` target is resolved like a dependency,
+        # against this session's own instances; an earlier import's only
+        # when named.
         own = set(component_configs) | set(self.components)
         earlier: dict[str, str] = {}
         imports = []
         specs = parse_imports(config.get(IMPORT_COMPONENTS_KEY))
         for index, spec in enumerate(specs):
             # Roles are bound in listing order, each as soon as its import
-            # is planned, so a later `bind` can name an earlier import's.
+            # is planned, so a later import's `overwritten_dependencies` can
+            # name an earlier import's.
             unbound = {
                 other.role: other.key for other in specs[index:] if other.role
             }
@@ -986,9 +1034,9 @@ class SessionComponents:
             # A clash is reported before the role is bound: it is the cause
             # of what binding would otherwise refuse.
             earlier = self._check_imported_names(imports, component_configs)
-            self._bind_import_role(planned, config)
+            self._bind_import_role(planned, view.components)
         self.imported.update(earlier)
-        self._check_bind_targets(imports)
+        self._check_overwritten_targets(imports)
         self._check_binding_consumers(
             set(component_configs) | set(self.imported), suffixed=True,
         )
@@ -1020,7 +1068,7 @@ class SessionComponents:
         self._activate_all([name], component_configs)
         return resolved_name
 
-    def check_component_bindings(self) -> None:
+    def check_role_bindings(self) -> None:
         """Refuse a per-consumer binding for a component this session does
         not hold, once, for a session built from configuration.
 
@@ -1058,7 +1106,7 @@ class SessionComponents:
         return resolve_edges(
             component,
             consumer=consumer,
-            bindings=self.component_bindings,
+            bindings=self.role_bindings,
             active=active,
             context_reads=reads,
             writers=writers,
@@ -1122,32 +1170,34 @@ class SessionComponents:
                     f"{planned.spec.key} imports '{name}', but {other}. Give "
                     "the import a `suffix:` so its instances get names of "
                     "their own, or, if this session's component should serve "
-                    "instead, name it in the import's `bind`."
+                    "instead, name it in the import's "
+                    "`overwritten_dependencies`."
                 )
         return imported
 
-    def _bind_import_role(self, planned, config: Mapping) -> None:
+    def _bind_import_role(self, planned, configured: Mapping) -> None:
         """Bind an import's `role` to its resource, in this session's
         bindings and the session state's record of them -- not in the
-        configuration."""
+        configuration. `configured` holds the configured component names."""
         role = planned.spec.role
         if role is None:
             return
-        bindings = self.component_bindings.bindings
+        bindings = self.role_bindings.bindings
         if role in bindings:
             raise ValueError(
                 f"{planned.spec.key}.role binds '{role}', which is already "
                 f"bound to '{bindings[role]}'"
             )
-        if role in config:
+        if role in configured:
             raise ValueError(
                 f"{planned.spec.key}.role binds '{role}', which is also "
                 "configured as a component"
             )
         bindings[role] = planned.root
         self.import_bindings[role] = planned.root
-        self.component_bindings = ComponentBindings(
-            {**bindings, **self.component_bindings.instance_bindings},
+        self.role_bindings = RoleBindings(
+            bindings,
+            dependency_bindings=self.role_bindings.instance_bindings,
             session_type=self.session_type,
         )
 
@@ -1158,28 +1208,10 @@ class SessionComponents:
     ) -> None:
         """Build what each import is wired to, then restore the import into
         this session next to it, in the order the imports are listed."""
-        instance_bindings = self.component_bindings.instance_bindings
         for planned in imports:
-            own = (
-                set(component_configs) | set(self.components)
-            ) - set(self.imported)
-            wired_to = list(planned.bind.values())
-            # Resolved here, once, and handed to the restore as they are.
-            wiring: dict[str, dict[str, str]] = {}
-            for name in planned.instances:
-                for asked in instance_bindings.get(name, {}):
-                    try:
-                        target = self._resolve_import_target(
-                            asked, own, self.imported, consumer=name,
-                        )
-                        wiring.setdefault(name, {})[asked] = target
-                        wired_to.append(target)
-                    except ComponentDependencyError as error:
-                        raise ComponentDependencyError(
-                            f"component_bindings wires '{asked}' of imported "
-                            f"component '{name}': {error}"
-                        ) from None
-            wired_to = list(dict.fromkeys(wired_to))
+            wired_to = list(dict.fromkeys(
+                planned.overwritten_dependencies.values()
+            ))
             # Planned first, so what an import is wired to cannot need an
             # import not restored yet -- this one included: that would have
             # no construction order.
@@ -1197,7 +1229,6 @@ class SessionComponents:
                 partial=True,
                 wired_to=set(wired_to),
                 names=planned.names,
-                wiring=wiring,
             )
 
     def _resolve_import_target(
@@ -1205,11 +1236,8 @@ class SessionComponents:
             name: str,
             own: set[str],
             imported: Mapping[str, str],
-            *,
-            consumer: str | None = None,
     ) -> str:
-        """Resolve what an import is wired to: a `bind` target, or a
-        per-consumer binding of an imported instance.
+        """Resolve an `overwritten_dependencies` target of an import.
 
         Resolved like a dependency against this session's own instances. An
         imported instance -- another import's -- is never handed over on its
@@ -1217,7 +1245,7 @@ class SessionComponents:
         and only by a suffixed name, since an unsuffixed one is also what
         this session would build itself.
         """
-        target = self.component_bindings.resolve(name, consumer=consumer)
+        target = self.role_bindings.resolve(name)
         if target in imported:
             if is_instance_name(target):
                 return target
@@ -1235,16 +1263,18 @@ class SessionComponents:
             )
         return candidates[0] if candidates else target
 
-    def _check_bind_targets(self, imports) -> None:
-        """Refuse a `bind` target that is not a resource, naming the key."""
+    def _check_overwritten_targets(self, imports) -> None:
+        """Refuse an `overwritten_dependencies` target that is not a
+        resource, naming the key."""
         for planned in imports:
-            for key, target in planned.bind.items():
+            for key, target in planned.overwritten_dependencies.items():
                 try:
                     self._registered_component_class(target, Resource)
                 except (ValueError, RuntimeError) as error:
                     raise ValueError(
-                        f"{planned.spec.key}.bind.{key} names '{target}', "
-                        f"which cannot serve as a prerequisite: {error}"
+                        f"{planned.spec.key}.overwritten_dependencies.{key} "
+                        f"names '{target}', which cannot serve as a "
+                        f"prerequisite: {error}"
                     ) from None
 
     @staticmethod
@@ -1255,15 +1285,15 @@ class SessionComponents:
     ) -> None:
         if importing is None or owner == importing:
             raise ComponentDependencyError(
-                f"{owner}: '{chain[0]}' is wired to the import (by `bind` or "
-                "a per-consumer binding), so it is built before the import, "
+                f"{owner}: '{chain[0]}' is wired to the import (by "
+                "`overwritten_dependencies`), so it is built before the import, "
                 f"but it needs the imported '{chain[-1]}': "
                 f"{' -> '.join(chain)}. What an import is wired to cannot "
                 "depend on the import."
             )
         raise ComponentDependencyError(
-            f"{importing}: '{chain[0]}' is wired to the import (by `bind` or a "
-            f"per-consumer binding), but it needs '{chain[-1]}', which {owner} "
+            f"{importing}: '{chain[0]}' is wired to the import (by "
+            f"`overwritten_dependencies`), but it needs '{chain[-1]}', which {owner} "
             f"imports, and imports are restored in the order they are listed: "
             f"{' -> '.join(chain)}. List {owner} before {importing}."
         )
@@ -1282,7 +1312,7 @@ class SessionComponents:
         unsuffixed one may be activated as a prerequisite, so it is checked
         once activation is done.
         """
-        for consumer in self.component_bindings.instance_bindings:
+        for consumer in self.role_bindings.instance_bindings:
             if is_instance_name(consumer) != suffixed or consumer in known:
                 continue
             implementation = implementation_of(consumer)
@@ -1291,7 +1321,7 @@ class SessionComponents:
                 if implementation_of(name) == implementation
             )
             raise ValueError(
-                f"component_bindings wires '{consumer}', which this session "
+                f"A binding wires '{consumer}', which this session "
                 "does not hold, so the binding would do nothing. Instances of "
                 f"'{implementation}' here: {siblings or 'none'}."
             )
@@ -1316,8 +1346,8 @@ class SessionComponents:
         imported = self.imported
         if not imported:
             return
-        bindings = self.component_bindings.bindings
-        instance_bindings = self.component_bindings.instance_bindings
+        bindings = self.role_bindings.bindings
+        instance_bindings = self.role_bindings.instance_bindings
         for name, planned in plan.items():
             for edge in planned.edges:
                 instance = edge.target
@@ -1340,7 +1370,7 @@ class SessionComponents:
                         "and bind the suffixed name."
                     )
                 how = (
-                    f"component_bindings: {{'{name}': {{'{asked}': '{instance}'}}}}"
+                    f"{name}: {{dependencies_role_bindings: {{{asked}: {instance}}}}}"
                     if is_instance_name(instance)
                     else "or give the import a `suffix` and bind the suffixed name"
                 )
@@ -1943,7 +1973,7 @@ class SessionComponents:
             return
         try:
             topological_sort_of_components(
-                self.component_bindings,
+                self.role_bindings,
                 components=[self.components[name] for name in sorted(keep)],
                 session_type=self.session_type,
             )
@@ -2093,7 +2123,7 @@ class SessionComponents:
                 f"{base_type.__name__}!"
             )
 
-        if self.component_bindings.is_bound(component.name):
+        if self.role_bindings.is_bound(component.name):
             raise ValueError(
                 f"Component role '{component.name}' is bound to "
                 f"'{self.resolve_name(component.name)}' in this session"
@@ -2188,7 +2218,7 @@ class SessionComponents:
 
     def resolve_name(self, name: str) -> str:
         """Return the name `name` is bound to, applying bindings only."""
-        return self.component_bindings.resolve(name)
+        return self.role_bindings.resolve(name)
 
     def resolve_dependency(
             self,
@@ -2203,7 +2233,7 @@ class SessionComponents:
         the components this session holds unless `active` says otherwise.
         """
         return resolve_component_name(
-            self.component_bindings,
+            self.role_bindings,
             name,
             consumer=consumer,
             active=self.components if active is None else active,
@@ -2211,16 +2241,26 @@ class SessionComponents:
 
     @property
     def bindings(self) -> dict[str, str]:
-        return self.component_bindings.bindings
+        return self.role_bindings.bindings
 
     @property
-    def aliases(self) -> ComponentBindings:
+    def aliases(self) -> RoleBindings:
         warnings.warn(
-            "SessionComponents.aliases is deprecated; use component_bindings",
+            "SessionComponents.aliases is deprecated; use role_bindings",
             DeprecationWarning,
             stacklevel=2,
         )
-        return self.component_bindings
+        return self.role_bindings
+
+    @property
+    def component_bindings(self) -> RoleBindings:
+        warnings.warn(
+            "SessionComponents.component_bindings is deprecated; use "
+            "role_bindings",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.role_bindings
 
     @property
     def alias_bindings(self) -> dict[str, str]:
@@ -2233,7 +2273,7 @@ class SessionComponents:
 
     def _component_order(self) -> dict[str, int]:
         return topological_sort_of_components(
-            self.component_bindings,
+            self.role_bindings,
             components=self.components.values(),
             session_type=self.session_type,
         )

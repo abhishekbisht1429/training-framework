@@ -217,7 +217,7 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
         Reads that component's file only and imports none of the
         checkpointed classes, so it works when the component, or anything
         else in the checkpoint, no longer loads. `name` is an instance name,
-        a name the checkpoint's `component_bindings` bind, or a name one of
+        a name the checkpoint's `role_bindings` bind, or a name one of
         its components asked for as a dependency; a role only a component
         package declares needs `load_component`.
         """
@@ -279,8 +279,10 @@ class Checkpointer(LifecycleHook, Stateful, ExtendableComponent):
         _check_session_type(record.get("session_type"), session_type)
         _, session_settings, _ = configuration_from_state(record)
         import_all_modules(session_settings["components_package"])
+        bindings = stored_bindings(record)
         components = SessionComponents(
-            component_bindings=stored_bindings(record),
+            role_bindings=bindings.roles,
+            dependency_bindings=bindings.dependencies,
             session_type=record["session_type"],
         )
         component_records = record["components"]
