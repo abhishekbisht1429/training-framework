@@ -24,12 +24,12 @@ half of the encoder frozen and a lower learning rate for the rest:
 
 ```yaml
 import_components:
-  pretrained:
+  pretrain_model:                                # that run's model instance
     checkpoint: runs/pretrain/checkpoints/last   # a checkpoint directory
-    role: source                                 # that run's `model`
 
 role_bindings:
   model: fine_tuned_model
+  source: pretrain_model#imported                # what module_part takes a part of
   backbone: module_part
   head: cifar_head
   dataset: cifar10
@@ -77,8 +77,9 @@ from the head would be a cycle. Give it in configuration, or use a lazy layer
 (`nn.LazyLinear`). A wrong width is a shape error on the first forward pass.
 
 When the pretrained model is itself the backbone -- a `pooled_patch_transformer`
-wired to its blocks, say -- skip `module_part` and give the import
-`role: backbone`; the parameter names are then `backbone.patch_embedding.*`,
+wired to its blocks, say -- skip `module_part` and bind it directly
+(`backbone: pooled_patch_transformer#imported`); the parameter names are then
+`backbone.patch_embedding.*`,
 `backbone.pooling.*` and so on.
 
 ## `module_part`
@@ -89,7 +90,7 @@ wired to its blocks, say -- skip `module_part` and give the import
 | `method` | `forward` | The method of the part that calling this resource calls, e.g. `forward_features` |
 
 It requires the `source` role: an `nn.Module` resource, usually an imported
-one (`role: source` on the import). The part is held under the attribute
+one (`source: <impl>#imported` in `role_bindings`). The part is held under the attribute
 `module` (as `DistributedDataParallel` does), so its parameter names start with
 `module.`.
 
@@ -97,7 +98,7 @@ The part stays the source's: the source trains, saves, restores and moves its
 weights, and `module_part` owns none. What the source holds outside the part
 -- a pretext head, say -- stays in the session and is saved with it, unused by
 anything that only calls `module_part`. To avoid that for a wired model,
-import just the component you want (`resource: <its instance>`).
+import just the component you want (key the import by its instance).
 
 Errors, all when the session is built: a missing attribute (the error lists
 the submodules that exist), something that is not an `nn.Module`, a missing

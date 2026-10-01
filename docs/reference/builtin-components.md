@@ -176,8 +176,9 @@ resolved through the *checkpoint's* bindings -- `model` finds whatever that
 run bound it to -- and the checkpoint's RNG is not adopted. The caller's RNG
 is left exactly as it was, even when the rebuilt components draw from it, so
 the caller's seed still decides what comes next. It raises `KeyError` when the checkpoint
-has no such resource and `ComponentDependencyError` when several instances
-answer; `session_type="training"` also rejects a checkpoint of another kind.
+has no such resource (an instance suffixed `imported` is never found by its
+implementation's name alone) and `ComponentDependencyError` when several
+instances answer; `session_type="training"` also rejects a checkpoint of another kind.
 This is how the analysis `trained_model` gets its model.
 `Checkpointer.load_component_state(path, name)` returns a component's saved
 state without building anything, and `Checkpointer.read_manifest(path)`

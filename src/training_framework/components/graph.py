@@ -536,6 +536,7 @@ def render_execution_graph(
         binding_resolver,
         session_type,
         order: Mapping[str, int],
+        imported: Mapping[str, str] | None = None,
 ) -> str:
     ordered_resources = sorted(
         resources,
@@ -587,6 +588,12 @@ def render_execution_graph(
             for consumer, wiring
             in binding_resolver.instance_bindings.items()
             for role_name, target in wiring.items()
+        )
+    if imported:
+        lines.extend(["", "IMPORTED"])
+        lines.extend(
+            f"  {instance} <- {key}"
+            for instance, key in sorted(imported.items())
         )
     dataflow = _dataflow_lines([*ordered_hooks, *ordered_steps])
     if dataflow:

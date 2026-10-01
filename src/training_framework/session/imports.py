@@ -1,7 +1,8 @@
 """Taking components from another run's checkpoint into a new session.
 
-`import_components` names a resource of another run. The session takes that
-resource, and every instance it was wired to, in as its own components: it
+`import_components` is keyed by instance names of another run. The session
+takes each such resource, and every instance it was wired to, in as its own
+components: it
 restores them from the source's stored session state -- constructor
 arguments, wiring, `state_version` and state, through restore's own path --
 so it then drives their lifecycle, state, device and wiring like any other
@@ -15,8 +16,9 @@ restore; `SessionComponents` restores it. Nothing here builds a component.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+import warnings
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
 from training_framework.components.base import ComponentDependencyError
@@ -27,12 +29,15 @@ from training_framework.components.edges import (
     instances_of,
 )
 from training_framework.components.naming import (
+    IMPORTED_SUFFIX,
     INSTANCE_SEPARATOR,
     _INSTANCE_SUFFIX_PATTERN,
+    is_imported_suffix,
     implementation_of,
     parse_instance_name,
 )
 from training_framework.session.checkpoint_format import (
+    IMPORTED_INTO_NAMESPACE_KEY,
     is_checkpoint_directory,
     read_checkpoint,
     read_manifest,
@@ -46,8 +51,11 @@ IMPORTS_STATE_KEY = "imports"
 own entry (`imported_by`)."""
 
 _IMPORT_KEYS = frozenset({
-    "checkpoint", "resource", "role", "overwritten_dependencies", "suffix",
+    "checkpoint", "instance_name", "overwritten_dependencies",
 })
+_LEGACY_IMPORT_KEYS = frozenset({"resource", "role", "suffix"})
+"""Keys only the deprecated form has: an entry holding any of them is keyed
+by an import label, not by the source's instance name."""
 
 
 def instance_named_in_manifest(manifest: Mapping, name: str) -> str:
@@ -86,7 +94,15 @@ def instance_named_in_manifest(manifest: Mapping, name: str) -> str:
 
 @dataclass(frozen=True)
 class ComponentImport:
-    """One entry of `import_components`, validated."""
+    """One entry of `import_components`, validated.
+
+    `name` is the entry's key. For a keyed import (`legacy` false) it is the
+    source's instance name, `resource` is that same name and `instance_name`
+    renames what it brings in (the reserved `imported` when not given);
+    `index` is its position when the key holds a list. A labelled import
+    (`legacy`, deprecated) is keyed by a label and uses `resource`, `role`
+    and `suffix` instead.
+    """
 
     name: str
     checkpoint: str
@@ -94,10 +110,22 @@ class ComponentImport:
     role: str | None = None
     overwritten_dependencies: dict[str, str] = field(default_factory=dict)
     suffix: str | None = None
+    instance_name: str | None = None
+    legacy: bool = True
+    index: int | None = None
 
     @property
     def key(self) -> str:
-        return f"{IMPORT_COMPONENTS_KEY}.{self.name}"
+        """How errors and `imported_by` name this import."""
+        position = "" if self.index is None else f"[{self.index}]"
+        return f"{IMPORT_COMPONENTS_KEY}.{self.name}{position}"
+
+    @property
+    def rename_suffix(self) -> str | None:
+        """The suffix every imported instance is renamed with, if any."""
+        if self.legacy:
+            return self.suffix
+        return self.instance_name or IMPORTED_SUFFIX
 
 
 def parse_imports(value: Any) -> list[ComponentImport]:
@@ -107,26 +135,78 @@ def parse_imports(value: Any) -> list[ComponentImport]:
         return []
     if not isinstance(value, Mapping):
         raise ValueError(
-            f"{IMPORT_COMPONENTS_KEY} must be a mapping of import names to "
-            f"their settings; got {value!r}"
+            f"{IMPORT_COMPONENTS_KEY} must be a mapping of the source's "
+            f"instance names to their settings; got {value!r}"
         )
-    return [_parse_import(name, entry) for name, entry in value.items()]
+    imports: list[ComponentImport] = []
+    labelled: list[str] = []
+    for name, entry in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"{IMPORT_COMPONENTS_KEY} keys must be non-empty strings; got "
+                f"{name!r}"
+            )
+        # Any sequence, so a configuration still held by OmegaConf
+        # (a ListConfig) reads like a plain one.
+        if isinstance(entry, Sequence) and not isinstance(entry, (str, bytes)):
+            if not entry:
+                raise ValueError(
+                    f"{IMPORT_COMPONENTS_KEY}.{name} is an empty list; give "
+                    "one mapping per checkpoint to import it from"
+                )
+            imports.extend(
+                _parse_import(name, item, index=index)
+                for index, item in enumerate(entry)
+            )
+            continue
+        parsed = _parse_import(name, entry)
+        if parsed.legacy:
+            labelled.append(name)
+        imports.append(parsed)
+    if labelled:
+        warnings.warn(
+            f"{IMPORT_COMPONENTS_KEY} entries {labelled} use the deprecated "
+            "form (an import label with `resource`, `role` or `suffix`). Key "
+            "each import by the source's instance name, rename with "
+            "`instance_name`, and bind roles with `role_bindings`",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    return imports
 
 
-def _parse_import(name: Any, entry: Any) -> ComponentImport:
-    if not isinstance(name, str) or not name:
-        raise ValueError(
-            f"{IMPORT_COMPONENTS_KEY} names must be non-empty strings; got "
-            f"{name!r}"
-        )
-    key = f"{IMPORT_COMPONENTS_KEY}.{name}"
+def _parse_import(
+        name: str,
+        entry: Any,
+        *,
+        index: int | None = None,
+) -> ComponentImport:
+    key = f"{IMPORT_COMPONENTS_KEY}.{name}" + (
+        "" if index is None else f"[{index}]"
+    )
     if not isinstance(entry, Mapping):
         raise ValueError(f"{key} must be a mapping; got {entry!r}")
-    unknown = sorted(set(entry) - _IMPORT_KEYS)
+    legacy_keys = sorted(set(entry) & _LEGACY_IMPORT_KEYS)
+    if legacy_keys and index is not None:
+        raise ValueError(
+            f"{key} uses {legacy_keys}, which only the deprecated labelled "
+            "form accepts, and that form has no lists. Key the import by the "
+            "source's instance name and rename it with `instance_name`."
+        )
+    legacy = bool(legacy_keys)
+    accepted = (
+        (_IMPORT_KEYS - {"instance_name"}) | _LEGACY_IMPORT_KEYS
+        if legacy else _IMPORT_KEYS
+    )
+    unknown = sorted(set(entry) - accepted)
     if unknown:
         raise ValueError(
-            f"{key} has unknown keys {unknown}; it accepts "
-            f"{sorted(_IMPORT_KEYS)}"
+            f"{key} has unknown keys {unknown}; it accepts {sorted(accepted)}"
+            + (
+                " (`instance_name` belongs to the keyed form, which has no "
+                "`resource`, `role` or `suffix`)"
+                if legacy and "instance_name" in unknown else ""
+            )
         )
     if "checkpoint" not in entry:
         raise ValueError(f"{key}.checkpoint is required")
@@ -138,8 +218,9 @@ def _parse_import(name: Any, entry: Any) -> ComponentImport:
         raise ValueError(
             f"{key}.checkpoint must be a path; got {entry['checkpoint']!r}"
         )
-    resource = entry.get("resource", "model")
-    _require_name(resource, f"{key}.resource")
+    resource = entry.get("resource", "model") if legacy else name
+    if legacy:
+        _require_name(resource, f"{key}.resource")
     role = entry.get("role")
     if role is not None:
         _require_name(role, f"{key}.role")
@@ -156,14 +237,13 @@ def _parse_import(name: Any, entry: Any) -> ComponentImport:
     for source, target in overwritten.items():
         _require_name(source, f"{key}.overwritten_dependencies key")
         _require_name(target, f"{key}.overwritten_dependencies.{source}")
-    suffix = entry.get("suffix")
-    if suffix is not None and (
-            not isinstance(suffix, str)
-            or not _INSTANCE_SUFFIX_PATTERN.match(suffix)
-    ):
+    suffix = _suffix(entry.get("suffix"), f"{key}.suffix")
+    instance_name = _suffix(entry.get("instance_name"), f"{key}.instance_name")
+    if is_imported_suffix(instance_name):
         raise ValueError(
-            f"{key}.suffix must be one or more letters, digits or "
-            f"underscores; got {suffix!r}"
+            f"{key}.instance_name '{instance_name}' is reserved: an import "
+            f"without `instance_name` already uses '{IMPORTED_SUFFIX}'. Leave "
+            "it out, or choose another name."
         )
     return ComponentImport(
         name=name,
@@ -172,7 +252,22 @@ def _parse_import(name: Any, entry: Any) -> ComponentImport:
         role=role,
         overwritten_dependencies=dict(overwritten),
         suffix=suffix,
+        instance_name=instance_name,
+        legacy=legacy,
+        index=index,
     )
+
+
+def _suffix(value: Any, where: str) -> str | None:
+    if value is not None and (
+            not isinstance(value, str)
+            or not _INSTANCE_SUFFIX_PATTERN.match(value)
+    ):
+        raise ValueError(
+            f"{where} must be one or more letters, digits or underscores; "
+            f"got {value!r}"
+        )
+    return value
 
 
 def _require_name(value: Any, where: str) -> None:
@@ -227,8 +322,12 @@ def plan_import(
         )
     manifest = read_manifest(path)
     stored = manifest["components"]
+    spec = _labelled_if_not_keyed(spec, manifest)
 
-    root = _resolve_in_source(manifest, spec.resource, f"{spec.key}.resource")
+    root = (
+        _resolve_in_source(manifest, spec.resource, f"{spec.key}.resource")
+        if spec.legacy else _instance_in_source(manifest, spec)
+    )
     where = f"{spec.key}.overwritten_dependencies"
     bound: dict[str, str] = {}
     overwritten_keys: dict[str, str] = {}
@@ -293,7 +392,7 @@ def plan_import(
             + "\n".join(f"  - {problem}" for problem in problems)
         )
 
-    renamed = {name: _renamed(name, spec.suffix) for name in reached}
+    renamed = {name: _renamed(name, spec.rename_suffix) for name in reached}
     names = {
         source: new for source, new in renamed.items() if source != new
     }
@@ -307,6 +406,10 @@ def plan_import(
         # This import brought it in, whatever the source run says: a source
         # may itself have imported it.
         info["imported_by"] = spec.key
+        if spec.legacy:
+            info.pop(IMPORTED_INTO_NAMESPACE_KEY, None)
+        else:
+            info[IMPORTED_INTO_NAMESPACE_KEY] = True
         info["dependencies"] = {
             asked: names.get(target, target)
             for asked, target in (info.get("dependencies") or {}).items()
@@ -346,6 +449,69 @@ def stored_bindings(state: Mapping[str, Any]) -> StoredBindings:
     roles = dict(view.role_bindings)
     roles.update((state.get(IMPORTS_STATE_KEY) or {}).get("bindings") or {})
     return StoredBindings(roles=roles, dependencies=view.dependency_bindings)
+
+
+def _labelled_if_not_keyed(
+        spec: ComponentImport,
+        manifest: Mapping[str, Any],
+) -> ComponentImport:
+    """Read an entry holding only keys both forms share as the deprecated
+    labelled form when its key is no instance of the source.
+
+    A keyed import must name one of the source's instances, so such a key
+    can only be a label, which imports the source's `model`. An entry with
+    `instance_name` or in a list is keyed whatever its key says, and so is a
+    key that is a role of the source: that is a keyed import naming the role
+    instead of the instance, refused by `_instance_in_source`.
+
+    The fallback warns with a `FutureWarning`, which Python shows by default:
+    a mistyped key reaches here too, and must not pass unseen.
+    """
+    if (
+            spec.legacy or spec.index is not None
+            or spec.instance_name is not None
+            or spec.name in manifest["components"]
+            or spec.name in stored_bindings(manifest).roles
+    ):
+        return spec
+    holds = sorted(manifest["components"])
+    if "model" not in stored_bindings(manifest).roles:
+        raise ValueError(
+            f"{spec.key}: the checkpoint has no component '{spec.name}'; it "
+            f"holds {holds}. An import is keyed by the source's instance "
+            "name. (Read as an import label -- the deprecated form -- it "
+            "would import the source's `model`, which that run never bound.)"
+        )
+    warnings.warn(
+        f"{spec.key}: '{spec.name}' is not an instance of the source run, so "
+        "it is read as an import label (the deprecated form) and imports "
+        "the source's `model`, under its source names. If the key is "
+        "mistyped, fix it; otherwise key the import by the source's "
+        f"instance name. The source holds {holds}.",
+        FutureWarning,
+        stacklevel=3,
+    )
+    return replace(spec, legacy=True, resource="model")
+
+
+def _instance_in_source(manifest: Mapping, spec: ComponentImport) -> str:
+    """The source instance a keyed import names: its key, exactly."""
+    stored = manifest["components"]
+    if spec.name in stored:
+        return spec.name
+    bound = stored_bindings(manifest).roles.get(spec.name)
+    if isinstance(bound, str):
+        instances = instances_of(bound, stored)
+        raise ValueError(
+            f"{spec.key}: '{spec.name}' is a role of the source run, bound to "
+            f"{instances or [bound]}; key the import by the instance name"
+        )
+    raise ValueError(
+        f"{spec.key}: the checkpoint has no component '{spec.name}'; it holds "
+        f"{sorted(stored)}. An import is keyed by the source's instance name. "
+        f"If '{spec.name}' is an import label (the deprecated form), key it "
+        "by the component to import instead, or add `resource:`."
+    )
 
 
 def _resolve_in_source(manifest: Mapping, name: str, where: str) -> str:
@@ -408,6 +574,7 @@ def _renamed(name: str, suffix: str | None) -> str:
 
 __all__ = [
     "IMPORT_COMPONENTS_KEY",
+    "IMPORTED_INTO_NAMESPACE_KEY",
     "ComponentImport",
     "IMPORTS_STATE_KEY",
     "PlannedImport",

@@ -52,6 +52,42 @@ an ordinal does.
 """
 
 
+IMPORTED_SUFFIX = "imported"
+"""The instance suffix an import gives what it brings in when it has no
+`instance_name`. Reserved: a name this session writes -- a configured key, an
+`instance_name`, a component activated or registered by hand -- may not use
+it, alone or as the start of a merged suffix (`imported_train`), so an
+instance carrying it always came from an import."""
+
+
+def is_imported_suffix(suffix: str | None) -> bool:
+    """Return whether `suffix` is the reserved import suffix or starts with
+    it, as a source's own suffix merged after it does (`imported_train`)."""
+    return suffix is not None and (
+        suffix == IMPORTED_SUFFIX or suffix.startswith(f"{IMPORTED_SUFFIX}_")
+    )
+
+
+def has_imported_suffix(name: str) -> bool:
+    """Return whether instance name `name` carries the reserved import
+    suffix. A name that does not parse has none."""
+    try:
+        _, suffix = parse_instance_name(name)
+    except (TypeError, ValueError):
+        return False
+    return is_imported_suffix(suffix)
+
+
+def check_not_imported_suffix(name: str, where: str) -> None:
+    """Refuse a name this session writes that uses the reserved suffix."""
+    if has_imported_suffix(name):
+        raise ValueError(
+            f"{where} '{name}' uses the instance suffix '{IMPORTED_SUFFIX}', "
+            "which is reserved for what `import_components` brings in without "
+            "an `instance_name`. Choose another suffix."
+        )
+
+
 def is_instance_name(name: str) -> bool:
     """Return whether `name` carries an instance suffix."""
     return isinstance(name, str) and INSTANCE_SEPARATOR in name

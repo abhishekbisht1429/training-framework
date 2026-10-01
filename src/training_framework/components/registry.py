@@ -890,8 +890,12 @@ def format_execution_graph(
         session_type: str = TRAINING_SESSION_TYPE,
         component_bindings: RoleBindings | Mapping[str, str] | None = None,
         aliases: RoleBindings | Mapping[str, str] | None = None,
+        imported: Mapping[str, str] | None = None,
 ) -> str:
-    """Return the session's component lifecycle as a readable execution graph."""
+    """Return the session's component lifecycle as a readable execution graph.
+
+    `imported` (instance -> the `import_components` entry that brought it
+    in) is listed in its own section."""
     role_bindings = _coalesce_role_bindings(
         role_bindings,
         component_bindings,
@@ -919,4 +923,5 @@ def format_execution_graph(
         binding_resolver=binding_resolver,
         session_type=normalized,
         order=order,
+        imported=imported,
     )

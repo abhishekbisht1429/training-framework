@@ -429,6 +429,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             max_iterations=self.session_config.max_iterations,
             role_bindings=self._components.role_bindings,
             session_type=self._session_type,
+            imported=self._components.imported,
         )
 
     def print_execution_graph(self, *, file=None) -> None:

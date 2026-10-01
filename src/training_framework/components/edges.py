@@ -25,6 +25,7 @@ from training_framework.components.base import (
     _given_prerequisites,
 )
 from training_framework.components.naming import (
+    has_imported_suffix,
     implementation_of,
     is_instance_name,
 )
@@ -156,6 +157,10 @@ def instances_of(name: str, active: Iterable[str]) -> list[str]:
     adding an instance never silently rewires anything. A suffixed name is a
     precise reference: when that instance is not active the answer is "not
     configured", never a sibling that happens to share its implementation.
+
+    An instance with the reserved import suffix (`x#imported`) is never a
+    candidate by implementation: an import without `instance_name` fills a
+    dependency only when something names it.
     """
     active = set(active)
     if name in active:
@@ -166,6 +171,7 @@ def instances_of(name: str, active: Iterable[str]) -> list[str]:
     return sorted(
         instance for instance in active
         if implementation_of(instance) == implementation
+        and not has_imported_suffix(instance)
     )
 
 

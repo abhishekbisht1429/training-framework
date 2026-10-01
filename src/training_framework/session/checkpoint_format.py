@@ -126,6 +126,14 @@ def component_file(name: str) -> str:
     return f"{COMPONENTS_DIR}/{name}.pt"
 
 
+IMPORTED_INTO_NAMESPACE_KEY = "imported_into_namespace"
+"""Saved on the entry of every instance a keyed import brought in: it
+resolves like any instance of the session (one suffixed `imported` only when
+named). One without it, brought in by a deprecated labelled import, is
+reached only through the import's `role` or a binding naming a suffixed
+instance."""
+
+
 def _manifest(state: Mapping[str, Any], records: Mapping[str, Mapping]) -> dict:
     return {
         "format_version": FORMAT_VERSION,
@@ -147,6 +155,7 @@ def _manifest(state: Mapping[str, Any], records: Mapping[str, Mapping]) -> dict:
                     "state_version",
                     "dependencies",
                     "imported_by",
+                    IMPORTED_INTO_NAMESPACE_KEY,
                     "context_reads",
                     "context_writes",
                     "file",

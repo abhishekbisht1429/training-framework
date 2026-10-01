@@ -66,7 +66,7 @@ The session hands a component its prerequisites. One built by hand and registere
 
 ### An ambiguous dependency is an error, not a choice
 
-A session may hold several instances of one component. When a dependency could mean more than one of them and neither an exact name match nor per-consumer wiring settles it, activation fails instead of choosing. Wiring a component to an instance the session never chose would give a run that trains and is quietly wrong, which is worse than a launch that stops. Name the instance in the consuming component's own `dependencies_role_bindings`.
+A session may hold several instances of one component. When a dependency could mean more than one of them and neither an exact name match nor per-consumer wiring settles it, activation fails instead of choosing. Wiring a component to an instance the session never chose would give a run that trains and is quietly wrong, which is worse than a launch that stops. Name the instance in the consuming component's own `dependencies_role_bindings`. Instances [imported](../reference/import-components.md) with an `instance_name` are candidates like configured ones, so importing a second one can make a dependency that resolved before ambiguous; an import without `instance_name` (suffix `imported`) is never a candidate unless named.
 
 ### Some components may only be configured once
 

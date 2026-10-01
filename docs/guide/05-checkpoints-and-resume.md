@@ -22,8 +22,10 @@ options are in the
 - component constructor arguments;
 - each component's wiring -- the instance it was given for every resource it
   asked for -- and its `state_version`;
-- the role bindings its [imports](../reference/import-components.md) added,
-  and, on each imported component, which import brought it in;
+- the role bindings its [imports](../reference/import-components.md) added
+  (deprecated labelled imports only), and, on each imported component, which
+  import brought it in and whether that import was keyed (not the deprecated
+  labelled form);
 - state from `Stateful` resources, hooks, and steps;
 - `session_context`;
 - Python RNG state;
@@ -61,8 +63,8 @@ checkpoints/<timestamp>/
 `manifest.json` is plain JSON: the session type, iteration, configuration, the
 role bindings its [imports](../reference/import-components.md) added, and
 for every component its implementation, kind, `state_version`, the instances
-it was wired to, the import that brought it in (`imported_by`, if one did),
-its file and that file's SHA-256. Anything can read it,
+it was wired to, the import that brought it in (`imported_by`, if one did,
+and `imported_into_namespace` for a keyed import), its file and that file's SHA-256. Anything can read it,
 without the framework; `Checkpointer.read_manifest(path)` returns it.
 
 Every `.pt` file holds plain data only -- tensors, dicts, lists, tuples, sets,
@@ -125,7 +127,10 @@ session that wrote it did. `load_component_state` imports nothing, so it
 accepts an instance name, a name the checkpoint's top-level
 `role_bindings` bind, or a name one of its components asked for as a
 dependency (which resolves to the instance that component was given); a role
-declared only in your component package needs `load_component`.
+declared only in your component package needs `load_component`. Neither
+offers an instance suffixed `imported` (what an import without
+`instance_name` brought in) as the only instance of its implementation: name
+it (`model#imported`) or a role bound to it.
 
 Neither adopts the checkpoint's RNG, and both leave the caller's RNG as it
 was.

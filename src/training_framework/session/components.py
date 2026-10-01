@@ -41,6 +41,8 @@ from training_framework.components.diagnostics import (
     with_explanation,
 )
 from training_framework.components.naming import (
+    check_not_imported_suffix,
+    has_imported_suffix,
     implementation_of,
     is_instance_name,
     parse_instance_name,
@@ -54,6 +56,7 @@ from training_framework.components.registry import (
     role_registry,
     topological_sort_of_components,
 )
+from training_framework.session.checkpoint_format import IMPORTED_INTO_NAMESPACE_KEY
 from training_framework.session.config import TRAINING_SESSION_TYPE, normalize_session_type
 
 
@@ -177,6 +180,11 @@ class SessionComponents:
         # is saved on its own component's entry (`imported_by`), and read
         # back when that component is restored.
         self.imported: dict[str, str] = {}
+        # The imported instances that are ordinary members of the namespace
+        # (brought in by a keyed import). The rest, from a deprecated
+        # labelled import, are reached only through a binding naming them.
+        # Saved as `imported_into_namespace` on the component's entry.
+        self.namespace_imports: set[str] = set()
         # Set once a session is built from configuration: its per-consumer
         # bindings still have to name components it holds, which is known
         # only once nothing more is activated by hand.
@@ -210,6 +218,7 @@ class SessionComponents:
         state.pop("_links_dirty", None)
         state.setdefault("import_bindings", {})
         state.setdefault("imported", {})
+        state.setdefault("namespace_imports", set())
         state.setdefault("_binding_check_pending", False)
         self.__dict__.update(state)
 
@@ -276,6 +285,10 @@ class SessionComponents:
                 **(
                     {"imported_by": self.imported[name]}
                     if name in self.imported else {}
+                ),
+                **(
+                    {IMPORTED_INTO_NAMESPACE_KEY: True}
+                    if name in self.namespace_imports else {}
                 ),
             }
             for name, component in self.components.items()
@@ -346,6 +359,10 @@ class SessionComponents:
             (name, info["imported_by"])
             for name, info in component_states.items()
             if info.get("imported_by")
+        )
+        self.namespace_imports.update(
+            name for name, info in component_states.items()
+            if info.get("imported_by") and info.get(IMPORTED_INTO_NAMESPACE_KEY)
         )
 
     def _restore_components(
@@ -978,6 +995,7 @@ class SessionComponents:
         component_configs: dict[str, dict] = {}
         configured_roots: list[str] = []
         for name, entry in view.components.items():
+            check_not_imported_suffix(name, "Configured component")
             resolved_name = self.resolve_name(name)
             component_configs[resolved_name] = dict(entry.config)
             configured_roots.append(name)
@@ -986,6 +1004,7 @@ class SessionComponents:
         for name, default_config in (default_configs or {}).items():
             roots.append(name)
             resolved_name = self.resolve_name(name)
+            check_not_imported_suffix(resolved_name, "Default component")
             if resolved_name not in component_configs:
                 component_configs[resolved_name] = (
                     dict(default_config)
@@ -1002,10 +1021,13 @@ class SessionComponents:
             plan_import,
         )
         # An `overwritten_dependencies` target is resolved like a dependency,
-        # against this session's own instances; an earlier import's only
-        # when named.
+        # against this session's own instances and what an earlier keyed
+        # import brought in (never an `#imported` one by itself); what an
+        # earlier labelled import brought in only when named by a suffixed
+        # name.
         own = set(component_configs) | set(self.components)
         earlier: dict[str, str] = {}
+        earlier_in_namespace: set[str] = set()
         imports = []
         specs = parse_imports(config.get(IMPORT_COMPONENTS_KEY))
         for index, spec in enumerate(specs):
@@ -1027,13 +1049,17 @@ class SessionComponents:
                         f"are planned in the order they are listed. List "
                         f"{owner} before {spec.key}."
                     )
-                return self._resolve_import_target(target, own, earlier)
+                return self._resolve_import_target(
+                    target, own | earlier_in_namespace, earlier,
+                )
 
             planned = plan_import(spec, self.registry, resolve)
             imports.append(planned)
             # A clash is reported before the role is bound: it is the cause
             # of what binding would otherwise refuse.
             earlier = self._check_imported_names(imports, component_configs)
+            if not planned.spec.legacy:
+                earlier_in_namespace.update(planned.instances)
             self._bind_import_role(planned, view.components)
         self.imported.update(earlier)
         self._check_overwritten_targets(imports)
@@ -1062,6 +1088,8 @@ class SessionComponents:
         none of which constructing an instance by hand can do.
         """
         resolved_name = self.resolve_name(name)
+        if resolved_name not in self.components:
+            check_not_imported_suffix(resolved_name, "Activated component")
         component_configs = (
             {resolved_name: dict(config)} if config is not None else {}
         )
@@ -1153,8 +1181,9 @@ class SessionComponents:
     ) -> dict[str, str]:
         """Return imported instance -> its import's key, refusing a clash.
 
-        An import keeps its source's instance names unless it has a `suffix`,
-        so they may meet this session's own instances or another import's.
+        An import keeps its source's instance names unless it has an
+        `instance_name` (or, deprecated, a `suffix`), so they may meet this
+        session's own instances or another import's.
         """
         imported: dict[str, str] = {}
         for planned in imports:
@@ -1166,9 +1195,13 @@ class SessionComponents:
                 else:
                     imported[name] = planned.spec.key
                     continue
+                rename = (
+                    "a `suffix:`" if planned.spec.legacy
+                    else "an `instance_name:`"
+                )
                 raise ValueError(
                     f"{planned.spec.key} imports '{name}', but {other}. Give "
-                    "the import a `suffix:` so its instances get names of "
+                    f"the import {rename} so its instances get names of "
                     "their own, or, if this session's component should serve "
                     "instead, name it in the import's "
                     "`overwritten_dependencies`."
@@ -1239,11 +1272,13 @@ class SessionComponents:
     ) -> str:
         """Resolve an `overwritten_dependencies` target of an import.
 
-        Resolved like a dependency against this session's own instances. An
-        imported instance -- another import's -- is never handed over on its
-        own, as the sole instance of an implementation: only named exactly,
-        and only by a suffixed name, since an unsuffixed one is also what
-        this session would build itself.
+        Resolved like a dependency against `own`: this session's instances
+        and what earlier keyed imports brought in. An instance any earlier
+        import brought in -- `imported` -- is taken when named exactly by a
+        suffixed name, which every keyed import's are. One an earlier
+        labelled (deprecated) import brought in is never handed over on its
+        own, as the sole instance of an implementation, and an unsuffixed
+        one is refused: this session would build one of that name itself.
         """
         target = self.role_bindings.resolve(name)
         if target in imported:
@@ -1331,7 +1366,9 @@ class SessionComponents:
             plan: Mapping[str, "_PlannedComponent"],
     ) -> None:
         """Refuse planned wiring that gives this session's own component an
-        imported instance by anything but a binding that names it.
+        instance a labelled (deprecated) import brought in by anything but a
+        binding that names it. A keyed import's instances are not checked:
+        they resolve like the session's own.
 
         Checked on the plan, before anything is constructed, so a refusal
         leaves nothing behind. Resolution would otherwise hand one over on
@@ -1343,7 +1380,12 @@ class SessionComponents:
         unsuffixed one is also what this session would build on its own, so
         which of the two is meant cannot be told.
         """
-        imported = self.imported
+        # A keyed import's instances are ordinary members of the namespace;
+        # only a labelled import's are held apart.
+        imported = {
+            instance: key for instance, key in self.imported.items()
+            if instance not in self.namespace_imports
+        }
         if not imported:
             return
         bindings = self.role_bindings.bindings
@@ -1495,10 +1537,20 @@ class SessionComponents:
             return ({},)
         if component_class.__init__ is Component.__init__:
             return ()
+        imported = sorted(
+            instance for instance in self.components
+            if implementation_of(instance) == name
+            and has_imported_suffix(instance)
+        )
         raise RuntimeError(
             f"Component '{name}' is required but defines a custom "
             "constructor. Add a top-level component mapping for "
             f"'{name}'."
+            + (
+                f" Imported without `instance_name`, {imported} fill a "
+                "dependency only when named: bind one to use it."
+                if imported else ""
+            )
         )
 
     def _construction_order(
@@ -1984,13 +2036,19 @@ class SessionComponents:
             ) from error
 
     def register_resource(self, component: Resource, overwrite=False) -> str:
-        return self._add_component(component, Resource, overwrite=overwrite)
+        return self._add_component(
+            component, Resource, overwrite=overwrite, by_hand=True,
+        )
 
     def register_hook(self, component: Hook, overwrite=False) -> str:
-        return self._add_component(component, Hook, overwrite=overwrite)
+        return self._add_component(
+            component, Hook, overwrite=overwrite, by_hand=True,
+        )
 
     def add_step(self, component: Step, overwrite=False) -> str:
-        return self._add_component(component, Step, overwrite=overwrite)
+        return self._add_component(
+            component, Step, overwrite=overwrite, by_hand=True,
+        )
 
     def _add_component(
             self,
@@ -1999,8 +2057,11 @@ class SessionComponents:
             *,
             overwrite: bool,
             inject: bool = True,
+            by_hand: bool = False,
     ) -> str:
         self._validate_component(component, base_type, overwrite=overwrite)
+        if by_hand:
+            check_not_imported_suffix(component.name, "Registered component")
         existing = self.components.get(component.name)
         if existing is not None and existing is not component:
             self._refuse_if_held(existing, "replace")
@@ -2059,6 +2120,14 @@ class SessionComponents:
                 continue
             injected = _given_prerequisites(consumer)
             if injected is None:
+                continue
+            if consumer.name in self.imported:
+                # An imported component keeps the wiring its checkpoint
+                # recorded: only the instance it holds may be replaced, by
+                # one of the same name. Bindings do not wire it.
+                for asked, held in list(injected.items()):
+                    if getattr(held, "name", None) == replacement.name:
+                        injected[asked] = replacement
                 continue
             for edge in declared_edges(type(consumer)):
                 if not edge.injects:
