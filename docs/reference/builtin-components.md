@@ -32,6 +32,7 @@ which registers all built-ins. Their classes are also importable from
 | `fine_tuned_model` | Resource | `head(backbone(x))` with part of the backbone frozen; requires `backbone` and `head`; [fine-tuning](fine-tuning.md#fine_tuned_model) |
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations |
 | `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
+| `model_diagram` | Session hook | Draws the `model`'s data flow (from its first forward call), and the component wiring of the model and of the whole session, into the session dir; rank 0; [below](#model_diagram); also in analysis sessions |
 
 `dataset` and `model` are declared roles (see [Role
 bindings](../guide/02-wiring-components.md#role-bindings)) with no default
@@ -208,6 +209,64 @@ not adjusted automatically. Teardown
 closes the writer and terminates the external process.
 If setup fails after creating either handle, rollback closes the writer when
 present and terminates the partially started process.
+
+### `model_diagram`
+
+Configure `model_diagram: {}` to get pictures of the model and the session
+in the session dir, on rank 0:
+
+- `model_diagram.*` -- how data flows through the model. It is taken from
+  the model's **first forward call** in the run, so it shows the real inputs
+  (keyword inputs by name), the modules and the torch operations between
+  them (`cat`, `+`, ...), linked by the tensors that flow, with their shapes.
+  A framework block is a dashed cluster naming the instance that fills its
+  role (`sequence_encoder TorchTransformerEncoder = torch_transformer_encoder`).
+- `model_diagram_components.*` -- the model's component wiring: the model
+  and every component it is wired to, an arrow per role, each with its class
+  and the parameters it holds itself (trainable, and frozen). Imported
+  components name their import. Drawn when the session starts.
+- `model_diagram_session.*` -- the whole session's component wiring: every
+  resource, hook and step, grouped by kind. Solid arrows are requirements
+  (labelled with the role when it differs from the instance, so
+  per-component wiring such as `dataset: imagenet#val` shows), dashed arrows
+  are data from the step or hook that writes an `iteration_context` key to
+  the one that reads it (labelled with the key), dotted arrows are `@wraps`
+  and `@activates`. It is the wiring the execution graph prints, drawn.
+  Drawn when the session starts.
+
+Each is written as `.dot` (Graphviz) and `.mmd` (Mermaid, which GitHub and
+VS Code render) text, and as the pictures `formats` lists.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `depth` | `2` | Module levels below the model drawn as boxes; deeper modules are part of their ancestor's box |
+| `show_shape_ops` | `false` | Draw `view`, `reshape`, `transpose`, ... as nodes; otherwise they are folded into the edges |
+| `collapse_repeats` | `true` | Draw a chain of numbered layers of one type once (`layers.0-5 TransformerEncoderLayer x6`) |
+| `component_wiring` | `true` | Also draw component wiring; `false` draws the model diagram only |
+| `scope` | `both` | Which component wiring: `model` (`_components`), `session` (`_session`) or `both` |
+| `formats` | `[png, svg]` | Pictures to write: `png`, `svg`, `pdf` |
+| `dpi` | `150` | PNG resolution |
+| `file` | `model_diagram` | File name stem; a suffixed instance appends `_<suffix>` |
+
+Pictures are laid out by **Graphviz** when its `dot` program is on `PATH`
+(`conda install -c conda-forge graphviz`, or `apt-get install graphviz`; it
+is a system program, not a Python package). Without it they are drawn with
+matplotlib, in layers and without cluster boxes, and a warning says so.
+
+The recording adds a little Python work to that one forward call (about a
+millisecond on a small ViT) and is removed right after it; drawing takes
+well under a second, once. With DDP the other ranks wait for that at their
+next collective. Nothing that goes wrong while recording or drawing stops
+the run: it is reported as a `RuntimeWarning`.
+
+It draws the module bound to `model`. For another one -- a teacher, say --
+wire a second instance to it:
+`model_diagram#teacher: {dependencies_role_bindings: {model: teacher_model}}`.
+
+Limits: only what runs inside the model's `forward` is drawn (a loss outside
+it is not); the diagram shows the path the first call took; a
+`torch.compile`d model is skipped with a warning, its operations cannot be
+seen.
 
 ## Analysis built-ins
 

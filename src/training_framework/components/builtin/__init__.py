@@ -12,6 +12,7 @@ from training_framework.components.builtin.data import (
     AnalysisDataManager,
     DataManager,
 )
+from training_framework.components.builtin.diagram import ModelDiagram
 from training_framework.components.builtin.distributed import DDPResource
 from training_framework.components.builtin.fine_tuning import (
     FineTunedModel,
@@ -60,6 +61,7 @@ __all__ = [
     "LayerInspector",
     "LoadBatch",
     "Logger",
+    "ModelDiagram",
     "ModulePart",
     "OptimizerResource",
     "OptimizerStep",

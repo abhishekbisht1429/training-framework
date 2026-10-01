@@ -328,3 +328,72 @@ def test_pickled_config_dumper_writes_the_session_configuration(tmp_path):
 
     with open(tmp_path / "config.yaml") as config_file:
         assert yaml.safe_load(config_file) == session.full_config
+
+
+# -- model_diagram -------------------------------------------------------------------
+
+
+def _model_diagram_hook(session):
+    (hook,) = [h for h in session.get_all_hooks() if h.name == "model_diagram"]
+    return hook
+
+
+def test_a_worker_restored_from_state_draws_every_model_diagram(tmp_path):
+    from tests.components.builtin.test_model_diagram import model_config, run, written
+    from training_framework.engine import load_session_for_worker
+
+    parent = TrainingSession(model_config(tmp_path, diagram={"depth": 4}))
+    # A spawned worker gets the parent's session as pickled state.
+    state = pickle.loads(pickle.dumps(parent.get_state()))
+    worker = load_session_for_worker(state, rank=0)
+    run(worker)
+
+    assert {name.split(".")[0] for name in written(worker)} == {
+        "model_diagram", "model_diagram_components", "model_diagram_session",
+    }
+    # The configuration travelled: depth 4 shows the collapsed layers.
+    dot_path = worker.session_config.session_dir + "/model_diagram.dot"
+    with open(dot_path, encoding="utf-8") as file:
+        assert "TransformerEncoderLayer x3" in file.read()
+
+
+def test_model_diagram_pickles_and_copies_while_waiting_to_record(tmp_path):
+    import copy
+    import warnings
+
+    from tests.components.builtin.test_model_diagram import inputs, model_config, written
+    from tests.test_utils import resource_named
+
+    session = TrainingSession(model_config(tmp_path, diagram={"component_wiring": False}))
+    images, conditioning = inputs()
+    with session:
+        hook = _model_diagram_hook(session)
+        copies = [pickle.loads(pickle.dumps(hook)), copy.deepcopy(hook), copy.copy(hook)]
+        # A copy is not recording: ending its run reports nothing missing.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            for duplicate in copies:
+                duplicate.post_session(session)
+        # The original still records the model's first forward call, once.
+        resource_named(session, "model").eval()(images, **conditioning)
+
+    assert written(session) == [f"model_diagram.{ext}" for ext in ("dot", "mmd", "png", "svg")]
+    assert all(duplicate.written == [] for duplicate in copies)
+
+
+def test_a_checkpoint_saved_while_waiting_restores_model_diagram(tmp_path):
+    from tests.components.builtin.test_model_diagram import model_config, run, written
+
+    session = TrainingSession(model_config(tmp_path, diagram={"depth": 4, "scope": "model"}))
+    with pytest.warns(RuntimeWarning, match="the model never ran a forward call"):
+        with session:
+            saved = Checkpointer.save_checkpoint(session, tmp_path / "saved")
+    resumed = Checkpointer.load_checkpoint(saved)
+    run(resumed)
+
+    assert {name.split(".")[0] for name in written(resumed)} == {
+        "model_diagram", "model_diagram_components",
+    }
+    dot_path = resumed.session_config.session_dir + "/model_diagram.dot"
+    with open(dot_path, encoding="utf-8") as file:
+        assert "TransformerEncoderLayer x3" in file.read()

@@ -382,6 +382,19 @@ class Session(Stateful, metaclass=CaptureInitMeta):
         """The session-wide role bindings (role -> implementation)."""
         return self._components.bindings
 
+    @property
+    def imported_components(self) -> dict[str, str]:
+        """Each instance `import_components` brought in -> the import that
+        brought it (`import_components.<key>`)."""
+        return dict(self._components.imported)
+
+    def resolved_component_edges(self) -> dict:
+        """Each component's edges (`components.edges.Edge`), resolved as the
+        session resolved them: what it requires, wraps and brings along, and
+        the writer of each `iteration_context` key it reads. Component name
+        -> its edges; an edge's `target` is None when nothing answers it."""
+        return self._components.component_edges()
+
     def resolve_component_name(self, name: str) -> str:
         return self._components.resolve_name(name)
 

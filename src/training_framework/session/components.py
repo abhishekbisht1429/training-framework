@@ -1109,6 +1109,22 @@ class SessionComponents:
         self._check_binding_consumers(set(self.components), suffixed=False)
         self._binding_check_pending = False
 
+    def component_edges(self) -> dict[str, list[Edge]]:
+        """Every held component's edges, resolved as this session resolved
+        them: an injected prerequisite to the instance the component was
+        given, a read to its key's writer."""
+        components = list(self.components.values())
+        context_keys = context_keys_of(components)
+        wiring = wiring_of(components)
+        active = set(self.components)
+        return {
+            component.name: self._resolved_edges(
+                component, component.name, active,
+                context_keys=context_keys, wiring=wiring,
+            )
+            for component in components
+        }
+
     def _resolved_edges(
             self,
             component: Component | type[Component],

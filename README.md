@@ -63,6 +63,16 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
+### Optional: Graphviz
+
+The `model_diagram` built-in lays out its pictures with Graphviz when the
+`dot` program is installed, and falls back to matplotlib otherwise. Graphviz
+is a system program, so it is not a pip dependency:
+
+```bash
+conda install -c conda-forge graphviz   # or: sudo apt-get install graphviz
+```
+
 ## Quick start
 
 This example defines a stateful resource, a training step, and a lifecycle hook. The framework discovers the component module, creates the components from YAML, spawns a worker, and runs five iterations.
