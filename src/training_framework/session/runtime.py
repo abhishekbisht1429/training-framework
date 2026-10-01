@@ -1,9 +1,8 @@
-import os
-import traceback
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from training_framework.components.edges import context_mapping
+from training_framework.session.failure_report import worker_failure_report
 from training_framework.session.config import SessionPhase
 
 if TYPE_CHECKING:
@@ -241,14 +240,9 @@ def report_worker_exception(
         else 0
     )
     try:
-        session._dist_manager_err_conn.send({
-            "type": "error",
-            "rank": rank,
-            "pid": os.getpid(),
-            "exception_type": str(exc_type),
-            "message": str(exc_val),
-            "traceback": traceback.format_exc(),
-        })
+        session._dist_manager_err_conn.send(
+            worker_failure_report(rank, exc_val),
+        )
     except OSError:
         # The parent already closed the pipe; don't mask the real exception.
         return

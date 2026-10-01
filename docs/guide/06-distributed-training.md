@@ -246,6 +246,35 @@ setup runs before DDP setup. Do not also declare that model as requiring `ddp`,
 because the two requirements would form a cycle. During teardown, the wrapped
 reference is cleared and the process group is destroyed.
 
+## When a worker fails
+
+When a worker fails, the engine stops the others and raises
+`training_framework.engine.WorkerFailedError` (a `RuntimeError`) from the
+`TrainingEngine` block. Its message is one line naming the worker and what
+it raised:
+
+```
+training_framework.engine.failures.WorkerFailedError: Worker pid=3191272 (rank 0) failed: RuntimeError: failure raised inside spawned worker
+```
+
+The worker's traceback is the error's cause, so Python prints it first, in
+its usual form -- `File "/path/to/your_component.py", line 231, in run` --
+which IDEs turn into links, followed by "The above exception was the direct
+cause of the following exception:" and the parent's own frames. The worker
+also prints the same traceback on its own stderr when it fails, earlier in
+the log. Only the first failing rank is raised; ranks that fail as a
+consequence (a broken collective, say) show in their own output.
+
+A worker that ends without raising -- killed by a signal, as the
+out-of-memory killer does with SIGKILL, or exiting with a non-zero code --
+is a failure too: `... failed: it was killed by signal 9 (SIGKILL) without
+reporting an error`.
+
+The error's attributes: `rank`, `pid`, `exitcode` (None while the worker was
+still running when it reported), `exception_type` (`ValueError`, or
+`module.Name` for a type outside the builtins), `worker_message` and
+`worker_traceback` -- the last three None when the worker reported nothing.
+
 ## Devices and ranks
 
 A rank runs on CUDA ordinal `rank % <visible devices>`. Ordinals are relative

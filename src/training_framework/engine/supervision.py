@@ -1,7 +1,13 @@
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from multiprocessing.connection import wait
 from typing import Any
+
+from training_framework.engine.failures import (
+    failure_from_report,
+    failure_without_report,
+)
+from training_framework.session.failure_report import FAILURE_REPORT_TYPE
 
 
 _MAX_PROGRESS_POLL_INTERVAL = 1.0
@@ -92,6 +98,12 @@ def join_or_terminate(wrappers: list, timeout: float) -> None:
 
 
 def process_ready_waitables(waitables, ready_waitables):
+    """Read what is ready; return the first worker failure, or None.
+
+    A worker reports a failure on its error connection before it exits;
+    one that exits with a non-zero code and no report (killed, or exited
+    without raising) is a failure too. Only the first failure is kept.
+    """
     failure = None
     ready_waitables.sort(key=lambda key: waitables[key][0] == "sentinel")
 
@@ -105,12 +117,13 @@ def process_ready_waitables(waitables, ready_waitables):
         if ready_waitable_type == "connection":
             try:
                 message = ready_waitable.recv()
-                if isinstance(message, dict):
+                if _is_failure_report(message):
                     waitables.pop(ready_waitable, None)
                     ready_waitable.close()
-                    failure = RuntimeError(
-                        f"Worker pid={wrapper.process.pid} failed:\n"
-                        f"{message}"
+                    failure = failure or failure_from_report(
+                        message,
+                        pid=wrapper.process.pid,
+                        rank=wrapper.rank,
                     )
                 else:
                     print(f"Unknown message type received! {message}")
@@ -120,8 +133,10 @@ def process_ready_waitables(waitables, ready_waitables):
         elif ready_waitable_type == "sentinel":
             waitables.pop(ready_waitable, None)
             wrapper.process.join()
+            exitcode = wrapper.process.exitcode
 
-            if wrapper.process.exitcode != 0:
+            if exitcode != 0:
+                report = None
                 while (
                         not wrapper.error_conn.closed
                         and wrapper.error_conn.poll()
@@ -130,16 +145,22 @@ def process_ready_waitables(waitables, ready_waitables):
                         message = wrapper.error_conn.recv()
                     except EOFError:
                         break
-
-                    if message.get("type") == "error":
-                        failure = RuntimeError(
-                            f"Worker pid={wrapper.process.pid} failed:\n{message}"
-                            if message is not None
-                            else (
-                                f"Worker pid={wrapper.process.pid} failed with "
-                                f"exit code {wrapper.process.exitcode}"
-                            )
-                        )
+                    if report is None and _is_failure_report(message):
+                        report = message
+                failure = failure or (
+                    failure_from_report(
+                        report,
+                        pid=wrapper.process.pid,
+                        rank=wrapper.rank,
+                        exitcode=exitcode,
+                    )
+                    if report is not None else
+                    failure_without_report(
+                        pid=wrapper.process.pid,
+                        rank=wrapper.rank,
+                        exitcode=exitcode,
+                    )
+                )
             waitables.pop(wrapper.error_conn, None)
             if not wrapper.error_conn.closed:
                 wrapper.error_conn.close()
@@ -147,6 +168,13 @@ def process_ready_waitables(waitables, ready_waitables):
             raise RuntimeError("Unknown ready waitable type!")
 
     return failure
+
+
+def _is_failure_report(message) -> bool:
+    return (
+        isinstance(message, Mapping)
+        and message.get("type") == FAILURE_REPORT_TYPE
+    )
 
 
 def _report_progress(wrapper, now: float, last_status_times: dict) -> None:

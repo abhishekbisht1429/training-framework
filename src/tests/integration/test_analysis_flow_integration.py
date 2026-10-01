@@ -205,7 +205,7 @@ def test_spawned_analysis_failure_reports_rank_and_tears_down(tmp_path, capfd):
 
     message = str(raised.value)
     assert "analysis step exploded" in message
-    assert "'rank': 0" in message
+    assert "(rank 0)" in message
     assert "KeyError" not in message
     # The failed iteration is rolled back, so teardown sees the last
     # completed one.

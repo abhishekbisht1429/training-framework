@@ -1,7 +1,5 @@
-import os
 import signal
 import time
-import traceback
 from collections.abc import Mapping
 
 import torch
@@ -21,6 +19,7 @@ from training_framework.components.config import (
     find_component_entry,
     with_component_entry,
 )
+from training_framework.session.failure_report import worker_failure_report
 from training_framework.session.imports import stored_bindings
 from training_framework.session.components import SessionComponents
 from training_framework.session.config import normalize_session_type
@@ -264,17 +263,7 @@ def session_process_worker(
             # Session.__exit__ already reports failures raised while the
             # session was active; only report the rest (e.g. load or setup).
             if session is None or not session.worker_exception_reported:
-                error_conn.send({
-                    "type": "error",
-                    "rank": rank,
-                    "pid": os.getpid(),
-                    "exception_type": (
-                        f"{type(error).__module__}."
-                        f"{type(error).__qualname__}"
-                    ),
-                    "message": str(error),
-                    "traceback": traceback.format_exc(),
-                })
+                error_conn.send(worker_failure_report(rank, error))
         except OSError:
             # The parent already closed the pipe; re-raise the real error.
             pass

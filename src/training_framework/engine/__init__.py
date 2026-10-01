@@ -2,6 +2,7 @@
 
 from training_framework.engine.config import Configurator
 from training_framework.engine.core import TrainingEngine
+from training_framework.engine.failures import RemoteTraceback, WorkerFailedError
 from training_framework.engine.topology import (
     HostedRendezvous,
     LaunchTopology,
@@ -18,8 +19,10 @@ __all__ = [
     "Configurator",
     "HostedRendezvous",
     "LaunchTopology",
+    "RemoteTraceback",
     "SessionProcessWrapper",
     "TrainingEngine",
+    "WorkerFailedError",
     "host_rendezvous",
     "load_session_for_worker",
     "resolve_launch_topology",
