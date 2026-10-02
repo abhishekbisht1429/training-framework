@@ -247,11 +247,19 @@ VS Code render) text, and as the pictures `formats` lists.
 | `formats` | `[png, svg]` | Pictures to write: `png`, `svg`, `pdf` |
 | `dpi` | `150` | PNG resolution |
 | `file` | `model_diagram` | File name stem; a suffixed instance appends `_<suffix>` |
+| `graphviz_dot` | none | Path of Graphviz's `dot`, when it is not found by itself (below) |
 
-Pictures are laid out by **Graphviz** when its `dot` program is on `PATH`
-(`conda install -c conda-forge graphviz`, or `apt-get install graphviz`; it
-is a system program, not a Python package). Without it they are drawn with
-matplotlib, in layers and without cluster boxes, and a warning says so.
+Pictures are laid out by **Graphviz** (`conda install -c conda-forge
+graphviz`, or `apt-get install graphviz`; it is a system program, not a
+Python package). Its `dot` is looked for, in order, at `graphviz_dot`, at the
+`GRAPHVIZ_DOT` environment variable, on `PATH`, and beside the running
+Python -- where a conda or virtual environment installs it, so it is found
+even when an IDE runs the environment's interpreter without activating it.
+A `graphviz_dot` or `GRAPHVIZ_DOT` that is not an executable is reported,
+not passed over. Without Graphviz the pictures are drawn with matplotlib:
+top-down rows, boxes sized from their labels, components of one kind side by
+side with a colour legend, no cluster boxes; arrows may cross boxes. A
+warning says so and lists where `dot` was looked for.
 
 The recording adds a little Python work to that one forward call (about a
 millisecond on a small ViT) and is removed right after it; drawing takes

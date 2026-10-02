@@ -64,6 +64,7 @@ class ModelDiagramConfig:
     formats: Any = ("png", "svg")
     dpi: Any = 150
     file: Any = "model_diagram"
+    graphviz_dot: Any = None
 
     def __post_init__(self):
         self.depth = _positive_int(self.depth, "depth")
@@ -85,6 +86,13 @@ class ModelDiagramConfig:
                 f"got {formats!r}"
             )
         self.formats = tuple(dict.fromkeys(formats))
+        if self.graphviz_dot is not None and (
+                not isinstance(self.graphviz_dot, str) or not self.graphviz_dot
+        ):
+            raise ValueError(
+                "graphviz_dot must be the path of Graphviz's `dot`; got "
+                f"{self.graphviz_dot!r}"
+            )
         if not isinstance(self.file, str) or not valid_stem(self.file):
             raise ValueError(
                 "file must be a file name without a directory (letters, "
@@ -239,7 +247,7 @@ class ModelDiagram(SessionHook):
             graph: Graph = build()
             written, fallback = write_diagram(
                 graph, self._run.directory, stem, self._cfg.formats,
-                self._cfg.dpi,
+                self._cfg.dpi, self._cfg.graphviz_dot,
             )
         except Exception as error:  # a picture must not stop the run
             self._warn(f"drawing {stem} failed: {error!r}")
