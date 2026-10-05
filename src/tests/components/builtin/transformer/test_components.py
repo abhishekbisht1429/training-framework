@@ -17,6 +17,7 @@ from training_framework.components import (
 )
 from training_framework.components.builtin import TrainedModel
 from training_framework.components.builtin.transformer import (
+    AttentionPooledEncoder,
     AttentionPooling,
     ClassToken,
     ConditionedPoolingQuery,
@@ -899,3 +900,181 @@ def test_a_block_is_shared_by_two_composites_as_one_instance(tmp_path):
     pooled = resource_named(session, "pooled_patch_transformer")
     plain = resource_named(session, "patch_transformer")
     assert pooled.patch_embedding is plain.patch_embedding
+
+
+# -- attention_pooled_encoder: has a patch_transformer -----------------
+
+
+def _encoder_config(tmp_path, *, encoder="patch_transformer", extra=None):
+    """`attention_pooled_encoder` as the model, `encoder` filling the role
+    `patch_transformer`; the pooling roles are bound once, for the session."""
+    blocks = [
+        "conv_patch_embedding", "learned_positional_embedding_2d",
+        "torch_transformer_encoder", "attention_pooling", "learned_pooling_query",
+    ]
+    config = {
+        "session_config": _session_config(tmp_path / "training"),
+        "role_bindings": {
+            "model": "attention_pooled_encoder",
+            "patch_embedding": "conv_patch_embedding",
+            "positional_embedding": "learned_positional_embedding_2d",
+            "sequence_encoder": "torch_transformer_encoder",
+            "pooling": "attention_pooling",
+            "pooling_query": "learned_pooling_query",
+        },
+        "attention_pooled_encoder": {},
+        encoder: {},
+        **{name: BLOCK_CONFIGS[name] for name in blocks},
+    }
+    if encoder != "patch_transformer":
+        config["role_bindings"]["patch_transformer"] = encoder
+    config.update(extra or {})
+    return config
+
+
+_PADDING_MASK = torch.tensor([[False, False, False, True], [False, True, True, True]])
+
+
+def test_attention_pooled_encoder_is_registered_and_requires_its_roles():
+    for session_type in ("training", "analysis"):
+        assert component_registry(session_type)["attention_pooled_encoder"] \
+            is AttentionPooledEncoder
+    assert "attention_pooled_encoder" not in component_registry()
+    assert not issubclass(AttentionPooledEncoder, PatchTransformer)
+    assert set(AttentionPooledEncoder.required_resources) == {
+        "patch_transformer", "pooling", "pooling_query",
+    }
+
+
+def test_attention_pooled_encoder_attaches_a_patch_transformer(tmp_path):
+    session = TrainingSession(_encoder_config(tmp_path))
+    model = resource_named(session, "model")
+
+    assert type(model) is AttentionPooledEncoder
+    assert model.patch_transformer is resource_named(session, "patch_transformer")
+    assert model.pooling is resource_named(session, "attention_pooling")
+    assert model.embed_dim == EMBED_DIM
+    assert model(torch.randn(2, 3, 8, 8)).shape == (2, 2, EMBED_DIM)
+
+
+@pytest.mark.parametrize("class_token", [False, True])
+def test_attention_pooled_encoder_matches_pooled_patch_transformer(tmp_path, class_token):
+    encoder = resource_named(TrainingSession(_encoder_config(
+        tmp_path / "new",
+        extra={"patch_transformer": {"class_token": class_token}},
+    )), "model").eval()
+    pooled = resource_named(TrainingSession(_pooled_config(
+        tmp_path / "old",
+        extra={"pooled_patch_transformer": {"class_token": class_token}},
+    )), "model").eval()
+    patch = encoder.patch_transformer
+    for role in PatchTransformer.blocks():
+        getattr(pooled, role).load_state_dict(getattr(patch, role).state_dict())
+    for role in ("pooling", "pooling_query"):
+        getattr(pooled, role).load_state_dict(getattr(encoder, role).state_dict())
+    if class_token:
+        pooled.class_token.load_state_dict(patch.class_token.state_dict())
+    images = torch.randn(2, 3, 8, 8)
+
+    torch.testing.assert_close(encoder(images), pooled(images))
+    torch.testing.assert_close(
+        encoder(images, key_padding_mask=_PADDING_MASK),
+        pooled(images, key_padding_mask=_PADDING_MASK),
+    )
+
+
+def test_encode_with_mask_widens_the_mask_only_with_a_class_token(tmp_path):
+    plain = resource_named(TrainingSession(_encoder_config(tmp_path / "a")), "model")
+    with_token = resource_named(TrainingSession(_encoder_config(
+        tmp_path / "b", extra={"patch_transformer": {"class_token": True}},
+    )), "model")
+    images = torch.randn(2, 3, 8, 8)
+
+    tokens, mask = plain.patch_transformer.encode_with_mask(images, _PADDING_MASK)
+    assert tokens.shape == (2, 4, EMBED_DIM)
+    assert mask is _PADDING_MASK
+    tokens, mask = with_token.patch_transformer.encode_with_mask(images, _PADDING_MASK)
+    assert tokens.shape == (2, 5, EMBED_DIM)
+    torch.testing.assert_close(
+        mask, torch.cat([torch.zeros(2, 1, dtype=torch.bool), _PADDING_MASK], dim=1),
+    )
+    assert with_token.patch_transformer.encode_with_mask(images)[1] is None
+
+
+def test_a_pooled_patch_transformer_fills_the_patch_transformer_role(tmp_path):
+    session = TrainingSession(_encoder_config(
+        tmp_path, encoder="pooled_patch_transformer",
+        extra={"pooled_patch_transformer": {"class_token": True}},
+    ))
+    model = resource_named(session, "model").eval()
+    inner = model.patch_transformer
+
+    assert type(inner) is PooledPatchTransformer
+    # The session's bindings give both composites the same pooling blocks.
+    assert inner.pooling is model.pooling
+    assert inner.pooling_query is model.pooling_query
+    images = torch.randn(2, 3, 8, 8)
+    tokens, mask = inner.encode_with_mask(images, _PADDING_MASK)
+    expected = model.pooling(
+        tokens, model.pooling_query(2), key_padding_mask=mask,
+    )
+    # Its tokens are pooled once, never its already pooled forward output.
+    output = model(images, key_padding_mask=_PADDING_MASK)
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(output, inner(images, key_padding_mask=_PADDING_MASK))
+
+
+def test_attention_pooled_encoder_with_a_pooled_patch_transformer_round_trips(tmp_path):
+    session = TrainingSession(_encoder_config(
+        tmp_path, encoder="pooled_patch_transformer",
+    ))
+    model = resource_named(session, "model").eval()
+
+    worker_session = TrainingSession.from_state(
+        pickle.loads(pickle.dumps(session.get_state()))
+    )
+    restored = resource_named(worker_session, "model").eval()
+
+    assert type(restored.patch_transformer) is PooledPatchTransformer
+    assert restored.patch_transformer.pooling is restored.pooling
+    images = torch.randn(2, 3, 8, 8)
+    torch.testing.assert_close(restored(images), model(images))
+
+
+def test_attention_pooled_encoder_owns_nothing_and_links_its_roles(tmp_path):
+    session = TrainingSession(_encoder_config(
+        tmp_path, extra={"patch_transformer": {"class_token": True}},
+    ))
+
+    state = session.get_state()["components_state"]
+
+    assert state["attention_pooled_encoder"]["state"]["state_dict"] == {}
+    assert state["attention_pooled_encoder"]["state"]["linked"] == {
+        "patch_transformer": "patch_transformer",
+        "pooling": "attention_pooling",
+        "pooling_query": "learned_pooling_query",
+    }
+    assert set(state["patch_transformer"]["state"]["state_dict"]) == {
+        "class_token.token",
+    }
+
+
+@pytest.mark.parametrize("block, other", [
+    ("attention_pooling", "'patch_transformer' produces 8 but 'pooling' accepts 16"),
+    ("learned_pooling_query",
+     "'pooling_query' produces 16 but the encoded tokens are 8"),
+])
+def test_attention_pooled_encoder_refuses_mismatched_widths(tmp_path, block, other):
+    extra = {block: {**BLOCK_CONFIGS[block], "embed_dim": 16}}
+    if block == "learned_pooling_query":
+        extra["attention_pooling"] = BLOCK_CONFIGS["attention_pooling"]
+
+    with pytest.raises(ValueError, match=other):
+        TrainingSession(_encoder_config(tmp_path, extra=extra))
+
+
+def test_attention_pooled_encoder_refuses_config_keys(tmp_path):
+    with pytest.raises(ValueError, match="unknown keys"):
+        TrainingSession(_encoder_config(
+            tmp_path, extra={"attention_pooled_encoder": {"class_token": True}},
+        ))

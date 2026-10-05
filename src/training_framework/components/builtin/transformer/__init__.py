@@ -1,6 +1,7 @@
 """Transformer blocks as components, plus the pieces they share."""
 
 from training_framework.components.builtin.transformer.components import (
+    AttentionPooledEncoder,
     AttentionPooling,
     ConditionedPoolingQuery,
     ConvPatchEmbedding,
@@ -15,6 +16,7 @@ from training_framework.components.builtin.transformer.components import (
     SequenceEncoderBlock,
     SinusoidalPositionalEmbedding2D,
     SizedBlock,
+    TokenEncoderBlock,
     TorchTransformerEncoder,
 )
 from training_framework.components.builtin.transformer.modules import (
@@ -23,6 +25,7 @@ from training_framework.components.builtin.transformer.modules import (
 )
 
 __all__ = [
+    "AttentionPooledEncoder",
     "AttentionPooling",
     "ClassToken",
     "ConditionedPoolingQuery",
@@ -38,6 +41,7 @@ __all__ = [
     "SequenceEncoderBlock",
     "SinusoidalPositionalEmbedding2D",
     "SizedBlock",
+    "TokenEncoderBlock",
     "TokenReduction",
     "TorchTransformerEncoder",
 ]

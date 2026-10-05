@@ -3,8 +3,9 @@
 Each block is a `ModuleResource` that creates its own weights in `__init__`,
 like any other PyTorch module, and declares its configuration with a
 `config_schema`. The composite models (`patch_transformer`,
-`pooled_patch_transformer`) depend on block *roles* and attach whatever is
-bound to them during construction, so they are wiring plus a forward pass.
+`pooled_patch_transformer`, `attention_pooled_encoder`) depend on block
+*roles* and attach whatever is bound to them during construction, so they are
+wiring plus a forward pass.
 `role_bindings` chooses which implementation fills each role.
 """
 
@@ -97,6 +98,20 @@ class PoolingQueryBlock(SizedBlock, Protocol):
             batch_size: int,
             **conditioning: torch.Tensor,
     ) -> torch.Tensor: ...
+
+
+class TokenEncoderBlock(SizedBlock, Protocol):
+    """What `attention_pooled_encoder` needs from its `patch_transformer`.
+
+    `embed_dim` is the input width; `out_embed_dim`, when exposed, the width
+    of the returned tokens. The mask returned covers the returned tokens.
+    """
+
+    def encode_with_mask(
+            self,
+            images: torch.Tensor,
+            key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 
 role(
@@ -749,6 +764,73 @@ def _block_widths(block: nn.Module) -> tuple[int | None, int | None]:
     )
 
 
+class _BlockComposite(ModuleResource):
+    """Attach the blocks bound to a composite's roles and check their widths.
+
+    Subclasses list their roles in `block_chain` (passing tokens along, in
+    order) and `parallel_blocks` (feeding the chain sideways). Each block is
+    attached during construction as a submodule named after its role, owning
+    and checkpointing its own weights.
+    """
+
+    block_chain: ClassVar[tuple[str, ...]] = ()
+    """Roles that pass tokens along, in order."""
+
+    parallel_blocks: ClassVar[tuple[str, ...]] = ()
+    """Roles that feed the chain sideways and must match its width."""
+
+    @classmethod
+    def blocks(cls) -> tuple[str, ...]:
+        """Return every role this composite attaches, chain first."""
+        return cls.block_chain + cls.parallel_blocks
+
+    def __init__(self, config: Mapping | None = None) -> None:
+        super().__init__(config)
+        for role_name in type(self).blocks():
+            # Attached under the role's own name: the forward pass and the
+            # width check both read the blocks that way.
+            setattr(self, role_name, self.get_dependency(role_name))
+
+    def _check_block_widths(self) -> int:
+        """Check every block agrees on token width, and return the chain's
+        input width."""
+        widths = {
+            role: _block_widths(getattr(self, role))
+            for role in type(self).blocks()
+        }
+        missing = sorted(
+            role for role, (in_dim, out_dim) in widths.items()
+            if not isinstance(in_dim, int) or not isinstance(out_dim, int)
+        )
+        if missing:
+            raise TypeError(
+                f"{self._component_name()} blocks must expose an integer "
+                f"embed_dim; missing for {missing}"
+            )
+
+        chain = type(self).block_chain
+        for producer, consumer in zip(chain, chain[1:]):
+            produced = widths[producer][1]
+            accepted = widths[consumer][0]
+            if produced != accepted:
+                raise ValueError(
+                    f"{self._component_name()} blocks disagree on embed_dim: "
+                    f"'{producer}' produces {produced} but '{consumer}' "
+                    f"accepts {accepted}"
+                )
+
+        chain_width = widths[chain[-1]][1]
+        for role in type(self).parallel_blocks:
+            produced = widths[role][1]
+            if produced != chain_width:
+                raise ValueError(
+                    f"{self._component_name()} blocks disagree on embed_dim: "
+                    f"'{role}' produces {produced} but the encoded tokens are "
+                    f"{chain_width}"
+                )
+        return widths[chain[0]][0]
+
+
 @dataclass
 class PatchTransformerConfig:
     class_token: Any = False
@@ -786,7 +868,7 @@ class PatchTransformerConfig:
 @requires_resource("sequence_encoder")
 @resource("patch_transformer", session_type=TRAINING_SESSION_TYPE)
 @resource("patch_transformer", session_type=ANALYSIS_SESSION_TYPE)
-class PatchTransformer(ModuleResource):
+class PatchTransformer(_BlockComposite):
     """Encode images as tokens: patch embedding, positions, sequence encoder.
 
     The blocks bound to `block_chain` are attached during construction and
@@ -806,22 +888,9 @@ class PatchTransformer(ModuleResource):
         "positional_embedding",
         "sequence_encoder",
     )
-    """Roles that pass tokens along, in order."""
-
-    parallel_blocks: ClassVar[tuple[str, ...]] = ()
-    """Roles that feed the chain sideways and must match its width."""
-
-    @classmethod
-    def blocks(cls) -> tuple[str, ...]:
-        """Return every role this composite attaches, chain first."""
-        return cls.block_chain + cls.parallel_blocks
 
     def __init__(self, config: Mapping | None = None) -> None:
         super().__init__(config)
-        for role_name in type(self).blocks():
-            # Attached under the role's own name: the forward pass and the
-            # width check both read the blocks that way.
-            setattr(self, role_name, self.get_dependency(role_name))
         embed_dim = self._check_block_widths()
         if self._cfg.class_token is not None:
             self.class_token = ClassToken(embed_dim, **self._cfg.class_token)
@@ -834,43 +903,10 @@ class PatchTransformer(ModuleResource):
     def embed_dim(self) -> int:
         return self.patch_embedding.embed_dim
 
-    def _check_block_widths(self) -> int:
-        """Check every block agrees on token width, and return it."""
-        widths = {
-            role: _block_widths(getattr(self, role))
-            for role in type(self).blocks()
-        }
-        missing = sorted(
-            role for role, (in_dim, out_dim) in widths.items()
-            if not isinstance(in_dim, int) or not isinstance(out_dim, int)
-        )
-        if missing:
-            raise TypeError(
-                f"{self._component_name()} blocks must expose an integer "
-                f"embed_dim; missing for {missing}"
-            )
-
-        chain = type(self).block_chain
-        for producer, consumer in zip(chain, chain[1:]):
-            produced = widths[producer][1]
-            accepted = widths[consumer][0]
-            if produced != accepted:
-                raise ValueError(
-                    f"{self._component_name()} blocks disagree on embed_dim: "
-                    f"'{producer}' produces {produced} but '{consumer}' "
-                    f"accepts {accepted}"
-                )
-
-        chain_width = widths[chain[-1]][1]
-        for role in type(self).parallel_blocks:
-            produced = widths[role][1]
-            if produced != chain_width:
-                raise ValueError(
-                    f"{self._component_name()} blocks disagree on embed_dim: "
-                    f"'{role}' produces {produced} but the encoded tokens are "
-                    f"{chain_width}"
-                )
-        return widths[chain[0]][0]
+    @property
+    def out_embed_dim(self) -> int:
+        """Width of the encoded tokens: the sequence encoder's output."""
+        return _block_widths(self.sequence_encoder)[1]
 
     def encode(
             self,
@@ -882,14 +918,21 @@ class PatchTransformer(ModuleResource):
 
         `key_padding_mask` covers the `N` patch tokens only.
         """
-        tokens, _ = self._encode(images, key_padding_mask)
+        tokens, _ = self.encode_with_mask(images, key_padding_mask)
         return tokens
 
-    def _encode(
+    def encode_with_mask(
             self,
             images: torch.Tensor,
-            key_padding_mask: torch.Tensor | None,
+            key_padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Return `encode`'s tokens and the padding mask that covers them.
+
+        With `class_token` enabled the mask is widened by one leading
+        unmasked position; otherwise it is returned as given. This is the
+        `TokenEncoderBlock` contract a pooling composite relies on, rather
+        than `forward`, which a subclass may change.
+        """
         if images.ndim != 4:
             raise ValueError(f"Expected [B, C, H, W], got {tuple(images.shape)}")
         tokens = self.patch_embedding(images)
@@ -935,12 +978,64 @@ class PooledPatchTransformer(PatchTransformer):
             key_padding_mask: torch.Tensor | None = None,
             **conditioning: torch.Tensor,
     ) -> torch.Tensor:
-        tokens, key_padding_mask = self._encode(images, key_padding_mask)
+        tokens, key_padding_mask = self.encode_with_mask(images, key_padding_mask)
+        query = self.pooling_query(tokens.shape[0], **conditioning)
+        return self.pooling(tokens, query, key_padding_mask=key_padding_mask)
+
+
+@dataclass
+class AttentionPooledEncoderConfig:
+    """No options: the class token belongs to the bound `patch_transformer`.
+    Declared so an unknown key is refused rather than ignored."""
+
+
+@requires_resource("pooling")
+@requires_resource("pooling_query")
+@requires_resource("patch_transformer")
+@resource("attention_pooled_encoder", session_type=TRAINING_SESSION_TYPE)
+@resource("attention_pooled_encoder", session_type=ANALYSIS_SESSION_TYPE)
+class AttentionPooledEncoder(_BlockComposite):
+    """Pool a token encoder's output by attention.
+
+    Unlike `PooledPatchTransformer`, which *is* a `PatchTransformer`, this
+    *has* one: the resource bound to the `patch_transformer` role, attached
+    as `self.patch_transformer`. Anything meeting `TokenEncoderBlock` fills
+    the role, including a `PooledPatchTransformer` (its tokens are read with
+    `encode_with_mask`, never its pooled `forward`).
+
+    `forward(images, key_padding_mask=None, **conditioning)` matches
+    `PooledPatchTransformer.forward` and returns `(B, Q, embed_dim)`.
+    Config: none (`{}`); a class token is configured on `patch_transformer`.
+    """
+
+    config_schema = AttentionPooledEncoderConfig
+
+    block_chain: ClassVar[tuple[str, ...]] = ("patch_transformer", "pooling")
+    parallel_blocks: ClassVar[tuple[str, ...]] = ("pooling_query",)
+
+    def __init__(self, config: Mapping | None = None) -> None:
+        super().__init__(config)
+        self._check_block_widths()
+
+    @property
+    def embed_dim(self) -> int:
+        return _block_widths(self.pooling)[1]
+
+    def forward(
+            self,
+            images: torch.Tensor,
+            key_padding_mask: torch.Tensor | None = None,
+            **conditioning: torch.Tensor,
+    ) -> torch.Tensor:
+        tokens, key_padding_mask = self.patch_transformer.encode_with_mask(
+            images, key_padding_mask,
+        )
         query = self.pooling_query(tokens.shape[0], **conditioning)
         return self.pooling(tokens, query, key_padding_mask=key_padding_mask)
 
 
 __all__ = [
+    "AttentionPooledEncoder",
     "AttentionPooling",
     "ConditionedPoolingQuery",
     "ConvPatchEmbedding",
@@ -955,5 +1050,6 @@ __all__ = [
     "SequenceEncoderBlock",
     "SinusoidalPositionalEmbedding2D",
     "SizedBlock",
+    "TokenEncoderBlock",
     "TorchTransformerEncoder",
 ]

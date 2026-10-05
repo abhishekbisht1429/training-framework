@@ -38,6 +38,7 @@ from training_framework.components.builtin.optimization import (
     OptimizerStep,
 )
 from training_framework.components.builtin.transformer import (
+    AttentionPooledEncoder,
     PatchTransformer,
     PooledPatchTransformer,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "AnalysisDataManager",
     "AnalysisForward",
     "AnalysisLogger",
+    "AttentionPooledEncoder",
     "Backward",
     "Checkpointer",
     "ClipGradients",

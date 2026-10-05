@@ -80,9 +80,9 @@ built; any other module is checked on its first forward pass.
 
 ## Models
 
-Two composite resources, registered for both training and analysis
-sessions, depend on the roles above. Their only config key is `class_token`
-(see below); otherwise use `{}`:
+Three composite resources, registered for both training and analysis
+sessions, depend on the roles above. The first two take one config key,
+`class_token` (see below); otherwise use `{}`:
 
 - `patch_transformer` requires `patch_embedding`, `positional_embedding` and
   `sequence_encoder`. `model(images, key_padding_mask=None)` returns
@@ -90,6 +90,13 @@ sessions, depend on the roles above. Their only config key is `class_token`
 - `pooled_patch_transformer` also requires `pooling_query` and `pooling`.
   `model(images, key_padding_mask=None, **conditioning)` passes
   `conditioning` to the query block and returns `(B, Q, embed_dim)`.
+- `attention_pooled_encoder` *has* a patch transformer rather than being
+  one: it requires `patch_transformer`, `pooling` and `pooling_query`, takes
+  no config, and has the same call and output as `pooled_patch_transformer`.
+  A class token is configured on the bound `patch_transformer`. It reads
+  tokens with `patch_transformer.encode_with_mask(images, key_padding_mask)`,
+  which returns `(tokens, mask)` with the mask widened for a class token
+  (the `TokenEncoderBlock` contract), never with `forward`.
 
 A composite is wiring: it attaches the blocks bound to its roles as submodules
 named after those roles (`model.patch_embedding`, `model.sequence_encoder`,
@@ -101,10 +108,38 @@ weights of its own apart from an optional class token, and is usable as soon
 as it is constructed -- no `setup()` required, which is what `trained_model`
 relies on.
 
+### Filling `patch_transformer` with `pooled_patch_transformer`
+
+`pooled_patch_transformer` is a `patch_transformer`, so it can fill that role
+for `attention_pooled_encoder`, which takes its tokens through
+`encode_with_mask` and pools them once:
+
+```yaml
+role_bindings:
+  model: attention_pooled_encoder
+  patch_transformer: pooled_patch_transformer
+  pooling: attention_pooling
+  pooling_query: learned_pooling_query
+  # ... patch_embedding, positional_embedding, sequence_encoder as below
+attention_pooled_encoder: {}
+pooled_patch_transformer: {}
+```
+
+It still requires its own `pooling` and `pooling_query`. Bound for the whole
+session as above, both composites share one instance of each, so nothing is
+duplicated. With different instances (per-consumer bindings), its pooling
+weights are never used and get no gradient, which DDP rejects (`ddp` does
+not enable `find_unused_parameters`). Role binding checks only that the
+bound component is a resource, not what its `forward` returns. A consumer of
+your own that calls `forward` on a bound `pooled_patch_transformer` gets
+pooled `(B, Q, embed_dim)` output, not tokens. Use `encode` or
+`encode_with_mask` there.
+
 ## Class token
 
 Set `class_token: true`, or pass `ClassToken` options such as
-`class_token: {init_std: 0.02}`, on either model to prepend one learned token.
+`class_token: {init_std: 0.02}`, on `patch_transformer` or
+`pooled_patch_transformer` to prepend one learned token.
 It is added after positional embedding, so it has no position of its own (a
 learned token doesn't need one) and positional-table resizing is unaffected.
 Outputs gain one leading token: `patch_transformer` returns
