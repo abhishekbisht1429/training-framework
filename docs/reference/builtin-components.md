@@ -31,7 +31,7 @@ which registers all built-ins. Their classes are also importable from
 | `module_part` | Resource | A part of the module resource bound to `source` (e.g. an imported model), and one method of it; owns no weights; [fine-tuning](fine-tuning.md#module_part) |
 | `fine_tuned_model` | Resource | `head(backbone(x))` with part of the backbone frozen; requires `backbone` and `head`; [fine-tuning](fine-tuning.md#fine_tuned_model) |
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations |
-| `tensorboard` | Resource | Starts TensorBoard and exposes a `SummaryWriter` |
+| `tensorboard` | Resource | Exposes a `SummaryWriter`; starts a TensorBoard server unless `serve: false` |
 | `model_diagram` | Session hook | Draws the `model`'s data flow (from its first forward call), and the component wiring of the model and of the whole session, into the session dir; rank 0; [below](#model_diagram); also in analysis sessions |
 
 `dataset` and `model` are declared roles (see [Role
@@ -80,6 +80,7 @@ tensorboard:
   host: "127.0.0.1"
   port: 6006
   logdir: ./runs/tensorboard  # optional TensorBoard server log directory
+  # serve: false              # write events only; start no server (then omit host/port/logdir)
 ```
 
 ### `ddp`
@@ -201,7 +202,14 @@ tensorboard.summary_writer.add_scalar(
 )
 ```
 
-The executable must be available and the selected port must be free. A
+`serve` (default `true`) controls the server. With `serve: false` the
+resource starts no `tensorboard` process and only creates the writer, in the
+same directory; `host`, `port`, and `logdir` configure the server alone, so
+giving any of them with `serve: false` is an error. Use it where a server
+cannot or need not run, such as batch jobs sharing a node, and view the
+events later with a TensorBoard you start yourself.
+
+When serving, the executable must be available and the selected port must be free. A
 [second instance](../guide/02-wiring-components.md#configuring-a-component-more-than-once)
 writes its events to a directory carrying its instance suffix, but **must be
 given a `port` of its own**: two servers cannot share one, and the port is

@@ -117,8 +117,22 @@ class Logger(LifecycleHook, ExtendableComponent):
 @rank_zero_only
 @resource("tensorboard")
 class Tensorboard(Resource):
+    # Keys that only configure the server; with `serve: false` there is no
+    # server for them to configure.
+    _SERVER_KEYS = ("host", "port", "logdir")
 
     def __init__(self, config: dict):
+        serve = config.get("serve", True)
+        if not isinstance(serve, bool):
+            raise ValueError(f"serve must be a boolean; got {serve!r}")
+        if not serve:
+            given = [key for key in self._SERVER_KEYS if key in config]
+            if given:
+                raise ValueError(
+                    "tensorboard starts no server with serve: false, so "
+                    f"{', '.join(given)} would have no effect; remove "
+                    f"{'it' if len(given) == 1 else 'them'}"
+                )
         self._config = config
         self._tb_process: subprocess.Popen | None = None
         self._tb_summary_writer = None
@@ -128,21 +142,23 @@ class Tensorboard(Resource):
         return self._tb_summary_writer
 
     def setup(self, session: Session):
-        logdir = self._config.get(
-            "logdir",
-            session.session_config.session_dir,
-        )
-        tensorboard_args = [
-            "tensorboard",
-            "--logdir", logdir,
-            "--host", self._config["host"],
-            "--port", str(self._config["port"]),
-        ]
-        print("Tensorboard Arguments: ", " ".join(tensorboard_args))
-        self._tb_process = subprocess.Popen(tensorboard_args)
+        serve = self._config.get("serve", True)
+        if serve:
+            logdir = self._config.get(
+                "logdir",
+                session.session_config.session_dir,
+            )
+            tensorboard_args = [
+                "tensorboard",
+                "--logdir", logdir,
+                "--host", self._config["host"],
+                "--port", str(self._config["port"]),
+            ]
+            print("Tensorboard Arguments: ", " ".join(tensorboard_args))
+            self._tb_process = subprocess.Popen(tensorboard_args)
         # Named per instance, so two writers do not merge their scalars into
         # one event directory. The port cannot be shared and is not defaulted:
-        # a second instance must be given one of its own.
+        # a second serving instance must be given one of its own.
         writer_dir = f"{type(self).__name__}_tensorboard"
         if self.instance_suffix is not None:
             writer_dir = f"{writer_dir}_{self.instance_suffix}"
@@ -152,10 +168,11 @@ class Tensorboard(Resource):
                 writer_dir,
             )
         )
-        time.sleep(3)
-        if self._tb_process.poll() is not None:
-            print("Failed to start tensorboard process...")
-            raise RuntimeError("Failed to start tensorboard process...")
+        if serve:
+            time.sleep(3)
+            if self._tb_process.poll() is not None:
+                print("Failed to start tensorboard process...")
+                raise RuntimeError("Failed to start tensorboard process...")
 
     def teardown(self, session):
         print("releasing resources...")
