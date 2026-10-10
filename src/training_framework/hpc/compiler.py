@@ -225,7 +225,8 @@ def compile_plan(
         if node.kind == "task_set":
             command = [
                 node.context.interpreter, "-m", "training_framework.hpc.task",
-                "--config", "{config}", *manifest.engine_options,
+                "--config", "{config}", "--record", "{record}",
+                "--plan", plan_file, *manifest.engine_options,
             ]
             lead = dialect.signal_lead(timeout, node.stop_grace_seconds)
             if lead >= node.resources.walltime_seconds:
@@ -277,6 +278,7 @@ def compile_plan(
             "framework": framework_expectation,
             "components_packages": components_packages,
             "cluster_paths": sorted(data.cluster_paths),
+            "requires_python": str(requires_python) if requires_python else None,
         },
         engine_options=manifest.engine_options,
         notes=tuple(notes),

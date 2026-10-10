@@ -11,7 +11,8 @@ import re
 import shlex
 from collections.abc import Mapping
 
-from training_framework.hpc.plan import ExecutionContext, JobNode
+from training_framework.hpc.plan import JobNode
+from training_framework.hpc.shell import render_context
 from training_framework.hpc.schema import Resources, SlurmSettings
 
 #: Directives the dialect sets itself; neither the profile's defaults nor a
@@ -107,7 +108,7 @@ class SlurmDialect:
 
         lines = ["#!/bin/bash"]
         lines += [f"#SBATCH {directive}" for directive in directives]
-        lines.append("set -euo pipefail")
+        lines.append("set -eo pipefail")
         lines += render_context(node.context)
         if node.kind == "task_set":
             lines += _task_body(batch_dir, node.group, command)
@@ -116,25 +117,15 @@ class SlurmDialect:
         return "\n".join(lines) + "\n"
 
 
-def render_context(context: ExecutionContext) -> list[str]:
-    """Shell lines that establish an `ExecutionContext`."""
-    lines = list(context.hooks)
-    if context.unset_variables:
-        lines.append("unset " + " ".join(context.unset_variables))
-    for name, value in context.set_variables:
-        lines.append(f"export {name}={shlex.quote(value)}")
-    if context.pythonpath:
-        lines.append("export PYTHONPATH=" + shlex.quote(":".join(context.pythonpath)))
-    lines.append(f"cd {shlex.quote(context.working_directory)}")
-    return lines
-
-
 def _task_body(batch_dir: str, group: str, command: list[str]) -> list[str]:
     table = shlex.quote(f"{batch_dir}/groups/{group}/tasks.tsv")
-    run = shlex.join(command).replace("'{config}'", '"$config"').replace("{config}", '"$config"')
+    run = shlex.join(command)
+    for name in ("config", "record"):
+        run = run.replace(f"'{{{name}}}'", f'"${name}"').replace(f"{{{name}}}", f'"${name}"')
     return [
         f"config={shlex.quote(batch_dir)}/$(awk -F'\\t' -v i=\"$SLURM_ARRAY_TASK_ID\" "
         f"'NR > 1 && $1 == i {{print $4}}' {table})",
+        'record="$(dirname "$config")/record.json"',
         "interrupted=0",
         "child=''",
         'on_signal() { interrupted=1; [ -n "$child" ] && kill -INT "$child" 2>/dev/null || true; }',
