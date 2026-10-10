@@ -85,3 +85,14 @@ def test_a_non_interactive_submit_needs_yes(fake_cluster, tmp_path, monkeypatch,
     captured = capsys.readouterr()
     assert "pass --yes" in captured.err and "staged:" in captured.out
     assert not submitted_jobs(fake_cluster)
+
+
+def test_a_failed_submit_still_reports_the_batch_and_receipt(fake_cluster, tmp_path, monkeypatch, capsys):
+    root, path = setup(tmp_path, monkeypatch)
+    identity = probed_identity(path, capsys)
+    root, path = setup(tmp_path / "second", monkeypatch, identity)
+    monkeypatch.setenv("FAKE_SBATCH", "refuse")
+    assert main(["submit", str(root / "batch.yaml"), "--profiles", str(path), "--yes"]) == 2
+    captured = capsys.readouterr()
+    assert "failed: " in captured.out and "receipt: " in captured.out
+    assert "invalid partition" in captured.err

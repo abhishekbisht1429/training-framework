@@ -188,3 +188,22 @@ def test_a_batch_directory_is_never_reused(compiled, tmp_path):
 def test_receipt_updates_leave_no_temporary_files(compiled, tmp_path):
     run(compiled, tmp_path, FakeSubmitter())
     assert os.listdir(tmp_path / "receipts") == [f"{compiled.plan.batch_id}.json"]
+
+
+def test_log_directories_exist_before_any_job_is_submitted(compiled, tmp_path):
+    seen = []
+
+    class CheckingSubmitter(FakeSubmitter):
+        def submit(self, node, script_path, dependencies):
+            seen.append(os.path.isdir(f"{compiled.plan.batch_dir}/logs/{node.group}"))
+            return super().submit(node, script_path, dependencies)
+
+    run(compiled, tmp_path, CheckingSubmitter())
+    assert seen == [True, True]
+
+
+def test_an_error_after_the_receipt_exists_carries_it(compiled, tmp_path):
+    with pytest.raises(HpcError) as error:
+        run(compiled, tmp_path, FakeSubmitter(fail_at=0))
+    assert error.value.receipt.status == "failed"
+    assert error.value.receipt.path.endswith(f"{compiled.plan.batch_id}.json")

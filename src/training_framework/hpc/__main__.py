@@ -156,12 +156,19 @@ def _submit(args, profile) -> int:
     manifest = compiled.manifest
     stager = SourceStager(repository, ports["executor"], ports["transfer"],
                           manifest.source_strategy, manifest.source_url)
-    receipt = submit(
-        plan, manifest.raw, stager=stager, filesystem=ports["filesystem"],
-        executor=ports["executor"], submitter=ports["submitter"],
-        transfer=ports["transfer"], probe=ports["probe"], owner=current_process_owner(),
-        upload_limit=profile.upload_limit, review=_review(args.yes),
-    )
+    try:
+        receipt = submit(
+            plan, manifest.raw, stager=stager, filesystem=ports["filesystem"],
+            executor=ports["executor"], submitter=ports["submitter"],
+            transfer=ports["transfer"], probe=ports["probe"], owner=current_process_owner(),
+            upload_limit=profile.upload_limit, review=_review(args.yes),
+        )
+    except HpcError as error:
+        receipt = getattr(error, "receipt", None)
+        if receipt is not None:
+            print(f"{receipt.status}: {plan.batch_dir}")
+            print(f"receipt: {receipt.path}")
+        raise
     print(f"{receipt.status}: {plan.batch_dir}")
     for node_id, job_ref in receipt.submitted_jobs():
         print(f"  {node_id}: job {job_ref}")

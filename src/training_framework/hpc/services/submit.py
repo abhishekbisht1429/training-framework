@@ -114,6 +114,18 @@ def submit(
     preparer = DataPreparer(plan, filesystem, executor)
     uploader = DataUploader(plan, filesystem, transfer, probe, owner or {})
     receipt = Receipt.create(receipts_dir or receipts.default_receipts_dir(), plan)
+    try:
+        return _submit(plan, manifest_raw, receipt, environment, preparer, uploader,
+                       stager, filesystem, executor, submitter, transfer, probe,
+                       upload_limit, confirm, review)
+    except HpcError as error:
+        error.receipt = receipt   # so callers can say where the receipt is
+        raise
+
+
+def _submit(plan, manifest_raw, receipt, environment, preparer, uploader, stager,
+            filesystem, executor, submitter, transfer, probe, upload_limit, confirm,
+            review) -> Receipt:
     skipped: set[str] = set()       # nodes whose work is already done
     try:
         environment.check_identity()
@@ -139,6 +151,9 @@ def submit(
         if not filesystem.mkdir_atomic(plan.batch_dir):
             raise HpcError(f"{plan.batch_dir} already exists; batch directories are never reused")
         receipt.mirror_to(filesystem, f"{plan.batch_dir}/receipt.json")
+        # Slurm does not create --output directories (only some versions do).
+        for node in plan.nodes:
+            filesystem.makedirs(f"{plan.batch_dir}/logs/{node.group or node.id}")
         stager.stage(plan.sha, f"{plan.batch_dir}/source")
         for relative, content in sorted(plan_files(plan, manifest_raw).items()):
             filesystem.write(f"{plan.batch_dir}/{relative}", content.encode())
