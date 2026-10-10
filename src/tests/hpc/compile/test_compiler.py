@@ -451,3 +451,16 @@ def test_preflight_expectations_are_precomputed(tmp_path):
     assert plan.preflight["components_packages"] == ["my_project.components"]
     assert plan.preflight["interpreter"]["identity"]["version"] == "3.12.4"
     json.dumps(plan.as_json())  # serializable
+
+
+@pytest.mark.parametrize("source", ["uv", "conda"])
+def test_a_found_bootstrap_interpreter_is_linked_to_a_fixed_path(tmp_path, source):
+    data = profile()
+    data["profiles"]["cluster"]["env"] = {"python_source": source}
+    root = make_repo(tmp_path, manifest=manifest(environment={
+        "requirements": "requirements/hpc.txt", "python": "3.12"}))
+    plan = compile_repo(root, profile_data=data).plan
+    context = plan.node("setup").context
+    assert context.interpreter == f"{plan.batch_dir}/nodes/setup/python"
+    assert "ln -sfn" in context.hooks[-1] and "$(" in context.hooks[-1]
+    assert f"exec {context.interpreter} {plan.batch_dir}/bootstrap.py" in plan.node("setup").script

@@ -16,7 +16,6 @@ import importlib
 import importlib.metadata
 import json
 import os
-import platform
 import signal
 import sys
 import tempfile
@@ -26,18 +25,14 @@ from datetime import datetime, timezone
 import yaml
 
 from training_framework.hpc import EXECUTION_PROTOCOL_VERSION
+from training_framework.hpc.remote.runtime import interpreter_identity
 
 SUPPORTED_PROTOCOL_VERSIONS = (EXECUTION_PROTOCOL_VERSION,)
 INTERRUPTED_EXIT = 75
 
 
 def interpreter_facts() -> dict:
-    return {
-        "implementation": sys.implementation.name,
-        "version": platform.python_version(),
-        "executable": sys.executable,
-        "platform": f"{sys.platform}-{platform.machine()}",
-    }
+    return interpreter_identity()
 
 
 def framework_facts() -> dict:
@@ -173,8 +168,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(preflight_facts(plan), sort_keys=True))
         return 0
     if args.prepare:
-        print("error: prepare nodes are not supported by this version yet", file=sys.stderr)
-        return 2
+        if not args.plan:
+            parser.error("--prepare needs --plan")
+        from training_framework.hpc.remote.prepare import run_prepare
+
+        return run_prepare(args.plan, args.prepare)
     if not (args.config and args.record and args.plan):
         parser.error("a task needs --config, --record, and --plan")
     return run_task(args.config, args.record, args.plan, engine_options)

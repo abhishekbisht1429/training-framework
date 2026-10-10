@@ -114,6 +114,16 @@ class Receipt:
         self.data["submission_order"].append(node_id)
         self.save()
 
+    def node_ran(self, node_id: str) -> None:
+        """A step that ran on the login node during submit (no job)."""
+        self.node(node_id)["status"] = "ran on login"
+        self.save()
+
+    def node_skipped(self, node_id: str) -> None:
+        """A step whose artifact was already ready."""
+        self.node(node_id)["status"] = "already ready"
+        self.save()
+
     def node_unknown(self, node_id: str) -> None:
         self.node(node_id)["status"] = "unknown"
         self.save()

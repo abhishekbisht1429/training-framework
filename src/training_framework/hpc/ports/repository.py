@@ -73,3 +73,22 @@ class GitRepository:
         """Git's content hash of a file or directory at `sha`."""
         result = self._run(["rev-parse", "--verify", "--quiet", self._spec(sha, path)])
         return result.stdout.decode().strip() if result.returncode == 0 else None
+
+    @staticmethod
+    def bundle_ref(sha: str) -> str:
+        return f"refs/hpc/stage-{sha}"
+
+    def create_bundle(self, sha: str, path: str) -> None:
+        """A bundle holding `sha` (`git bundle` needs a ref, so a temporary
+        one is created and always deleted)."""
+        ref = self.bundle_ref(sha)
+        result = self._run(["update-ref", ref, sha])
+        if result.returncode != 0:
+            raise HpcError(f"git update-ref failed: {result.stderr.decode().strip()}")
+        try:
+            result = self._run(["bundle", "create", "--quiet", path, ref])
+            if result.returncode != 0:
+                raise HpcError(f"git bundle failed: {result.stderr.decode().strip()}")
+        finally:
+            self._run(["update-ref", "-d", ref])
+

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import shlex
 import tomllib
 from datetime import datetime, timezone
 from typing import Any
@@ -40,6 +41,7 @@ from training_framework.hpc.config.requirements import (
     parse_requirements,
 )
 from training_framework.hpc.config.schema import Manifest, Profile, parse_manifest
+from training_framework.hpc.ports.shell import exec_script
 from training_framework.hpc.scheduler.slurm import SlurmDialect
 from training_framework.hpc.config.topology import check_topology, parse_engine_options
 
@@ -248,6 +250,8 @@ def compile_plan(
         rendered.append(dataclasses.replace(node, script=script))
     problems.raise_if_any()
 
+    if environment["managed"]:
+        environment["preflight_script"] = exec_script(task_context)
     components_packages = sorted({
         task.config["sessions"][0]["session_config"]["components_package"]
         for task in tasks
@@ -396,21 +400,36 @@ def _environment(manifest, profile, requirements, expectation, batch_id, batch_d
     environment = {
         "managed": True, "key": key, "location": location,
         "interpreter": f"{location}/bin/python", "fresh": fresh_env,
+        "backend": env.backend, "python_source": env.python_source,
+        "python": manifest.python_pin, "conda_packages": list(env.conda_packages),
+        "requirements": manifest.requirements,
     }
-    if env.bootstrap_python:
-        bootstrap = env.bootstrap_python
-    elif env.python_source == "site":
-        bootstrap = "python3"
-    elif env.python_source == "uv":
-        bootstrap = f"$(uv python find {manifest.python_pin})"
-    else:
-        bootstrap = "$(conda run -n base which python)"
+    bootstrap, resolve_hooks = bootstrap_interpreter(env, manifest.python_pin, batch_dir)
     setup_context = ExecutionContext(
         phase="setup", interpreter=bootstrap, environment=location,
         working_directory=batch_dir, pythonpath=(), set_variables=SET_VARIABLES,
-        unset_variables=UNSET_VARIABLES, hooks=hooks_setup,
+        unset_variables=UNSET_VARIABLES, hooks=hooks_setup + resolve_hooks,
     )
     return environment, setup_context
+
+
+def bootstrap_interpreter(env, pin: str | None, batch_dir: str) -> tuple[str, tuple[str, ...]]:
+    """The interpreter the setup node runs the bootstrap with, and the hook
+    lines that provide it. Commands are always quoted argument vectors, so an
+    interpreter found at run time (`uv`, `conda`) is linked to a fixed path in
+    the batch directory by a hook instead of being a shell expression."""
+    if env.bootstrap_python:
+        return env.bootstrap_python, ()
+    if env.python_source == "site":
+        return "python3", ()
+    link = f"{batch_dir}/nodes/setup/python"
+    if env.python_source == "uv":
+        find = (f"uv python install {shlex.quote(pin)} && "
+                f"ln -sfn \"$(uv python find {shlex.quote(pin)})\" {shlex.quote(link)}")
+    else:
+        find = ("ln -sfn \"$(conda run -n base python -c 'import sys; print(sys.executable)')\" "
+                f"{shlex.quote(link)}")
+    return link, (f"mkdir -p {shlex.quote(link.rsplit('/', 1)[0])}", find)
 
 
 def _context(phase, environment, source_dir, manifest, profile) -> ExecutionContext:

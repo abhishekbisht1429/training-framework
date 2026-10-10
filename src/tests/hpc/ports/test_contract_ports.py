@@ -17,20 +17,23 @@ from training_framework.hpc.ports.local import (
 )
 from training_framework.hpc.compile.plan import ExecutionContext, JobNode
 from training_framework.hpc.ports import Owner, SubmissionFailed, SubmissionUncertain
+from training_framework.hpc.ports.ssh import RsyncTransfer, SshExecutor, SshFilesystem
+from training_framework.hpc.scheduler.slurm_submitter import SlurmSubmitter
+from tests.hpc.fake_cluster import fake_cluster  # noqa: F401 (fixture)
 from tests.hpc.fakes import FakeJobProbe, FakeSubmitter
 
-EXECUTORS = [LocalExecutor]
-FILESYSTEMS = [LocalFilesystem]
-TRANSFERS = [LocalFileTransfer]
-SUBMITTERS = [FakeSubmitter]
+EXECUTORS = ["local", "ssh"]
+FILESYSTEMS = ["local", "ssh"]
+TRANSFERS = ["local", "rsync"]
+SUBMITTERS = ["fake", "slurm"]
 
 
 # RemoteExecutor -------------------------------------------------------------
 
 
 @pytest.fixture(params=EXECUTORS)
-def executor(request):
-    return request.param()
+def executor(request, fake_cluster):
+    return LocalExecutor() if request.param == "local" else SshExecutor("cluster")
 
 
 def context(tmp_path, **changes):
@@ -71,8 +74,8 @@ def test_a_failing_hook_stops_the_command(executor, tmp_path):
 
 
 @pytest.fixture(params=FILESYSTEMS)
-def filesystem(request):
-    return request.param()
+def filesystem(request, fake_cluster):
+    return LocalFilesystem() if request.param == "local" else SshFilesystem(SshExecutor("cluster"))
 
 
 def test_mkdir_is_atomic_and_exclusive(filesystem, tmp_path):
@@ -112,8 +115,8 @@ def test_rename_replaces_and_delete_removes_trees(filesystem, tmp_path):
 
 
 @pytest.fixture(params=TRANSFERS)
-def transfer(request):
-    return request.param()
+def transfer(request, fake_cluster):
+    return LocalFileTransfer() if request.param == "local" else RsyncTransfer("cluster")
 
 
 def test_sync_copies_one_way_and_resumes(transfer, tmp_path):
@@ -138,9 +141,29 @@ def test_sync_of_a_single_file(transfer, tmp_path):
 # SchedulerSubmitter ------------------------------------------------------------
 
 
+class SubmitterUnderTest:
+    """A submitter plus switches to make its next submission fail."""
+
+    def __init__(self, kind, monkeypatch):
+        self.kind, self.monkeypatch = kind, monkeypatch
+        self.fake = FakeSubmitter()
+
+    @property
+    def submitter(self):
+        return self.fake if self.kind == "fake" else SlurmSubmitter(SshExecutor("cluster"))
+
+    def fail_next(self, failure):
+        if self.kind == "fake":
+            self.fake.fail_at, self.fake.failure = len(self.fake.submitted), failure
+        elif failure == "definite":
+            self.monkeypatch.setenv("FAKE_SBATCH", "refuse")
+        else:
+            self.monkeypatch.setenv("FAKE_SSH_DOWN", "1")
+
+
 @pytest.fixture(params=SUBMITTERS)
-def submitter_class(request):
-    return request.param
+def under_test(request, fake_cluster, monkeypatch):
+    return SubmitterUnderTest(request.param, monkeypatch)
 
 
 def node(node_id):
@@ -148,25 +171,29 @@ def node(node_id):
                    context=context(Path(os.getcwd())))
 
 
-def test_submissions_return_distinct_references(submitter_class):
-    submitter = submitter_class()
+def test_submissions_return_distinct_references(under_test):
+    submitter = under_test.submitter
     first = submitter.submit(node("a"), "/b/a.sbatch", [])
     second = submitter.submit(node("b"), "/b/b.sbatch", [first])
-    assert first != second
+    assert first != second and first.isdigit()
 
 
-def test_definite_and_uncertain_failures_are_distinct(submitter_class):
-    with pytest.raises(SubmissionFailed):
-        submitter_class(fail_at=0, failure="definite").submit(node("a"), "/s", [])
-    with pytest.raises(SubmissionUncertain):
-        submitter_class(fail_at=0, failure="uncertain").submit(node("a"), "/s", [])
+@pytest.mark.parametrize(("failure", "error"), [("definite", SubmissionFailed),
+                                                ("uncertain", SubmissionUncertain)])
+def test_definite_and_uncertain_failures_are_distinct(under_test, failure, error):
+    under_test.fail_next(failure)
+    with pytest.raises(error):
+        under_test.submitter.submit(node("a"), "/s", [])
     assert not issubclass(SubmissionUncertain, SubmissionFailed)
 
 
-def test_cancel_reports_its_result(submitter_class):
-    submitter = submitter_class(cancel_fails={"1001"})
-    assert submitter.cancel("1000").ok
-    assert not submitter.cancel("1001").ok
+def test_cancel_reports_its_result(under_test):
+    submitter = under_test.submitter
+    job = submitter.submit(node("a"), "/s", [])
+    assert submitter.cancel(job).ok
+    if under_test.kind == "fake":
+        under_test.fake.cancel_fails.add("9999")
+    assert not submitter.cancel("9999").ok
 
 
 # LeaseOwnerProbe -----------------------------------------------------------------

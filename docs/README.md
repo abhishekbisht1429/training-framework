@@ -29,6 +29,8 @@ A task-ordered path. It picks up where the
    how a launch decides its topology, and coordinated stopping.
 7. [Analysis sessions](guide/07-analysis-sessions.md) — driving a trained
    checkpoint through an analysis workflow.
+8. [Running batches on an HPC cluster](guide/08-hpc-batches.md) — sweeps of
+   experiments as Slurm job arrays from one committed manifest.
 
 ## Look it up
 

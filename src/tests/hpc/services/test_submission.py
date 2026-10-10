@@ -188,11 +188,3 @@ def test_a_batch_directory_is_never_reused(compiled, tmp_path):
 def test_receipt_updates_leave_no_temporary_files(compiled, tmp_path):
     run(compiled, tmp_path, FakeSubmitter())
     assert os.listdir(tmp_path / "receipts") == [f"{compiled.plan.batch_id}.json"]
-
-
-def test_managed_environments_and_uploads_are_refused_for_now(tmp_path):
-    root = make_repo(tmp_path)
-    compiled = compile_repo(root)
-    with pytest.raises(HpcError, match="user-owned environment"):
-        run(compiled, tmp_path, FakeSubmitter())
-    assert not (tmp_path / "receipts").exists()
