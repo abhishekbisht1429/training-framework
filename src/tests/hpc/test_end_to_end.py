@@ -19,8 +19,8 @@ import torch
 import yaml
 
 import training_framework
-from training_framework.hpc.local import LocalExecutor, LocalFilesystem, LocalSourceStager
-from training_framework.hpc.submit import submit
+from training_framework.hpc.ports.local import LocalExecutor, LocalFilesystem, LocalSourceStager
+from training_framework.hpc.services.submit import submit
 from tests.hpc.batch_repo import PROFILE, compile_repo, make_repo
 from tests.hpc.fakes import LocalScheduler
 

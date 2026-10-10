@@ -10,10 +10,10 @@ from pathlib import Path
 
 import yaml
 
-from training_framework.hpc.content import HashCache, content_summary, default_cache_path
+from training_framework.hpc.compile.content import HashCache, content_summary, default_cache_path
 from training_framework.hpc.errors import HpcError
-from training_framework.hpc.repository import GitRepository
-from training_framework.hpc.schema import parse_profiles
+from training_framework.hpc.ports.repository import GitRepository
+from training_framework.hpc.config.schema import parse_profiles
 
 
 def default_profiles_path() -> Path:
@@ -61,7 +61,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _compile(args):
     # Imported here so `--help` stays fast.
-    from training_framework.hpc.compiler import compile_plan
+    from training_framework.hpc.compile.compiler import compile_plan
 
     profiles_path = args.profiles or default_profiles_path()
     if not profiles_path.exists():
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.suggest_data and compiled.suggestions:
             print(yaml.safe_dump({"data": {"sources": compiled.suggestions}}, sort_keys=False))
         return 0
-    from training_framework.hpc.render import write_plan
+    from training_framework.hpc.compile.render import write_plan
 
     try:
         written = write_plan(plan, compiled.manifest.raw, args.output)
