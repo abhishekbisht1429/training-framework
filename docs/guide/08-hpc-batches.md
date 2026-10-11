@@ -13,6 +13,9 @@ python -m training_framework.hpc render   experiments/sweep.yaml --output /tmp/p
 python -m training_framework.hpc submit   experiments/sweep.yaml
 ```
 
+Every key of the profile and the manifest is described in the
+[HPC configuration reference](../reference/hpc-configuration.md).
+
 Batches always run an exact, clean commit: commit the manifest, the training
 config, and the code first. Uncommitted or untracked files are an error.
 

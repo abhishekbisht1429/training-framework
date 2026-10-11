@@ -36,6 +36,8 @@ A task-ordered path. It picks up where the
 
 ## Look it up
 
+- [HPC configuration](reference/hpc-configuration.md) — every key of the HPC
+  profile and batch manifest, with defaults and rules.
 - [Built-in components](reference/builtin-components.md) — every component the
   framework ships with, and its configuration keys.
 - [Generic steps](reference/generic-steps.md) — `load_batch`, `forward` and
