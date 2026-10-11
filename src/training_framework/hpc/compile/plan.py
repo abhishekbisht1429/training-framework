@@ -24,9 +24,16 @@ class ExecutionContext:
     set_variables: tuple[tuple[str, str], ...]
     unset_variables: tuple[str, ...]
     hooks: tuple[str, ...]
+    #: Directories put first on PATH (the environment's `bin`), so commands
+    #: such as a prepare step's `python` resolve inside the environment.
+    path_prepend: tuple[str, ...] = ()
+    #: Argument vector every command runs under (e.g. `conda run -p ENV`).
+    launcher: tuple[str, ...] = ()
 
     def as_json(self) -> dict:
         return {
+            "path_prepend": list(self.path_prepend),
+            "launcher": list(self.launcher),
             "phase": self.phase,
             "interpreter": self.interpreter,
             "environment": self.environment,

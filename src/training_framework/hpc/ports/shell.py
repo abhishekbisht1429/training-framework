@@ -19,6 +19,8 @@ def render_context(context: ExecutionContext) -> list[str]:
         lines.append("unset " + " ".join(context.unset_variables))
     for name, value in context.set_variables:
         lines.append(f"export {name}={shlex.quote(value)}")
+    if context.path_prepend:
+        lines.append("export PATH=" + shlex.quote(":".join(context.path_prepend)) + ':"$PATH"')
     if context.pythonpath:
         lines.append("export PYTHONPATH=" + shlex.quote(":".join(context.pythonpath)))
     lines.append(f"cd {shlex.quote(context.working_directory)}")
@@ -28,4 +30,10 @@ def render_context(context: ExecutionContext) -> list[str]:
 def exec_script(context: ExecutionContext) -> str:
     """A `bash -c` script that establishes `context` and then executes its
     positional arguments as the command (`bash -c SCRIPT bash ARGV...`)."""
-    return "\n".join(["set -eo pipefail", *render_context(context), 'exec "$@"']) + "\n"
+    run = " ".join([*(shlex.quote(part) for part in context.launcher), '"$@"'])
+    return "\n".join(["set -eo pipefail", *render_context(context), f"exec {run}"]) + "\n"
+
+
+def launched(context: ExecutionContext, argv: list[str]) -> list[str]:
+    """`argv` as the context runs it (under its launcher, if any)."""
+    return [*context.launcher, *argv]

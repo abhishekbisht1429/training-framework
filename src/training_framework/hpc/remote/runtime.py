@@ -95,13 +95,18 @@ def current_process_owner():
             "start_time": process_start_time(pid)}
 
 
-def current_owner():
-    """The owner to record for this process: its Slurm job when it runs in
-    one (checkable from any host), else the process itself."""
-    job = os.environ.get("SLURM_JOB_ID")
+def current_owner(scheduler="slurm"):
+    """The owner to record for this process: its scheduler job when it runs
+    in one (checkable from any host), else the process itself."""
+    job = os.environ.get(JOB_SCHEDULERS[scheduler][0])
     if job:
         return {"job_ref": job}
     return current_process_owner()
+
+
+def owner_probe(scheduler="slurm"):
+    """Liveness of either owner kind, for `scheduler`'s jobs."""
+    return OwnerProbeRouter(JOB_SCHEDULERS[scheduler][1](), ProcessProbe())
 
 
 class ProcessProbe:
@@ -150,3 +155,8 @@ class OwnerProbeRouter:
         if owner.get("job_ref") is not None:
             return self.job_probe.is_alive(owner)
         return self.process_probe.is_alive(owner)
+
+
+#: The remote side of the scheduler composition point: per scheduler, the
+#: variable holding the current job's ID and the job-liveness probe.
+JOB_SCHEDULERS = {"slurm": ("SLURM_JOB_ID", SlurmJobProbe)}

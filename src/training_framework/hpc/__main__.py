@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -67,6 +68,11 @@ def _parser() -> argparse.ArgumentParser:
                                  help="build a managed environment for this batch only")
             command.add_argument("--yes", action="store_true",
                                  help="do not ask (also accepts uploads above upload_limit)")
+    status = commands.add_parser("status", help="show the state of every task of a submitted batch")
+    status.add_argument("batch_id", help="a batch id, or the path to its receipt")
+    status.add_argument("--receipts", type=Path, help="receipt directory "
+                        "(default: $XDG_STATE_HOME/training-framework/submissions)")
+    profile_options(status)
     probe = commands.add_parser("probe-python",
                                 help="print the site interpreter's identity for the profile")
     profile_options(probe)
@@ -101,16 +107,17 @@ def _compile(args, profile, fresh_env=False):
 def _cluster(profile):
     from training_framework.hpc.ports.local import LocalProcessProbe
     from training_framework.hpc.ports.ssh import RsyncTransfer, SshExecutor, SshFilesystem
-    from training_framework.hpc.scheduler.slurm_submitter import RemoteOwnerProbe, SlurmSubmitter
+    from training_framework.hpc.scheduler import get_scheduler
     from training_framework.hpc.services.artifacts import WorkstationProbe
 
     executor = SshExecutor(profile.ssh_host)
+    scheduler = get_scheduler(profile.scheduler)
     return {
         "executor": executor,
         "filesystem": SshFilesystem(executor),
-        "transfer": RsyncTransfer(profile.ssh_host),
-        "submitter": SlurmSubmitter(executor),
-        "probe": WorkstationProbe(RemoteOwnerProbe(executor), LocalProcessProbe()),
+        "transfer": RsyncTransfer(profile.ssh_host, show_progress=sys.stderr.isatty()),
+        "submitter": scheduler.submitter(executor),
+        "probe": WorkstationProbe(scheduler.owner_probe(executor), LocalProcessProbe()),
     }
 
 
@@ -143,6 +150,11 @@ def _review(assume_yes: bool):
     return review
 
 
+def _progress(message: str) -> None:
+    stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{stamp}] {message}", flush=True)
+
+
 def _submit(args, profile) -> int:
     from training_framework.hpc.remote.runtime import current_process_owner
     from training_framework.hpc.services.staging import SourceStager
@@ -161,7 +173,7 @@ def _submit(args, profile) -> int:
             plan, manifest.raw, stager=stager, filesystem=ports["filesystem"],
             executor=ports["executor"], submitter=ports["submitter"],
             transfer=ports["transfer"], probe=ports["probe"], owner=current_process_owner(),
-            upload_limit=profile.upload_limit, review=_review(args.yes),
+            upload_limit=profile.upload_limit, review=_review(args.yes), progress=_progress,
         )
     except HpcError as error:
         receipt = getattr(error, "receipt", None)
@@ -174,6 +186,26 @@ def _submit(args, profile) -> int:
         print(f"  {node_id}: job {job_ref}")
     print(f"receipt: {receipt.path}")
     return 0 if receipt.status == "submitted" else 1
+
+
+def _status(args, profile) -> int:
+    from training_framework.hpc.scheduler import get_scheduler
+    from training_framework.hpc.services.receipt import default_receipts_dir
+    from training_framework.hpc.services.status import batch_status, format_rows
+
+    path = Path(args.batch_id)
+    if not path.is_file():
+        path = Path(args.receipts or default_receipts_dir()) / f"{args.batch_id}.json"
+    if not path.is_file():
+        raise HpcError(f"no receipt for {args.batch_id} (looked at {path})")
+    receipt = json.loads(path.read_text())
+    ports = _cluster(profile)
+    scheduler = get_scheduler(profile.scheduler)
+    job_states = scheduler.job_states(ports["executor"]) if scheduler.job_states else None
+    print(f"batch {receipt['batch_id']}: {receipt['status']} | {receipt['batch_dir']}")
+    rows = batch_status(receipt, ports["filesystem"], ports["executor"], job_states)
+    print(format_rows(rows))
+    return 0
 
 
 def _probe_python(profile) -> int:
@@ -206,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
             return _probe_python(profile)
         if args.command == "submit":
             return _submit(args, profile)
+        if args.command == "status":
+            return _status(args, profile)
         compiled, _ = _compile(args, profile)
     except HpcError as error:  # includes PlanError, with every problem
         print(f"error: {error}", file=sys.stderr)

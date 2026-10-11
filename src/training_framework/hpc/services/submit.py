@@ -107,6 +107,7 @@ def submit(
         receipts_dir: str | None = None,
         confirm: Callable[[ExecutionPlan], bool] = lambda plan: True,
         review: Callable[[ExecutionPlan, Summary], bool] = lambda plan, summary: not summary.over_limit,
+        progress: Callable[[str], None] = lambda message: None,
 ) -> Receipt:
     """`review` sees the summary (uploads, sizes) and may decline; by default
     it declines an upload above `upload_limit`. `confirm` is a plain yes/no."""
@@ -117,7 +118,7 @@ def submit(
     try:
         return _submit(plan, manifest_raw, receipt, environment, preparer, uploader,
                        stager, filesystem, executor, submitter, transfer, probe,
-                       upload_limit, confirm, review)
+                       upload_limit, confirm, review, progress)
     except HpcError as error:
         error.receipt = receipt   # so callers can say where the receipt is
         raise
@@ -125,11 +126,16 @@ def submit(
 
 def _submit(plan, manifest_raw, receipt, environment, preparer, uploader, stager,
             filesystem, executor, submitter, transfer, probe, upload_limit, confirm,
-            review) -> Receipt:
+            review, progress) -> Receipt:
     skipped: set[str] = set()       # nodes whose work is already done
     try:
+        if environment.managed and plan.preflight["interpreter"].get("identity"):
+            progress("checking the cluster's site interpreter against the profile")
         environment.check_identity()
         env_ready = environment.ready()
+        if environment.managed:
+            progress(f"environment {plan.environment['key'][:12]}: "
+                     f"{'ready' if env_ready else 'will be built'}")
         pending_uploads = uploader.pending()
         if pending_uploads and (transfer is None or probe is None):
             raise HpcError("uploads need a file transfer and an owner probe")
@@ -154,6 +160,7 @@ def _submit(plan, manifest_raw, receipt, environment, preparer, uploader, stager
         # Slurm does not create --output directories (only some versions do).
         for node in plan.nodes:
             filesystem.makedirs(f"{plan.batch_dir}/logs/{node.group or node.id}")
+        progress(f"staging commit {plan.sha[:12]} into {plan.batch_dir}")
         stager.stage(plan.sha, f"{plan.batch_dir}/source")
         for relative, content in sorted(plan_files(plan, manifest_raw).items()):
             filesystem.write(f"{plan.batch_dir}/{relative}", content.encode())
@@ -178,18 +185,24 @@ def _submit(plan, manifest_raw, receipt, environment, preparer, uploader, stager
 
     try:
         for artifact in pending_uploads:
+            size = artifact.details.get("size")
+            progress(f"uploading data source '{artifact.source}' "
+                     f"({'' if size is None else f'{size} bytes, '}to {artifact.location})")
             uploader.upload(artifact)
         if environment.managed and not env_ready and plan.node("setup").location == "login":
             receipt.node_submitting("setup")
+            progress("building the environment on the login node (this can take several minutes)")
             environment.build_on_login()
             receipt.node_ran("setup")
             skipped.add("setup")
             env_ready = True
         if env_ready:
+            progress("preflight: checking the environment against the plan")
             run_preflight(plan, executor)
         for node in prepare_nodes:
             if node.id not in skipped and node.location == "login":
                 receipt.node_submitting(node.id)
+                progress(f"running prepare step {node.id} on the login node")
                 preparer.run_on_login(node)
                 receipt.node_ran(node.id)
                 skipped.add(node.id)
@@ -228,5 +241,7 @@ def _submit(plan, manifest_raw, receipt, environment, preparer, uploader, stager
             raise HpcError(receipt.data["error"]) from error
         refs[node.id] = job_ref
         receipt.node_submitted(node.id, job_ref)
+        tasks = f" ({node.task_count} task(s))" if node.kind == "task_set" else ""
+        progress(f"submitted {node.id} as job {job_ref}{tasks}")
     receipt.finish(receipts.SUBMITTED)
     return receipt

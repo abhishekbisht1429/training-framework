@@ -50,3 +50,7 @@ class SourceStager:
         if verify.status != 0:
             raise HpcError(f"commit {sha} is not reachable from {origin}")
         self._git(["-C", target, "checkout", "--quiet", "--detach", sha], "git checkout")
+        if self.strategy == "bundle":
+            # The checkout holds every object; the bundle would only double
+            # the batch's source storage.
+            self.executor.run(["rm", "-f", "--", f"{target}.bundle"])

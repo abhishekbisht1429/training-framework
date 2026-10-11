@@ -17,6 +17,7 @@ import importlib.metadata
 import json
 import os
 import signal
+import socket
 import sys
 import tempfile
 import traceback
@@ -106,6 +107,24 @@ def _run_directories(config: dict) -> list[str]:
     return sorted(glob.glob(os.path.join(sessions_dir, "session_*")))
 
 
+def log(message: str) -> None:
+    """A timestamped line in the task's scheduler log."""
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[hpc {stamp}] {message}", flush=True)
+
+
+def _variant_text(config_path: str) -> str:
+    path = os.path.join(os.path.dirname(config_path), "variant.json")
+    try:
+        with open(path) as handle:
+            variant = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    return " ".join(
+        f"{'.'.join(item['address']['path'])}={json.dumps(item['value'])}" for item in variant
+    )
+
+
 def run_task(config_path: str, record_path: str, plan_path: str,
              engine_options: list[str]) -> int:
     interrupted = False
@@ -125,6 +144,11 @@ def run_task(config_path: str, record_path: str, plan_path: str,
     with open(config_path, "rb") as handle:
         config_bytes = handle.read()
     config = yaml.safe_load(config_bytes)
+    task_name = os.path.relpath(os.path.dirname(config_path), os.path.join(plan["batch_dir"], "tasks"))
+    log(f"task {task_name} | {_variant_text(config_path) or 'no matrix values'}")
+    log(f"batch {plan['batch_id']} | commit {plan['sha'][:12]} | host {socket.gethostname()} | "
+        f"GPUs {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+    log(f"config {config_path}")
     started = datetime.now(timezone.utc).isoformat()
     status, error = 0, None
     try:
@@ -151,6 +175,8 @@ def run_task(config_path: str, record_path: str, plan_path: str,
         "finished": datetime.now(timezone.utc).isoformat(),
     }
     _write_atomic(record_path, record)
+    outcome = "interrupted" if interrupted else ("ok" if status == 0 else "failed")
+    log(f"finished: exit {record['exit_status']} ({outcome}) | record {record_path}")
     return record["exit_status"]
 
 

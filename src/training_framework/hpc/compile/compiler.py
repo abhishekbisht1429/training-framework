@@ -42,7 +42,7 @@ from training_framework.hpc.config.requirements import (
 )
 from training_framework.hpc.config.schema import Manifest, Profile, parse_manifest
 from training_framework.hpc.ports.shell import exec_script
-from training_framework.hpc.scheduler.slurm import SlurmDialect
+from training_framework.hpc.scheduler import get_scheduler
 from training_framework.hpc.config.topology import check_topology, parse_engine_options
 
 UNSET_VARIABLES = ("WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
@@ -97,7 +97,7 @@ def compile_plan(
             f"'{manifest.source_ref}'; check out that ref first"
         )
 
-    dialect = SlurmDialect(profile.slurm)
+    dialect = get_scheduler(profile.scheduler).dialect(profile.scheduler_settings)
     for problem in dialect.check_profile():
         problems.add(problem)
 
@@ -128,6 +128,11 @@ def compile_plan(
     batch_dir = f"{profile.roots['batches']}/{batch_id}"
     source_dir = f"{batch_dir}/source"
 
+    if profile.env.conda_run and profile.env.existing is None and profile.env.backend != "conda":
+        problems.add(
+            "profile env.conda_run needs a conda environment (env.backend: conda, "
+            "or env.existing pointing to one); with a venv it would have no effect"
+        )
     environment, setup_context = _environment(
         manifest, profile, requirements, expectation, batch_id, batch_dir, fresh_env,
     )
@@ -433,7 +438,12 @@ def bootstrap_interpreter(env, pin: str | None, batch_dir: str) -> tuple[str, tu
 
 
 def _context(phase, environment, source_dir, manifest, profile) -> ExecutionContext:
+    location = environment["location"]
+    launcher = (("conda", "run", "--no-capture-output", "-p", location)
+                if profile.env.conda_run else ())
     return ExecutionContext(
+        path_prepend=(f"{location}/bin",),
+        launcher=launcher,
         phase=phase,
         interpreter=environment["interpreter"],
         environment=environment["location"],

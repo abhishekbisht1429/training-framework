@@ -74,3 +74,24 @@ class RemoteOwnerProbe:
         if len(lines) < 2 or ")" not in lines[1]:
             return False
         return lines[1].rsplit(")", 1)[1].split()[19] == owner.start_time
+
+
+def job_states(executor):
+    """Live states of jobs and array elements (`squeue --array`); finished
+    jobs are simply absent."""
+    def query(job_refs: list[str]) -> dict:
+        states = {}
+        for job in job_refs:
+            result = executor.run(["squeue", "--noheader", "--array", "--jobs", job,
+                                   "--format", "%i|%T"])
+            if result.status != 0:
+                if "Invalid job id" in result.stderr:
+                    continue
+                raise RuntimeError(f"squeue failed: {result.stderr.strip()}")
+            for line in result.stdout.splitlines():
+                element, _, state = line.strip().partition("|")
+                if element:
+                    states[element] = state.lower()
+        return states
+    return query
+

@@ -35,7 +35,6 @@ MANIFEST_KEYS = frozenset({
 })
 HOOK_PHASES = ("common", "setup", "prepare", "task")
 LOCATIONS = ("job", "login")
-SCHEDULERS = ("slurm",)
 
 
 def parse_size(value: Any) -> int | None:
@@ -180,19 +179,13 @@ class EnvSettings:
 
 
 @dataclass(frozen=True)
-class SlurmSettings:
-    defaults: dict
-    partitions: dict
-    max_array_size: int
-
-
-@dataclass(frozen=True)
 class Profile:
     name: str
     ssh_host: str
     roots: dict[str, str]
     scheduler: str
-    slurm: SlurmSettings
+    #: The selected scheduler's own settings, parsed by its bundle.
+    scheduler_settings: Any
     hooks: dict[str, tuple[str, ...]]
     env: EnvSettings
     setup_location: str
@@ -200,6 +193,13 @@ class Profile:
     path_map: tuple[tuple[str, str], ...]
     upload_limit: int
     setup_resources: "Resources | None" = None
+
+    @property
+    def slurm(self):
+        """Compatibility alias for the Slurm settings of a Slurm profile."""
+        if self.scheduler != "slurm":
+            raise AttributeError("this profile does not use Slurm")
+        return self.scheduler_settings
 
 
 def parse_profiles(raw: Any, selected: str | None, source: str) -> Profile:
@@ -229,7 +229,9 @@ def parse_profiles(raw: Any, selected: str | None, source: str) -> Profile:
 
 
 def _parse_profile(raw, where, name, problems) -> Profile:
-    reader = _Reader(raw, where, problems, PROFILE_KEYS)
+    from training_framework.hpc.scheduler import SCHEDULERS
+
+    reader = _Reader(raw, where, problems, PROFILE_KEYS | set(SCHEDULERS))
     ssh_host = reader.string("ssh_host", required=True)
 
     roots_reader = _Reader(
@@ -241,30 +243,18 @@ def _parse_profile(raw, where, name, problems) -> Profile:
         for key in ("batches", "envs", "data")
     }
 
-    scheduler = reader.choice("scheduler", SCHEDULERS, required=True)
-    slurm_reader = _Reader(
-        reader.get("slurm", {}, required=scheduler == "slurm"),
-        f"{where}.slurm", problems, {"defaults", "partitions", "max_array_size"},
-    )
-    defaults = slurm_reader.get("defaults", {})
-    if not isinstance(defaults, Mapping) or not all(
-            isinstance(value, (str, int)) and not isinstance(value, bool)
-            for value in defaults.values()
-    ):
-        problems.add(f"{where}.slurm.defaults must map option names to values")
-        defaults = {}
-    partitions_reader = _Reader(
-        slurm_reader.get("partitions", {}), f"{where}.slurm.partitions",
-        problems, {"gpu", "cpu"},
-    )
-    partitions = {
-        kind: partitions_reader.string(kind) for kind in ("gpu", "cpu")
-    }
-    slurm = SlurmSettings(
-        defaults=dict(defaults),
-        partitions={k: v for k, v in partitions.items() if v is not None},
-        max_array_size=slurm_reader.positive_int("max_array_size", 1000, required=True),
-    )
+    from training_framework.hpc.scheduler import SCHEDULERS
+
+    scheduler = reader.choice("scheduler", tuple(SCHEDULERS), required=True)
+    settings = None
+    if scheduler is not None:
+        settings = SCHEDULERS[scheduler].parse_settings(
+            reader.get(scheduler, {}, required=True), f"{where}.{scheduler}", problems, _Reader,
+        )
+    for other in SCHEDULERS:
+        if other != scheduler and other in reader.raw:
+            problems.add(f"{where}.{other}: settings for scheduler '{other}', but "
+                         f"the profile uses '{scheduler}'")
 
     hooks_reader = _Reader(
         reader.get("hooks", {}), f"{where}.hooks", problems, set(HOOK_PHASES),
@@ -330,7 +320,7 @@ def _parse_profile(raw, where, name, problems) -> Profile:
         ssh_host=ssh_host,
         roots=roots,
         scheduler=scheduler,
-        slurm=slurm,
+        scheduler_settings=settings,
         hooks=hooks,
         env=env,
         setup_location=reader.choice("setup_location", LOCATIONS, "job"),
@@ -615,3 +605,12 @@ def _parse_experiment(raw, where, problems) -> Experiment | None:
     if name is None or not isinstance(overrides, list) or not isinstance(matrix, list):
         return None
     return Experiment(name, tuple(overrides), tuple(matrix))
+
+
+def __getattr__(name):
+    # `SlurmSettings` lives with the Slurm dialect; kept importable from here.
+    if name == "SlurmSettings":
+        from training_framework.hpc.scheduler.slurm import SlurmSettings
+
+        return SlurmSettings
+    raise AttributeError(name)

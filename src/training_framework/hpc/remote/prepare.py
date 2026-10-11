@@ -15,13 +15,12 @@ import time
 
 from training_framework.hpc.compile.data import expand_command
 from training_framework.hpc.remote.lease import Lease, check_marker, write_marker
-from training_framework.hpc.remote.runtime import (
-    OwnerProbeRouter,
-    ProcessProbe,
-    SlurmJobProbe,
-    StdlibFilesystem,
-    current_owner,
-)
+from training_framework.hpc.remote.runtime import StdlibFilesystem, current_owner, owner_probe
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"[hpc prepare {stamp}] {message}", flush=True)
 
 
 def run_prepare(plan_path: str, node_id: str) -> int:
@@ -33,22 +32,26 @@ def run_prepare(plan_path: str, node_id: str) -> int:
     location, key = artifact["location"], artifact["key"]
     filesystem = StdlibFilesystem()
     record = {"node": node_id, "batch_id": plan["batch_id"], "sha": plan["sha"],
-              "key": key, "location": location, "owner": current_owner(),
+              "key": key, "location": location, "owner": current_owner(plan["scheduler"]),
               "status": None, "error": None}
     started = time.time()
     status = 1
+    log(f"{node_id}: data source '{artifact['source']}' at {location}")
     try:
         if check_marker(filesystem, location, key):
             record["status"] = "already ready"
+            log("already ready; nothing to do")
         else:
-            lease = Lease(filesystem, OwnerProbeRouter(SlurmJobProbe(), ProcessProbe()),
-                          location, record["owner"])
+            lease = Lease(filesystem, owner_probe(plan["scheduler"]),
+                          location, record["owner"], notify=log)
             lease.acquire()
             try:
                 if check_marker(filesystem, location, key):
                     record["status"] = "made ready meanwhile"
+                    log("another job prepared it meanwhile")
                 else:
                     command = expand_command(artifact["details"]["command"], location)
+                    log("running: " + " ".join(command))
                     result = subprocess.run(command, cwd=f"{plan['batch_dir']}/source")
                     if result.returncode != 0:
                         raise RuntimeError(f"command exited {result.returncode}: {command}")
@@ -56,11 +59,13 @@ def run_prepare(plan_path: str, node_id: str) -> int:
                         raise RuntimeError(f"command succeeded but did not create {location}")
                     write_marker(filesystem, location, key)
                     record["status"] = "prepared"
+                    log("prepared")
             finally:
                 lease.release()
         status = 0
     except Exception as error:   # recorded, then reported by the exit status
         record["status"], record["error"] = "failed", f"{type(error).__name__}: {error}"
+        log("FAILED: " + record["error"])
     record["duration_seconds"] = round(time.time() - started, 3)
     filesystem.write(f"{plan['batch_dir']}/nodes/{node_id}/record.json",
                      (json.dumps(record, indent=2, sort_keys=True) + "\n").encode())

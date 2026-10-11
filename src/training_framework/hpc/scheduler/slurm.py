@@ -12,8 +12,10 @@ import shlex
 from collections.abc import Mapping
 
 from training_framework.hpc.compile.plan import JobNode
-from training_framework.hpc.ports.shell import render_context
-from training_framework.hpc.config.schema import Resources, SlurmSettings
+from training_framework.hpc.ports.shell import launched, render_context
+from dataclasses import dataclass
+
+from training_framework.hpc.config.schema import Resources
 
 #: Directives the dialect sets itself; neither the profile's defaults nor a
 #: group's scheduler_options may set them.
@@ -21,9 +23,43 @@ OWNED_DIRECTIVES = frozenset({
     "array", "dependency", "kill-on-invalid-dep", "output", "error",
     "signal", "nodes", "ntasks", "ntasks-per-node", "chdir", "job-name",
     "time", "cpus-per-task", "mem", "gres", "gpus", "partition", "account",
-    "parsable", "wrap",
+    "qos", "parsable", "wrap",
 })
+#: Owned directives the *profile* (site policy) may still set as defaults.
+PROFILE_DIRECTIVES = frozenset({"account", "qos"})
+
+
+def _unsafe(value) -> bool:
+    """Control characters (a newline would start another #SBATCH line)."""
+    return any(ord(char) < 32 or ord(char) == 127 for char in str(value))
 _DIRECTIVE = re.compile(r"\A[a-z][a-z0-9-]*\Z")
+
+
+@dataclass(frozen=True)
+class SlurmSettings:
+    defaults: dict
+    partitions: dict
+    max_array_size: int
+
+
+def parse_settings(raw, where, problems, reader_class) -> SlurmSettings:
+    """The profile's `slurm:` block."""
+    reader = reader_class(raw, where, problems, {"defaults", "partitions", "max_array_size"})
+    defaults = reader.get("defaults", {})
+    if not isinstance(defaults, Mapping) or not all(
+            isinstance(value, (str, int)) and not isinstance(value, bool)
+            for value in defaults.values()
+    ):
+        problems.add(f"{where}.defaults must map option names to values")
+        defaults = {}
+    partitions_reader = reader_class(reader.get("partitions", {}), f"{where}.partitions",
+                                     problems, {"gpu", "cpu"})
+    partitions = {kind: partitions_reader.string(kind) for kind in ("gpu", "cpu")}
+    return SlurmSettings(
+        defaults=dict(defaults),
+        partitions={kind: name for kind, name in partitions.items() if name is not None},
+        max_array_size=reader.positive_int("max_array_size", 1000, required=True),
+    )
 
 
 class SlurmDialect:
@@ -38,11 +74,16 @@ class SlurmDialect:
 
     def check_profile(self) -> list[str]:
         problems = []
-        for key in self.settings.defaults:
-            if key == "account":
+        for key, value in self.settings.defaults.items():
+            if _unsafe(key) or _unsafe(value):
+                problems.append(f"profile slurm.defaults: '{key}' contains a control character")
+            elif key in PROFILE_DIRECTIVES:
                 continue
-            if not _DIRECTIVE.match(key) or key in OWNED_DIRECTIVES:
+            elif not _DIRECTIVE.match(key) or key in OWNED_DIRECTIVES:
                 problems.append(f"profile slurm.defaults: '{key}' is not allowed")
+        for kind, partition in self.settings.partitions.items():
+            if _unsafe(partition):
+                problems.append(f"profile slurm.partitions.{kind} contains a control character")
         return problems
 
     def check_resources(self, resources: Resources, where: str) -> list[str]:
@@ -65,6 +106,10 @@ class SlurmDialect:
                 elif isinstance(value, bool) or not isinstance(value, (str, int)):
                     problems.append(
                         f"{where}.scheduler_options.slurm.{key} must be a string or integer"
+                    )
+                elif _unsafe(value):
+                    problems.append(
+                        f"{where}.scheduler_options.slurm.{key} contains a control character"
                     )
         if resources.gpus > 0 and "gpu" not in self.settings.partitions:
             problems.append(f"{where}: requests GPUs but the profile sets no slurm.partitions.gpu")
@@ -106,10 +151,14 @@ class SlurmDialect:
             directives.append(f"--signal=B:USR1@{signal_lead}")
         directives.append(f"--chdir={node.context.working_directory}")
 
+        unsafe = [directive for directive in directives if _unsafe(directive)]
+        if unsafe:   # validation refuses these first; never render them
+            raise ValueError(f"refusing to render directives with control characters: {unsafe!r}")
         lines = ["#!/bin/bash"]
         lines += [f"#SBATCH {directive}" for directive in directives]
         lines.append("set -eo pipefail")
         lines += render_context(node.context)
+        command = launched(node.context, command)
         if node.kind == "task_set":
             lines += _task_body(batch_dir, node.group, command)
         else:
@@ -128,12 +177,15 @@ def _task_body(batch_dir: str, group: str, command: list[str]) -> list[str]:
         'record="$(dirname "$config")/record.json"',
         "interrupted=0",
         "child=''",
-        'on_signal() { interrupted=1; [ -n "$child" ] && kill -INT "$child" 2>/dev/null || true; }',
+        'log() { echo "[hpc $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }',
+        'on_signal() { interrupted=1; log "received the scheduler advance signal; stopping the task cooperatively"; '
+        '[ -n "$child" ] && kill -INT "$child" 2>/dev/null || true; }',
         "trap on_signal USR1",
         "set +e",
         f"{run} &",
         "child=$!",
         'while true; do wait "$child"; status=$?; kill -0 "$child" 2>/dev/null || break; done',
+        'log "task process exited with status $status"',
         'if [ "$interrupted" -eq 1 ]; then exit 75; fi',
         'exit "$status"',
     ]

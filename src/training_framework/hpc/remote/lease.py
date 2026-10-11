@@ -48,7 +48,8 @@ def write_marker(filesystem, location, key):
 
 
 class Lease:
-    def __init__(self, filesystem, probe, location, owner, poll=5.0, sleep=time.sleep):
+    def __init__(self, filesystem, probe, location, owner, poll=5.0, sleep=time.sleep,
+                 notify=None):
         self.filesystem = filesystem
         self.probe = probe
         self.location = location
@@ -58,6 +59,7 @@ class Lease:
         self.sleep = sleep
         self.took_over = False
         self.held = False
+        self.notify = notify or (lambda message: None)
 
     def _holder(self):
         data = self.filesystem.read(self.lock + "/owner.json")
@@ -70,6 +72,7 @@ class Lease:
         parent = self.lock.rsplit("/", 1)[0]
         if parent:
             self.filesystem.makedirs(parent)   # a fresh root has no directory yet
+        announced = None
         while True:
             if self.filesystem.mkdir_atomic(self.lock):
                 self.filesystem.write(self.lock + "/owner.json",
@@ -89,8 +92,14 @@ class Lease:
                         self.location, json.dumps(holder, sort_keys=True), self.lock)
                 )
             if alive:
+                if holder != announced:
+                    self.notify("waiting for the lease on {} held by {}".format(
+                        self.location, json.dumps(holder, sort_keys=True)))
+                    announced = holder
                 self.sleep(self.poll)
                 continue
+            self.notify("taking over the lease from {}, which is no longer running".format(
+                json.dumps(holder, sort_keys=True)))
             self.filesystem.delete(self.lock)
             self.took_over = True
 

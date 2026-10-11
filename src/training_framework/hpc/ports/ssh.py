@@ -121,10 +121,12 @@ _TRANSFERRED = re.compile(r"Total transferred file size: ([\d,]+) bytes")
 class RsyncTransfer:
     """Resumable one-way sync over SSH (`--partial`)."""
 
-    def __init__(self, host: str, ssh: tuple[str, ...] = ("ssh",), rsync: str = "rsync"):
+    def __init__(self, host: str, ssh: tuple[str, ...] = ("ssh",), rsync: str = "rsync",
+                 show_progress: bool = False):
         self.host = host
         self.ssh = tuple(ssh)
         self.rsync = rsync
+        self.show_progress = show_progress
 
     def sync(self, local: str, remote: str) -> int:
         is_dir = os.path.isdir(local)
@@ -137,8 +139,31 @@ class RsyncTransfer:
             "--rsync-path", f"mkdir -p {shlex.quote(parent)} && rsync",
             source, f"{self.host}:{target}",
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise HpcError(f"rsync to {self.host}:{remote} failed: {result.stderr.strip()}")
-        match = _TRANSFERRED.search(result.stdout)
+        if self.show_progress:
+            command.insert(1, "--info=progress2")
+            stdout = self._stream(command)
+            returncode, stderr = self._returncode, self._stderr
+        else:
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            stdout, returncode, stderr = result.stdout, result.returncode, result.stderr
+        if returncode != 0:
+            raise HpcError(f"rsync to {self.host}:{remote} failed: {stderr.strip()}")
+        match = _TRANSFERRED.search(stdout)
         return int(match.group(1).replace(",", "")) if match else 0
+
+    def _stream(self, command: list[str]) -> str:
+        """Run rsync showing its live progress on stderr; return stdout."""
+        import sys
+
+        # One merged pipe: reading two pipes in turn could deadlock.
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        captured = []
+        for chunk in iter(lambda: process.stdout.read(256), b""):
+            captured.append(chunk)
+            sys.stderr.write(chunk.decode(errors="replace"))
+            sys.stderr.flush()
+        self._returncode = process.wait()
+        sys.stderr.write("\n")
+        output = b"".join(captured).decode(errors="replace")
+        self._stderr = output[-2000:]
+        return output

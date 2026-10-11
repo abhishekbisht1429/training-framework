@@ -148,6 +148,11 @@ In `dependency` mode it must pin `training-framework` exactly; in `checkout`
 mode it must not contain it. Your project's code is never installed: tasks
 see it through `code.paths`.
 
+Tasks, preflight, and `prepare` commands run with the environment's `bin`
+first on `PATH`, so `python` in a prepare command is the environment's
+interpreter. For conda environments that need activation, set
+`env.conda_run: true`: every command then runs under `conda run -p <env>`.
+
 ## 5. What `submit` does
 
 1. Compiles the batch (the same checks as `validate`).
@@ -161,13 +166,45 @@ see it through `code.paths`.
    environment, then submits the jobs: `setup` -> `prepare` -> one array per
    group. A failed job cancels its dependants.
 
+Each step prints a timestamped progress line (staging, each upload with
+rsync's live progress on a terminal, login-node steps, every submitted job).
+
 The receipt (`~/.local/state/training-framework/submissions/<batch>.json`,
 mirrored as `receipt.json` in the batch directory) lists every job submitted.
 If a submission's outcome is uncertain (a dropped connection), nothing is
 retried; the receipt says `needs reconciliation` and prints the `squeue
 --name=...` query that finds the job.
 
-## 6. Results
+## 6. Following a batch
+
+```bash
+python -m training_framework.hpc status <batch-id>      # or the receipt's path
+```
+
+```
+batch vit-fine-tuning-20261011T030035Z-2926f55be79e: submitted | /N/scratch/...
+task               values                 state            detail
+setup                                     built            /N/scratch/me/hpc/envs/ea3c...
+probes/frozen/000  lr=0.001 rng_seed=41   done             .../sessions/session_...
+probes/frozen/001  lr=0.001 rng_seed=42   running          job 4711_1
+probes/frozen/002  lr=0.0001 rng_seed=41  failed (exit 1)  ValueError: ...
+```
+
+`status` only reads: the receipt, each group's `tasks.tsv`, the records on
+the cluster, and `squeue` for jobs still queued or running. A task whose job
+ended without writing a record (killed at the time limit, out of memory)
+points at its log file. (Values are shortened above; `status` prints full
+addresses such as `optimizer.optimizer.kwargs.lr`.)
+
+Every log line written by the HPC layer starts with `[hpc ...]` (`[hpc setup
+...]`, `[hpc prepare ...]`) and a UTC time. A task log opens with the task's
+name, matrix values, commit, host, and GPUs, and closes with `finished: exit
+N (ok|failed|interrupted)` and the record's path; the wrapper adds when the
+scheduler's advance signal arrived and the task's exit status. Setup and
+prepare logs show each step, whom they are waiting for when another job
+holds the lease, and, on failure, a single `FAILED:` line.
+
+## 7. Results
 
 ```
 <roots.batches>/<batch-id>/
@@ -187,7 +224,7 @@ ssh -L 6006:localhost:6006 bigred200
 tensorboard --logdir <batch dir>/tasks --port 6006
 ```
 
-## 7. Interrupts and time limits
+## 8. Interrupts and time limits
 
 Each array job asks Slurm for an early signal (`process_timeout_on_join` plus
 the group's `stop_grace`, default 120s, before the time limit). The task
@@ -198,8 +235,8 @@ leave enough `stop_grace` for one iteration.
 
 ## Limitations
 
-Single-node tasks only; Slurm only; no status, cancel, retry, or result
-download commands yet (use `squeue`, `scancel`, `rsync`); components that
+Single-node tasks only; Slurm only; no cancel, retry, or result download
+commands yet (use `scancel`, `rsync`); components that
 bind fixed ports (other than `tensorboard` with `serve: false`) fail when
 tasks share a node; explicitly configured component output directories are
 not redirected per task.

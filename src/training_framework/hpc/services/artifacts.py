@@ -104,7 +104,8 @@ class EnvironmentCache:
             [context.interpreter, f"{self.plan.batch_dir}/bootstrap.py",
              "--plan", f"{self.plan.batch_dir}/plan.json"], context)
         if result.status != 0:
-            raise HpcError(f"environment setup failed: {result.stderr.strip()[-2000:]}")
+            output = (result.stdout + result.stderr).strip()[-3000:]
+            raise HpcError(f"environment setup failed:\n{output}")
 
 
 class DataUploader:
