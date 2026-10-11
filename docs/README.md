@@ -31,6 +31,8 @@ A task-ordered path. It picks up where the
    checkpoint through an analysis workflow.
 8. [Running batches on an HPC cluster](guide/08-hpc-batches.md) — sweeps of
    experiments as Slurm job arrays from one committed manifest.
+9. [First runs on Big Red 200](guide/09-hpc-big-red-200.md) — SSH, profile,
+   and a staged checklist for bringing the HPC layer up on IU's cluster.
 
 ## Look it up
 

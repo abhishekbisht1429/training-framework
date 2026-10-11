@@ -16,6 +16,9 @@ python -m training_framework.hpc submit   experiments/sweep.yaml
 Batches always run an exact, clean commit: commit the manifest, the training
 config, and the code first. Uncommitted or untracked files are an error.
 
+For a first run on Big Red 200, follow the staged checklist in
+[First runs on Big Red 200](09-hpc-big-red-200.md).
+
 ## 1. The profile (site settings, on your machine)
 
 `~/.config/training-framework/hpc.yaml` (or `--profiles PATH`) holds
