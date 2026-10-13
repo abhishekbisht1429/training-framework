@@ -350,6 +350,7 @@ def suggest_sources(
 ) -> list[dict]:
     """`upload: {}` entries for absolute local paths not yet covered."""
     suggestions: dict[tuple, dict] = {}
+    taken = {source.name for source in sources}
     for session in sessions:
         prefixes = _entry_paths(session)
         claimed = set()
@@ -376,10 +377,23 @@ def suggest_sources(
                     break
             if target is None:
                 target = {"path": list(path)}
-            suggestions.setdefault(path, {
-                "name": "_".join(part for part in path[-2:] if not part.isdigit())
-                .replace(".", "_") or "data",
-                "target": target,
-                "upload": {},
-            })
+            if path not in suggestions:
+                suggestions[path] = {"name": _suggested_name(path, taken), "target": target,
+                                     "upload": {}}
     return list(suggestions.values())
+
+
+_UNSAFE_NAME_CHARACTERS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _suggested_name(path: tuple, taken: set[str]) -> str:
+    """A valid source name from the last keys of `path` (component instances
+    such as `imagenet#train` contain characters names may not), unique among
+    `taken`, which it extends."""
+    base = "_".join(part for part in path[-2:] if not part.isdigit())
+    base = _UNSAFE_NAME_CHARACTERS.sub("_", base).strip("_") or "data"
+    name, number = base, 2
+    while name in taken:
+        name, number = f"{base}_{number}", number + 1
+    taken.add(name)
+    return name

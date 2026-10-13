@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import subprocess
 from datetime import timedelta
 
@@ -471,3 +472,28 @@ def test_validate_refuses_a_conda_backend_on_the_site_interpreter(tmp_path):
     data["profiles"]["cluster"]["env"]["backend"] = "conda"
     with pytest.raises(PlanError, match="cannot use python_source 'site'"):
         compile_repo(make_repo(tmp_path), profile_data=data)
+
+
+def test_suggested_names_are_valid_unique_and_compile_when_pasted(tmp_path):
+    # Component instances such as `imagenet#train` contain characters that
+    # source names may not; two paths can also end in the same keys.
+    config = copy.deepcopy(TRAINING_CONFIG)
+    session = config["sessions"][0]
+    session["imagenet#train"] = {"root": "/data/imagenet/train"}
+    session["imagenet#val"] = {"root": "/data/imagenet/val"}
+    session["flowers102"]["root"] = "/data/flowers"
+    session["extra"] = {"flowers102": {"root": "/data/flowers-extra"}}
+    existing = {"/data/imagenet/train", "/data/imagenet/val", "/data/flowers", "/data/flowers-extra"}
+    root = make_repo(tmp_path / "first", config=config)
+    suggestions = compile_repo(root, facts=FakeFacts(root, existing=existing)).suggestions
+    names = [suggestion["name"] for suggestion in suggestions]
+    assert "imagenet_train_root" in names and "imagenet_val_root" in names
+    assert len(set(names)) == len(names) == 4
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names)
+    assert {"component": "imagenet#train", "path": ["root"]} in [s["target"] for s in suggestions]
+
+    pasted = make_repo(tmp_path / "second", manifest=with_data(suggestions), config=config)
+    contents = {path: (f"K{index}", 1, 1) for index, path in enumerate(sorted(existing))}
+    compiled = compile_repo(pasted, facts=FakeFacts(pasted, existing=existing, contents=contents))
+    assert not compiled.suggestions
+    assert len([a for a in compiled.plan.artifacts if a.kind == "upload"]) == 4
