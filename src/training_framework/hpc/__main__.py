@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,14 +23,52 @@ def default_profiles_path() -> Path:
     return Path(base) / "training-framework" / "hpc.yaml"
 
 
+class HashProgress:
+    """Reports hashing of an upload source on stderr once it takes longer
+    than `delay` seconds: a line rewritten in place on a terminal, a line
+    every `log_interval` seconds otherwise, and a closing summary."""
+
+    def __init__(self, stream=None, delay: float = 1.0, log_interval: float = 15.0,
+                 clock=time.monotonic):
+        self.stream = stream or sys.stderr
+        self.delay = delay
+        self.log_interval = log_interval
+        self.clock = clock
+        self._root = None
+
+    def __call__(self, root: str, done: int, total: int, size: int) -> None:
+        now = self.clock()
+        if root != self._root:
+            self._root, self._started, self._last, self._shown = root, now, None, False
+        finished = done == total
+        if now - self._started < self.delay and not (finished and self._shown):
+            return
+        tty = self.stream.isatty()
+        interval = 0.2 if tty else self.log_interval
+        if not finished and self._last is not None and now - self._last < interval:
+            return
+        self._last, self._shown = now, True
+        line = (f"[hpc] hashing {root} (upload source): {done:,}/{total:,} files, "
+                f"{_size(size)}")
+        if finished:
+            line += f", done in {now - self._started:.0f}s"
+        if tty:
+            self.stream.write("\r\033[K" + line + ("\n" if finished else ""))
+        else:
+            self.stream.write(line + "\n")
+        self.stream.flush()
+
+
 class WorkstationFacts:
     """`LocalFacts` backed by this machine's filesystem and hash cache."""
 
-    def __init__(self, repository_root: Path, cache_path: Path | None = None):
+    def __init__(self, repository_root: Path, cache_path: Path | None = None,
+                 progress=None):
         self.repository_root = str(repository_root)
         self.home = os.path.expanduser("~")
         self._cache_path = cache_path or default_cache_path()
         self._cache = None
+        self._progress = progress if progress is not None else HashProgress()
 
     def exists(self, path: str) -> bool:
         return os.path.exists(path)
@@ -37,7 +76,7 @@ class WorkstationFacts:
     def content(self, path: str):
         if self._cache is None:
             self._cache = HashCache(self._cache_path)
-        summary = content_summary(path, self._cache)
+        summary = content_summary(path, self._cache, self._progress)
         return summary.key, summary.files, summary.size
 
 

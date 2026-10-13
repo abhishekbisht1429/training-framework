@@ -14,7 +14,8 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-from contextlib import closing
+from collections.abc import Callable
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,8 +39,18 @@ class ContentSummary:
 
 
 class HashCache:
+    """Per-file hashes. Within `session()` one connection serves every lookup
+    and new hashes are committed in batches (a transaction per file made
+    large datasets several times slower than hashing them); leaving the
+    session, even through an interrupt, commits what was hashed, so the next
+    run resumes from there."""
+
+    BATCH = 1000
+
     def __init__(self, path: Path):
         self.path = path
+        self._connection = None
+        self._pending: list[tuple] = []
         path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection, connection:
             connection.execute(
@@ -52,42 +63,65 @@ class HashCache:
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path, timeout=60)
 
+    @contextmanager
+    def session(self):
+        if self._connection is not None:      # already inside one
+            yield self
+            return
+        self._connection = self._connect()
+        try:
+            yield self
+        finally:
+            try:
+                self._flush()
+            finally:
+                self._connection.close()
+                self._connection = None
+
+    def _flush(self) -> None:
+        if self._pending:
+            with self._connection:
+                self._connection.executemany(
+                    "INSERT OR REPLACE INTO hashes VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    self._pending,
+                )
+            self._pending = []
+
     def file_hash(self, path: str) -> tuple[str, int]:
-        stat = os.stat(path)
-        fingerprint = (stat.st_dev, stat.st_ino, stat.st_size,
-                       stat.st_mtime_ns, stat.st_ctime_ns)
-        with closing(self._connect()) as connection:
-            row = connection.execute(
+        with self.session():
+            stat = os.stat(path)
+            fingerprint = (stat.st_dev, stat.st_ino, stat.st_size,
+                           stat.st_mtime_ns, stat.st_ctime_ns)
+            row = self._connection.execute(
                 "SELECT device, inode, size, mtime_ns, ctime_ns, sha256 "
                 "FROM hashes WHERE path = ?", (path,),
             ).fetchone()
-        if row is not None and tuple(row[:5]) == fingerprint:
-            return row[5], stat.st_size
-        digest = hashlib.sha256()
-        with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(_CHUNK), b""):
-                digest.update(chunk)
-        sha = digest.hexdigest()
-        with closing(self._connect()) as connection, connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO hashes VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (path, *fingerprint, sha),
-            )
-        return sha, stat.st_size
+            if row is not None and tuple(row[:5]) == fingerprint:
+                return row[5], stat.st_size
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(_CHUNK), b""):
+                    digest.update(chunk)
+            sha = digest.hexdigest()
+            self._pending.append((path, *fingerprint, sha))
+            if len(self._pending) >= self.BATCH:
+                self._flush()
+            return sha, stat.st_size
 
 
-def content_summary(path: str, cache: HashCache) -> ContentSummary:
+#: progress(path, files done, total files, bytes done)
+Progress = Callable[[str, int, int, int], None]
+
+
+def content_summary(path: str, cache: HashCache, progress: Progress | None = None) -> ContentSummary:
     """The content key of a file or directory. Symbolic links to directories
     are refused (they make the manifest depend on what lies outside);
     symbolic links to files are hashed by content."""
-    entries: list[list] = []
-    total = 0
     root = os.path.abspath(path)
     if os.path.isfile(root):
-        sha, size = cache.file_hash(root)
-        entries.append([os.path.basename(root), size, sha])
-        total = size
+        names = [(os.path.basename(root), root)]
     else:
+        names = []
         for directory, subdirectories, files in os.walk(root):
             subdirectories.sort()
             for name in subdirectories:
@@ -98,8 +132,15 @@ def content_summary(path: str, cache: HashCache) -> ContentSummary:
                     )
             for name in sorted(files):
                 full = os.path.join(directory, name)
-                sha, size = cache.file_hash(os.path.realpath(full))
-                entries.append([os.path.relpath(full, root), size, sha])
-                total += size
+                names.append((os.path.relpath(full, root), full))
+    entries: list[list] = []
+    total = 0
+    with cache.session():
+        for done, (relative, full) in enumerate(names, start=1):
+            sha, size = cache.file_hash(os.path.realpath(full))
+            entries.append([relative, size, sha])
+            total += size
+            if progress is not None:
+                progress(root, done, len(names), total)
     entries.sort()
     return ContentSummary(hash_value(entries), len(entries), total)

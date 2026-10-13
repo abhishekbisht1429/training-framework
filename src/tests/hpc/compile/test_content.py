@@ -1,8 +1,12 @@
+import io
 import os
+import sqlite3
 import threading
+from contextlib import closing
 
 import pytest
 
+from training_framework.hpc.__main__ import HashProgress
 from training_framework.hpc.compile.content import HashCache, content_summary
 
 
@@ -91,3 +95,89 @@ def test_concurrent_cache_writers_stay_valid(tmp_path):
         thread.join()
     assert not errors
     assert len(set(keys)) == 1
+
+
+def make_files(root, count):
+    root.mkdir(parents=True)
+    for index in range(count):
+        (root / f"f{index:03d}.bin").write_bytes(bytes([index % 256]) * 10)
+    return root
+
+
+def test_progress_reports_every_file_against_the_total(tmp_path, cache):
+    root = make_files(tmp_path / "data", 5)
+    calls = []
+    content_summary(str(root), cache, lambda *args: calls.append(args))
+    assert [call[1:3] for call in calls] == [(done, 5) for done in range(1, 6)]
+    assert calls[-1] == (str(root), 5, 5, 50)
+
+
+def test_a_dataset_uses_one_connection_however_many_files(tmp_path, cache, monkeypatch):
+    root = make_files(tmp_path / "data", 40)
+    connections = []
+    real_connect = HashCache._connect
+    monkeypatch.setattr(HashCache, "_connect", lambda self: connections.append(1) or real_connect(self))
+    content_summary(str(root), cache)
+    content_summary(str(root), cache)          # all cached
+    assert len(connections) == 2
+
+
+def test_an_interrupted_run_keeps_what_it_hashed(tmp_path, cache):
+    root = make_files(tmp_path / "data", 10)
+
+    def interrupt(root_path, done, total, size):
+        if done == 4:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        content_summary(str(root), cache, interrupt)
+    with closing(sqlite3.connect(cache.path)) as connection:
+        (rows,) = connection.execute("SELECT COUNT(*) FROM hashes").fetchone()
+    assert rows == 4
+
+
+class FakeStream(io.StringIO):
+    def __init__(self, tty):
+        super().__init__()
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_hash_progress_is_quiet_for_quick_datasets():
+    stream, clock = FakeStream(tty=False), FakeClock()
+    report = HashProgress(stream, delay=1.0, clock=clock)
+    for done in range(1, 4):
+        report("/data/small", done, 3, done * 10)
+    assert stream.getvalue() == ""
+
+
+def test_hash_progress_logs_lines_without_a_terminal():
+    stream, clock = FakeStream(tty=False), FakeClock()
+    report = HashProgress(stream, delay=1.0, log_interval=10.0, clock=clock)
+    for done in range(1, 101):
+        clock.now = done * 0.5                 # the first file at 0.5s, the last at 50s
+        report("/data/imagenet", done, 100, done * 1024)
+    lines = stream.getvalue().splitlines()
+    assert lines[0].startswith("[hpc] hashing /data/imagenet (upload source): 3/100 files")   # after the 1s delay
+    assert 4 <= len(lines) <= 7
+    assert lines[-1].endswith("100/100 files, 100.0 KiB, done in 50s")
+
+
+def test_hash_progress_rewrites_one_line_on_a_terminal():
+    stream, clock = FakeStream(tty=True), FakeClock()
+    report = HashProgress(stream, delay=0.0, clock=clock)
+    for done in range(1, 4):
+        clock.now = done                       # timed from the first file
+        report("/data/x", done, 3, done)
+    text = stream.getvalue()
+    assert text.count("\r\033[K") == 3 and text.endswith("done in 2s\n")
