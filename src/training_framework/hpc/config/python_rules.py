@@ -75,6 +75,19 @@ def interpreter_expectation(
     if not managed:
         return InterpreterExpectation("existing", None, None), problems
 
+    if env.backend == "conda" and env.python_source == "site":
+        # `conda create python=<pin>` installs the environment's own Python:
+        # it is never the site interpreter preflight would compare it with,
+        # and 'site' does not require the pin conda needs.
+        problems.append(
+            "profile env.backend 'conda' installs its own Python "
+            "(conda create python=<environment.python>), so it cannot use "
+            "python_source 'site'; set env.python_source to 'conda' (or "
+            "'uv') and environment.python in the manifest, or use "
+            "backend 'venv' with the site interpreter"
+        )
+        return InterpreterExpectation("site", None, None), problems
+
     if env.python_source == "site":
         identity = env.site_python_identity
         if identity is None:

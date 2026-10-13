@@ -464,3 +464,10 @@ def test_a_found_bootstrap_interpreter_is_linked_to_a_fixed_path(tmp_path, sourc
     assert context.interpreter == f"{plan.batch_dir}/nodes/setup/python"
     assert "ln -sfn" in context.hooks[-1] and "$(" in context.hooks[-1]
     assert f"exec {context.interpreter} {plan.batch_dir}/bootstrap.py" in plan.node("setup").script
+
+
+def test_validate_refuses_a_conda_backend_on_the_site_interpreter(tmp_path):
+    data = copy.deepcopy(PROFILE)
+    data["profiles"]["cluster"]["env"]["backend"] = "conda"
+    with pytest.raises(PlanError, match="cannot use python_source 'site'"):
+        compile_repo(make_repo(tmp_path), profile_data=data)

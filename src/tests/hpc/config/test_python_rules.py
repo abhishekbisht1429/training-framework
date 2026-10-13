@@ -69,3 +69,24 @@ def test_an_existing_environment_is_probed_at_submit_not_keyed():
 def test_an_invalid_requires_python_is_reported():
     _, problem = parse_requires_python("python3 please")
     assert "not a valid specifier" in problem
+
+
+def test_a_conda_backend_cannot_use_the_site_interpreter():
+    env = EnvSettings(backend="conda", python_source="site", site_python_identity=IDENTITY)
+    _, problems = expect(env, pin="3.12")
+    assert len(problems) == 1 and "cannot use python_source 'site'" in problems[0]
+    _, problems = expect(EnvSettings(backend="conda"))      # nor without a pin
+    assert "cannot use python_source 'site'" in problems[0]
+
+
+@pytest.mark.parametrize("source", ["uv", "conda"])
+def test_a_conda_backend_needs_a_pinned_python_from_uv_or_conda(source):
+    _, problems = expect(EnvSettings(backend="conda", python_source=source))
+    assert "environment.python is required" in problems[0]
+    expectation, problems = expect(EnvSettings(backend="conda", python_source=source), pin="3.12")
+    assert not problems and expectation.version_prefix == "3.12"
+
+
+def test_an_existing_environment_ignores_the_backend_rules():
+    _, problems = expect(EnvSettings(backend="conda", existing="/envs/mine"), managed=False)
+    assert not problems
