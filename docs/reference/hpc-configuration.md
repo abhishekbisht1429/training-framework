@@ -90,7 +90,7 @@ a new environment or prepared dataset.
 | `existing` | | Absolute path of an environment you manage yourself on the cluster. Tasks use `<existing>/bin/python`; nothing is built and the other keys below (except `conda_run`) do not apply. In `dependency` mode it must contain `training-framework`. |
 | `python_source` | `site` | Where a managed environment's interpreter comes from: `site` (`python3` after the hooks, e.g. a module), `uv` (`uv python install <environment.python>`), or `conda` (conda's base Python). `uv` and `conda` need `environment.python` in the manifest. |
 | `site_python_identity` | | Required with `python_source: site`: the site interpreter's `{implementation, version, executable, platform}`, printed by `python -m training_framework.hpc probe-python`. `submit` checks it against the cluster and stops with the new block if the site changed it. |
-| `backend` | `venv` | Kind of managed environment: `venv` (from the interpreter above) or `conda` (`conda create -p <env> -c conda-forge python=<environment.python>`). |
+| `backend` | `venv` | Kind of managed environment: `venv` (from the interpreter above) or `conda` (`conda create -p <env> -c conda-forge python=<environment.python>`). A `conda` environment installs its own Python, so it needs `python_source: conda` (or `uv`) and `environment.python`; with `site` it is refused. |
 | `conda_packages` | `[]` | With `backend: conda`: extra conda packages for `conda create` (e.g. `["cudatoolkit=11.8"]`); part of the environment key. |
 | `conda_run` | `false` | Run every command through `conda run --no-capture-output -p <env>` (for conda environments that need activation). Needs a conda environment. |
 | `bootstrap_python` | | Path of the interpreter that runs the setup bootstrap (and is the base of a `venv`), instead of the one chosen by `python_source`. For sites whose default Python lacks `venv`/`ensurepip`. |
@@ -152,7 +152,7 @@ Used only for managed environments (no `env.existing`).
 
 | Key | Meaning |
 |---|---|
-| `requirements` | Repository path of a fully pinned requirements file; required for a managed environment. It is installed with `pip install --no-deps`, so it must list every package, transitive ones included (generate it with `uv pip compile` or `pip-compile`). Each line is `name==X.Y.Z`, or a direct reference with a full 40-character commit SHA or an archive hash; the only options are `--index-url`, `--extra-index-url`, `--find-links`, and `--hash=` after a requirement. |
+| `requirements` | Repository path of a fully pinned requirements file; required for a managed environment. It is installed with `pip install --no-deps`, so it must list every package, transitive ones included (generate it with `uv pip compile`; see [Setting up a project for HPC batches](../guide/10-hpc-projects.md)). Each line is `name==X.Y.Z`, or a direct reference with a full 40-character commit SHA or an archive hash; the only options are `--index-url`, `--extra-index-url`, `--find-links`, and `--hash=` after a requirement. |
 | `python` | Python version `"X.Y"` or `"X.Y.Z"`, quoted (YAML reads `3.12` as a number). Required with `python_source: uv` or `conda`; with `site` it must match the identity. It must satisfy `requires-python` in your `pyproject.toml`. |
 
 ### training

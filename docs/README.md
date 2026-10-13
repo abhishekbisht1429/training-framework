@@ -33,6 +33,9 @@ A task-ordered path. It picks up where the
    experiments as Slurm job arrays from one committed manifest.
 9. [First runs on Big Red 200](guide/09-hpc-big-red-200.md) — SSH, profile,
    and a staged checklist for bringing the HPC layer up on IU's cluster.
+10. [Setting up a project for HPC batches](guide/10-hpc-projects.md) — code
+    modes, generating the pinned requirements, and projects that depend on
+    training-framework.
 
 ## Look it up
 

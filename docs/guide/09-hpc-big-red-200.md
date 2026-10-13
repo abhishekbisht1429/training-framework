@@ -194,7 +194,10 @@ and repeat stages A and B on it.
 
 `env.python_source` says where the environment's Python comes from;
 `env.backend` (`venv`, default, or `conda`) says what kind of environment is
-built from it.
+built from it. A `venv` uses that interpreter itself; a `conda` environment
+installs its own Python at `environment.python`, so it is refused with
+`python_source: site`. Usual pairs: `site` + `venv` (the default), `uv` +
+`venv`, and `conda` + `conda`.
 
 | `python_source` | Python from | Needs |
 |---|---|---|
@@ -222,6 +225,9 @@ satisfy your project's `requires-python`, and `environment.python` (if set)
 must match it.
 
 ### Write the pinned requirements file
+
+Step by step, including installing uv and a project that depends on
+training-framework: [Setting up a project for HPC batches](10-hpc-projects.md).
 
 The manifest names a fully pinned file:
 

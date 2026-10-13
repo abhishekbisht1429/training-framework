@@ -150,6 +150,9 @@ example:
 uv pip compile pyproject.toml --extra vision -o requirements/hpc.txt
 ```
 
+[Setting up a project for HPC batches](10-hpc-projects.md) gives the full
+steps, for this repository and for projects that depend on it.
+
 In `dependency` mode it must pin `training-framework` exactly; in `checkout`
 mode it must not contain it. Your project's code is never installed: tasks
 see it through `code.paths`.
