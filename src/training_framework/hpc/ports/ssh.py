@@ -14,6 +14,7 @@ import posixpath
 import re
 import shlex
 import subprocess
+import time
 import uuid
 
 from training_framework.hpc.errors import HpcError
@@ -118,15 +119,40 @@ class SshFilesystem:
 _TRANSFERRED = re.compile(r"Total transferred file size: ([\d,]+) bytes")
 
 
+#: rsync `--info=progress2` line: bytes done, percent, rate, time left.
+_PROGRESS = re.compile(r"\A\s*([\d,]+)\s+(\d+)%\s+(\S+)\s+(\d+:\d{2}:\d{2})")
+_TAIL = 1 << 16
+_FILES = re.compile(r"Number of files: [\d,]+ \(reg: ([\d,]+)")
+_FILES_SENT = re.compile(r"Number of regular files transferred: ([\d,]+)")
+
+
+def _human(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024:
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TiB"
+
+
 class RsyncTransfer:
-    """Resumable one-way sync over SSH (`--partial`)."""
+    """Resumable one-way sync over SSH (`--partial`).
+
+    `show_progress` passes rsync's live progress through to stderr (for a
+    terminal); `report` instead receives a progress line at most every
+    `report_interval` seconds and when the transfer ends (for logs and IDE
+    consoles, where an upload of hours would otherwise print nothing)."""
 
     def __init__(self, host: str, ssh: tuple[str, ...] = ("ssh",), rsync: str = "rsync",
-                 show_progress: bool = False):
+                 show_progress: bool = False, report=None, report_interval: float = 30.0,
+                 clock=time.monotonic):
         self.host = host
         self.ssh = tuple(ssh)
         self.rsync = rsync
         self.show_progress = show_progress
+        self.report = report
+        self.report_interval = report_interval
+        self.clock = clock
 
     def sync(self, local: str, remote: str) -> int:
         is_dir = os.path.isdir(local)
@@ -139,9 +165,9 @@ class RsyncTransfer:
             "--rsync-path", f"mkdir -p {shlex.quote(parent)} && rsync",
             source, f"{self.host}:{target}",
         ]
-        if self.show_progress:
+        if self.show_progress or self.report is not None:
             command.insert(1, "--info=progress2")
-            stdout = self._stream(command)
+            stdout = self._stream(command, f"{self.host}:{remote}")
             returncode, stderr = self._returncode, self._stderr
         else:
             result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -151,19 +177,58 @@ class RsyncTransfer:
         match = _TRANSFERRED.search(stdout)
         return int(match.group(1).replace(",", "")) if match else 0
 
-    def _stream(self, command: list[str]) -> str:
-        """Run rsync showing its live progress on stderr; return stdout."""
+    def _stream(self, command: list[str], destination: str) -> str:
+        """Run rsync, passing its progress on (see the class); return the
+        tail of its output (the --stats summary is at the end)."""
         import sys
 
         # One merged pipe: reading two pipes in turn could deadlock.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        captured = []
-        for chunk in iter(lambda: process.stdout.read(256), b""):
-            captured.append(chunk)
-            sys.stderr.write(chunk.decode(errors="replace"))
-            sys.stderr.flush()
+        tail = bytearray()
+        pending, latest, last_report = "", None, None
+        for chunk in iter(lambda: process.stdout.read(4096), b""):
+            tail += chunk
+            del tail[:-_TAIL]
+            if self.show_progress:
+                sys.stderr.write(chunk.decode(errors="replace"))
+                sys.stderr.flush()
+            if self.report is None:
+                continue
+            pieces = re.split(r"[\r\n]", pending + chunk.decode(errors="replace"))
+            pending = pieces.pop()
+            for piece in pieces:
+                if match := _PROGRESS.match(piece):
+                    latest = match
+            now = self.clock()
+            if latest is not None and (last_report is None
+                                       or now - last_report >= self.report_interval):
+                self.report(self._progress_line(destination, latest))
+                last_report = now
         self._returncode = process.wait()
-        sys.stderr.write("\n")
-        output = b"".join(captured).decode(errors="replace")
+        if self.show_progress:
+            sys.stderr.write("\n")
+        output = bytes(tail).decode(errors="replace")
         self._stderr = output[-2000:]
+        if self.report is not None and self._returncode == 0:
+            self.report(self._finished_line(destination, latest, output))
         return output
+
+    @staticmethod
+    def _finished_line(destination: str, latest, output: str) -> str:
+        line = f"upload to {destination} finished"
+        if latest is not None:
+            line += f": {_human(int(latest.group(1).replace(',', '')))} in place"
+        files, sent = _FILES.search(output), _FILES_SENT.search(output)
+        if files and sent:
+            total, now = (int(match.group(1).replace(",", "")) for match in (files, sent))
+            # Says whether an interrupted upload really resumed.
+            line += f"; {now:,} of {total:,} files sent now, {total - now:,} were already there"
+        return line
+
+    @staticmethod
+    def _progress_line(destination: str, match) -> str:
+        done, percent, rate, left = match.groups()
+        # rsync lists large trees incrementally, so early percentages are of
+        # the files listed so far.
+        return (f"upload to {destination}: {_human(int(done.replace(',', '')))} in place "
+                f"({percent}% of the files listed so far), {rate}, about {left} left")

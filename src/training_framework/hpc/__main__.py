@@ -36,7 +36,8 @@ class HashProgress:
         self.clock = clock
         self._root = None
 
-    def __call__(self, root: str, done: int, total: int, size: int) -> None:
+    def __call__(self, root: str, done: int, total: int, size: int,
+                 hashed: int | None = None) -> None:
         now = self.clock()
         if root != self._root:
             self._root, self._started, self._last, self._shown = root, now, None, False
@@ -48,8 +49,13 @@ class HashProgress:
         if not finished and self._last is not None and now - self._last < interval:
             return
         self._last, self._shown = now, True
-        line = (f"[hpc] hashing {root} (upload source): {done:,}/{total:,} files, "
+        # A run over cached files only compares timestamps; say so, or it
+        # looks like the whole dataset is hashed again.
+        verb = "hashing" if hashed is None else "checking"
+        line = (f"[hpc] {verb} {root} (upload source): {done:,}/{total:,} files, "
                 f"{_size(size)}")
+        if hashed is not None:
+            line += f" ({hashed:,} hashed, {done - hashed:,} unchanged since the last run)"
         if finished:
             line += f", done in {now - self._started:.0f}s"
         if tty:
@@ -69,15 +75,24 @@ class WorkstationFacts:
         self._cache_path = cache_path or default_cache_path()
         self._cache = None
         self._progress = progress if progress is not None else HashProgress()
+        self._summaries = {}
 
     def exists(self, path: str) -> bool:
         return os.path.exists(path)
 
     def content(self, path: str):
+        if path in self._summaries:       # several sources can name one dataset
+            return self._summaries[path]
         if self._cache is None:
             self._cache = HashCache(self._cache_path)
-        summary = content_summary(path, self._cache, self._progress)
-        return summary.key, summary.files, summary.size
+        start = self._cache.hashed
+
+        def report(root, done, total, size):
+            self._progress(root, done, total, size, self._cache.hashed - start)
+
+        summary = content_summary(path, self._cache, report)
+        self._summaries[path] = summary.key, summary.files, summary.size
+        return self._summaries[path]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -154,7 +169,10 @@ def _cluster(profile):
     return {
         "executor": executor,
         "filesystem": SshFilesystem(executor),
-        "transfer": RsyncTransfer(profile.ssh_host, show_progress=sys.stderr.isatty()),
+        # A terminal shows rsync's own live line; elsewhere (an IDE console,
+        # a log) a timestamped line every 30s, or a long upload looks hung.
+        "transfer": (RsyncTransfer(profile.ssh_host, show_progress=True) if sys.stderr.isatty()
+                     else RsyncTransfer(profile.ssh_host, report=_progress)),
         "submitter": scheduler.submitter(executor),
         "probe": WorkstationProbe(scheduler.owner_probe(executor), LocalProcessProbe()),
     }

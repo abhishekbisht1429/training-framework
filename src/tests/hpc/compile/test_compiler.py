@@ -497,3 +497,46 @@ def test_suggested_names_are_valid_unique_and_compile_when_pasted(tmp_path):
     compiled = compile_repo(pasted, facts=FakeFacts(pasted, existing=existing, contents=contents))
     assert not compiled.suggestions
     assert len([a for a in compiled.plan.artifacts if a.kind == "upload"]) == 4
+
+
+def imagenet_batch(tmp_path, train, val, train_spec=None, val_spec=None, path_map=None):
+    config = copy.deepcopy(TRAINING_CONFIG)
+    config["sessions"][0]["imagenet#train"] = {"root": train}
+    config["sessions"][0]["imagenet#val"] = {"root": val}
+    sources = [
+        {"name": "train", "target": {"component": "imagenet#train", "path": ["root"]},
+         "upload": train_spec or {}},
+        {"name": "val", "target": {"component": "imagenet#val", "path": ["root"]},
+         "upload": val_spec or {}},
+    ]
+    data = profile(path_map=path_map) if path_map else None
+    root = make_repo(tmp_path, manifest=with_data(sources), config=config)
+    contents = {"/data/imagenet": ("K1", 10, 100), "/data/other": ("K2", 10, 100)}
+    facts = FakeFacts(root, existing=set(contents), contents=contents)
+    return root, data, facts
+
+
+def test_two_sources_naming_one_dataset_upload_it_once(tmp_path):
+    root, data, facts = imagenet_batch(tmp_path, "/data/imagenet", "/data/imagenet")
+    plan = compile_repo(root, profile_data=data, facts=facts).plan
+    (upload,) = [a for a in plan.artifacts if a.kind == "upload"]
+    configs = [task.config["sessions"][0] for task in plan.tasks]
+    assert {c["imagenet#train"]["root"] for c in configs} == {upload.location}
+    assert {c["imagenet#val"]["root"] for c in configs} == {upload.location}
+
+
+def test_one_declared_dataset_under_two_names_is_also_one_upload(tmp_path):
+    spec = {"version": "ilsvrc2012"}
+    root, data, facts = imagenet_batch(tmp_path, "/data/imagenet", "/data/imagenet", spec, spec,
+                                       path_map={"/data": "/N/project/me/data"})
+    plan = compile_repo(root, profile_data=data, facts=facts).plan
+    assert len([a for a in plan.artifacts if a.kind == "upload"]) == 1
+
+
+def test_different_content_for_one_location_is_refused(tmp_path):
+    # Two versions of the same local path map to one cluster location.
+    root, data, facts = imagenet_batch(tmp_path, "/data/imagenet", "/data/imagenet",
+                                       {"version": "1"}, {"version": "2"},
+                                       path_map={"/data": "/N/project/me/data"})
+    assert "would upload different content to the same location" in problems_of(
+        root, profile_data=data, facts=facts)

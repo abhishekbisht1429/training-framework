@@ -238,9 +238,29 @@ def _upload(source, values, profile, facts, _env, _code, problems, result):
         else:
             location = f"{profile.roots['data']}/{key}{value}"
             location_kind = "key-derived"
+        shared = next((a for a in result.artifacts
+                       if a.kind == "upload" and a.location == location), None)
+        if (shared is not None and shared.key != key and details.get("declared")
+                and shared.details.get("declared") and shared.details["local"] == value
+                and shared.details["version"] == details["version"]):
+            key = shared.key        # one declared dataset under two source names
+        if shared is not None and shared.key != key:
+            problems.add(
+                f"data sources '{shared.source}' and '{source.name}' would upload "
+                f"different content to the same location {location}"
+            )
+            continue
+        _rewrite(result, indices, source.address, location)
+        if shared is not None:
+            # The same local data under another source (e.g. the train and
+            # val components of one dataset): one upload, counted once.
+            result.rows.append({
+                "source": source.name, "value": value, "location": location,
+                "size": "", "kind": f"upload (shared with {shared.source})",
+            })
+            continue
         artifact = Artifact("upload", source.name, key, location, location_kind, details)
         result.artifacts.append(artifact)
-        _rewrite(result, indices, source.address, location)
         result.rows.append({
             "source": source.name, "value": value, "location": location,
             "size": "" if size is None else str(size), "kind": "upload",

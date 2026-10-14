@@ -330,3 +330,57 @@ def test_status_of_an_unknown_batch_is_an_error(tmp_path, monkeypatch, capsys):
     path.write_text(yaml.safe_dump(PROFILE))
     assert main(["status", "nope", "--profiles", str(path)]) == 2
     assert "no receipt for nope" in capsys.readouterr().err
+
+
+SLOW_RSYNC = r'''
+import sys
+for done, percent, left in ((1_000_000, 1, "1:00:00"), (2_000_000, 2, "0:59:00"),
+                            (50_000_000, 50, "0:30:00"), (100_000_000, 100, "0:00:00")):
+    sys.stdout.write("%15s %3d%%   10.00MB/s    %s (xfr#1, ir-chk=1/2)\r" % (f"{done:,}", percent, left))
+    sys.stdout.flush()
+print("\nTotal transferred file size: 100,000,000 bytes")
+'''
+
+
+def test_without_a_terminal_an_upload_reports_progress_lines(tmp_path, fake_rsync):
+    fake_rsync.write_text(f"#!{sys.executable}\n{SLOW_RSYNC}")
+    times = iter([0, 10, 40, 45, 100])          # one clock reading per output chunk
+    messages = []
+    transfer = RsyncTransfer("cluster", rsync=str(fake_rsync), report=messages.append,
+                             report_interval=30, clock=lambda: next(times, 100))
+    assert transfer.sync(str(tmp_path), "/remote/data") == 100_000_000
+    assert messages[0].startswith("upload to cluster:/remote/data: ")
+    assert "% of the files listed so far), 10.00MB/s, about " in messages[0]
+    assert messages[-1] == "upload to cluster:/remote/data finished: 95.4 MiB in place"
+    assert len(messages) <= 4
+
+
+RESUMED_RSYNC = r'''
+import sys
+sys.stdout.write("    640,000,000 100%   98.86MB/s    0:00:06 (xfr#32, to-chk=0/41)\r")
+print("\nNumber of files: 41 (reg: 40, dir: 1)")
+print("Number of regular files transferred: 32")
+print("Total transferred file size: 640,000,000 bytes")
+'''
+
+
+def test_the_final_upload_line_says_how_much_was_already_there(tmp_path, fake_rsync):
+    fake_rsync.write_text(f"#!{sys.executable}\n{RESUMED_RSYNC}")
+    messages = []
+    RsyncTransfer("cluster", rsync=str(fake_rsync), report=messages.append).sync(str(tmp_path), "/r")
+    assert messages[-1] == ("upload to cluster:/r finished: 610.4 MiB in place; "
+                            "32 of 40 files sent now, 8 were already there")
+
+
+def test_a_dataset_named_by_two_sources_is_hashed_once(tmp_path, monkeypatch):
+    from training_framework.hpc import __main__ as cli
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "a.bin").write_bytes(b"a")
+    calls = []
+    real = cli.content_summary
+    monkeypatch.setattr(cli, "content_summary", lambda *args: calls.append(args[0]) or real(*args))
+    facts = cli.WorkstationFacts(tmp_path, cache_path=tmp_path / "cache.sqlite3")
+    assert facts.content(str(data)) == facts.content(str(data))
+    assert calls == [str(data)]

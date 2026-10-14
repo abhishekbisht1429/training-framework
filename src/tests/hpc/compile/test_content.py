@@ -181,3 +181,21 @@ def test_hash_progress_rewrites_one_line_on_a_terminal():
         report("/data/x", done, 3, done)
     text = stream.getvalue()
     assert text.count("\r\033[K") == 3 and text.endswith("done in 2s\n")
+
+
+def test_a_second_run_reports_checking_not_hashing(tmp_path):
+    from pathlib import Path
+
+    from training_framework.hpc.__main__ import WorkstationFacts
+
+    root = make_files(tmp_path / "data", 3)
+    outputs = []
+    for _ in range(2):
+        stream = FakeStream(tty=False)
+        facts = WorkstationFacts(tmp_path, cache_path=Path(tmp_path / "cache.sqlite3"),
+                                 progress=HashProgress(stream, delay=0.0, log_interval=0.0))
+        facts.content(str(root))
+        outputs.append(stream.getvalue().splitlines()[-1])
+    assert "3/3 files" in outputs[0] and "(3 hashed, 0 unchanged since the last run)" in outputs[0]
+    assert outputs[1].startswith(f"[hpc] checking {root}")
+    assert "(0 hashed, 3 unchanged since the last run)" in outputs[1]

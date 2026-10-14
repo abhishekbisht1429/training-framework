@@ -51,6 +51,8 @@ class HashCache:
         self.path = path
         self._connection = None
         self._pending: list[tuple] = []
+        #: Files actually read and hashed (not served from the cache).
+        self.hashed = 0
         path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection, connection:
             connection.execute(
@@ -103,6 +105,7 @@ class HashCache:
                 for chunk in iter(lambda: handle.read(_CHUNK), b""):
                     digest.update(chunk)
             sha = digest.hexdigest()
+            self.hashed += 1
             self._pending.append((path, *fingerprint, sha))
             if len(self._pending) >= self.BATCH:
                 self._flush()

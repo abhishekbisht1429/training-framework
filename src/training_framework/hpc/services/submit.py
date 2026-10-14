@@ -92,6 +92,15 @@ def _cancel_recorded(receipt: Receipt, submitter: SchedulerSubmitter) -> None:
             receipt.node_cancelled(node_id, False, f"{type(error).__name__}: {error}")
 
 
+def _size(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024:
+            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TiB"
+
+
 def submit(
         plan: ExecutionPlan,
         manifest_raw: dict,
@@ -187,7 +196,7 @@ def _submit(plan, manifest_raw, receipt, environment, preparer, uploader, stager
         for artifact in pending_uploads:
             size = artifact.details.get("size")
             progress(f"uploading data source '{artifact.source}' "
-                     f"({'' if size is None else f'{size} bytes, '}to {artifact.location})")
+                     f"({'' if size is None else f'{_size(size)}, '}to {artifact.location})")
             uploader.upload(artifact)
         if environment.managed and not env_ready and plan.node("setup").location == "login":
             receipt.node_submitting("setup")
