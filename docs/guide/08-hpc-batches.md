@@ -137,6 +137,8 @@ paths found in your configs. Uploads are keyed by content and stored once
 (under `roots.data`, or the `path_map` target); later batches reuse them.
 A ready artifact is never modified. Keep `download: false` for uploaded or
 prepared datasets; ImageNet must be uploaded or placed on the cluster.
+Sources whose values are the same local path (for example the train and
+val components of one dataset) are one upload, counted once.
 
 ## 4. Environments
 
@@ -162,9 +164,70 @@ first on `PATH`, so `python` in a prepare command is the environment's
 interpreter. For conda environments that need activation, set
 `env.conda_run: true`: every command then runs under `conda run -p <env>`.
 
-## 5. What `submit` does
+## 5. Checking a batch: `validate` and `render`
 
-1. Compiles the batch (the same checks as `validate`).
+```bash
+python -m training_framework.hpc validate batch.yaml [--suggest-data]
+python -m training_framework.hpc render   batch.yaml --output /tmp/preview
+```
+
+`validate` runs the same compiler as `submit`, entirely on your machine: it
+never connects to the cluster, uploads, or submits. It builds the whole
+plan and reports every problem at once, each with the file and key it
+concerns, instead of stopping at the first. In order, it checks:
+
+1. **The profile**: every key strictly (unknown keys, types, values), and
+   the Slurm settings (no options the HPC layer owns, no control
+   characters).
+2. **The repository**: the working tree is clean (no uncommitted or
+   untracked files), the manifest is committed and identical at `HEAD` and
+   `source.ref`, and the ref resolves to one commit. Everything after this
+   is read from that commit, not from your working files.
+3. **The manifest**: every key strictly; site keys (`account`, `partition`,
+   ...) are refused; `code.paths` exist in the commit.
+4. **The environment**: the interpreter (`site_python_identity` or
+   `environment.python`) against `requires-python`; a valid
+   `python_source`/`backend` pair; the requirements file fully pinned, with
+   the framework rule for the code mode; the environment key.
+5. **The experiments**: every group, experiment, and matrix combination
+   becomes a task config; every override and matrix address must exist; two
+   identical tasks are an error.
+6. **Topology**: `ddp.world_size` against `gpus` (`nccl`) or `cpus`
+   (`gloo`); only the allowed engine options.
+7. **Data**: every source's target resolves in every task; `upload` paths
+   exist and are allowed, and are hashed for their key (see below);
+   `cluster` and `prepare` paths go through `path_map`. Absolute local paths
+   that are not data sources give a note; `--suggest-data` prints entries
+   for them.
+8. **Job scripts**: every Slurm script is rendered (resources, partitions,
+   array sizes against `max_array_size`, dependencies, the early-stop
+   signal), so mistakes `sbatch` would reject surface here.
+
+It prints any `note:` lines, then `ok: N task(s) in G group(s); commit ...;
+environment ...` and exits 0, or `error: N problems:` with the list and
+exits 2.
+
+Hashing an `upload` source reads every file the first time; later runs only
+compare each file's size and timestamps with a cache
+(`~/.cache/training-framework/hashes.sqlite3`) and read only what changed.
+For large datasets the progress line says which is happening:
+`checking ...: 120,000/1,281,167 files, 14.2 GiB (0 hashed, 120,000
+unchanged since the last run)`. An interrupted run keeps what it hashed.
+Give a huge, fixed dataset a `version` to skip hashing entirely.
+
+What `validate` cannot know, because it stays offline, `submit` checks
+next: the site interpreter's identity over SSH, which environments and data
+are already on the cluster, that `cluster` paths exist (preflight), and
+whether Slurm accepts the account, partition, and limits.
+
+`render` runs the same checks and writes the batch directory it would
+stage (job scripts, task configs, `plan.json`, `tasks.tsv`) to `--output`,
+which must be empty or missing, so you can read exactly what would be sent.
+
+## 6. What `submit` does
+
+1. Checks that `ssh` and `rsync` are installed, then compiles the batch
+   (the same checks as `validate`).
 2. Checks the site interpreter's identity, then which environment, uploads,
    and prepared data are already ready.
 3. Claims a new batch directory, stages the exact commit (a Git bundle), and
@@ -175,8 +238,23 @@ interpreter. For conda environments that need activation, set
    environment, then submits the jobs: `setup` -> `prepare` -> one array per
    group. A failed job cancels its dependants.
 
-Each step prints a timestamped progress line (staging, each upload with
-rsync's live progress on a terminal, login-node steps, every submitted job).
+Each step prints a timestamped progress line (staging, login-node steps,
+every submitted job). Uploads show rsync's live progress on a terminal and,
+elsewhere (an IDE console, a log), a line every 30 seconds; the last line
+says how many files were sent and how many were already there.
+
+**Interrupted uploads resume.** An upload goes to a fixed location and is
+marked ready only when it completes, so nothing ever runs on partial data.
+Run `submit` again: rsync skips the files already there and continues the
+partial one. While an upload is incomplete, `<location>.tf-hpc-pending`
+records which content it is; if the local data has changed since, `submit`
+refuses to resume (rsync never deletes at the destination, so files you
+removed would stay) and says what to delete.
+
+**Ctrl-C** during `submit` is recorded in the receipt. Jobs already
+submitted are cancelled, so no partial batch runs. If an `sbatch` was in
+flight, the receipt says `needs reconciliation` with the `squeue` query to
+check it; otherwise `failed`.
 
 The receipt (`~/.local/state/training-framework/submissions/<batch>.json`,
 mirrored as `receipt.json` in the batch directory) lists every job submitted.
@@ -184,7 +262,7 @@ If a submission's outcome is uncertain (a dropped connection), nothing is
 retried; the receipt says `needs reconciliation` and prints the `squeue
 --name=...` query that finds the job.
 
-## 6. Following a batch
+## 7. Following a batch
 
 ```bash
 python -m training_framework.hpc status <batch-id>      # or the receipt's path
@@ -213,7 +291,7 @@ scheduler's advance signal arrived and the task's exit status. Setup and
 prepare logs show each step, whom they are waiting for when another job
 holds the lease, and, on failure, a single `FAILED:` line.
 
-## 7. Results
+## 8. Results
 
 ```
 <roots.batches>/<batch-id>/
@@ -233,7 +311,7 @@ ssh -L 6006:localhost:6006 bigred200
 tensorboard --logdir <batch dir>/tasks --port 6006
 ```
 
-## 8. Interrupts and time limits
+## 9. Interrupts and time limits
 
 Each array job asks Slurm for an early signal (`process_timeout_on_join` plus
 the group's `stop_grace`, default 120s, before the time limit). The task
