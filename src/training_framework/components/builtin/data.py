@@ -157,10 +157,15 @@ class DataManager(StatefulResource):
                 "must be callable"
             )
 
+        # The shuffle follows the session's seed, so sessions that differ in
+        # rng_seed also see the data in a different order. A restored state
+        # keeps the seed it was saved with, so a resumed run continues the
+        # order it started.
         sampler = DistributedInfiniteSampler(
             num_samples=dataset_size,
             rank=ddp.rank,
             world_size=world_size,
+            seed=session.session_config.rng_seed,
         )
         self._restore_sampler(sampler, dataset_size)
 

@@ -121,7 +121,11 @@ iteration, see [Building an iteration](../guide/03-building-an-iteration.md).
 
 `data_manager.data_iter` is available only while the session is active. It
 divides the global batch size across ranks and checkpoints delivered-batch
-progress. A dataset resource may provide a callable `collate_fn(batch)` method
+progress. Each epoch is shuffled with `session_config.rng_seed` (plus the
+epoch number), so sessions with different seeds see the data in different
+orders and the same seed repeats the order. A resumed session keeps the seed
+its checkpoint was saved with; checkpoints written before the shuffle
+followed `rng_seed` used seed 0, and resume with it. A dataset resource may provide a callable `collate_fn(batch)` method
 to control batching (this registers the implementation directly under the
 declared `dataset` role's name):
 
