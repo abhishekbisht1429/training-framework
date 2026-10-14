@@ -131,6 +131,29 @@ def submit(
     except HpcError as error:
         error.receipt = receipt   # so callers can say where the receipt is
         raise
+    except KeyboardInterrupt as interrupt:
+        _record_interrupt(receipt, submitter)
+        interrupt.receipt = receipt
+        raise
+
+
+def _record_interrupt(receipt: Receipt, submitter: SchedulerSubmitter) -> None:
+    """Ctrl-C: no partial batch is left running. An `sbatch` that was in
+    flight may or may not have been accepted, so it needs reconciliation."""
+    if receipt.status in receipts.FINAL_STATUSES:
+        return
+    in_flight = [node_id for node_id, node in receipt.data["nodes"].items()
+                 if node["status"] == "submitting"]
+    for node_id in in_flight:
+        receipt.node_unknown(node_id)
+    _cancel_recorded(receipt, submitter)
+    if in_flight:
+        name = receipt.node(in_flight[0])["job_name"]
+        receipt.finish(receipts.NEEDS_RECONCILIATION,
+                       f"interrupted while submitting {in_flight[0]}; check with: "
+                       f"squeue --name={name}  (or sacct --name={name})")
+    else:
+        receipt.finish(receipts.FAILED, "interrupted (Ctrl-C); no jobs left submitted")
 
 
 def _submit(plan, manifest_raw, receipt, environment, preparer, uploader, stager,

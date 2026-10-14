@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -212,11 +213,24 @@ def _progress(message: str) -> None:
     print(f"[{stamp}] {message}", flush=True)
 
 
+def _require_tools(*names: str) -> None:
+    """Fail before any slow work (hashing, staging) when a tool is missing."""
+    missing = [name for name in names if shutil.which(name) is None]
+    if missing:
+        raise HpcError(
+            f"{' and '.join(missing)} not found on this machine's PATH; submit uses "
+            "ssh to reach the cluster and rsync to copy the source and data "
+            "(install them, e.g. `apt install openssh-client rsync` or "
+            "`conda install -c conda-forge rsync`)"
+        )
+
+
 def _submit(args, profile) -> int:
     from training_framework.hpc.remote.runtime import current_process_owner
     from training_framework.hpc.services.staging import SourceStager
     from training_framework.hpc.services.submit import submit
 
+    _require_tools("ssh", "rsync")
     compiled, repository = _compile(args, profile, fresh_env=args.fresh_env)
     plan = compiled.plan
     for note in plan.notes:
@@ -238,6 +252,15 @@ def _submit(args, profile) -> int:
             print(f"{receipt.status}: {plan.batch_dir}")
             print(f"receipt: {receipt.path}")
         raise
+    except KeyboardInterrupt as interrupt:
+        receipt = getattr(interrupt, "receipt", None)
+        print("\ninterrupted", file=sys.stderr)
+        if receipt is not None:
+            print(f"{receipt.status}: {plan.batch_dir}")
+            if receipt.data.get("error"):
+                print(f"  {receipt.data['error']}")
+            print(f"receipt: {receipt.path}")
+        return 130
     print(f"{receipt.status}: {plan.batch_dir}")
     for node_id, job_ref in receipt.submitted_jobs():
         print(f"  {node_id}: job {job_ref}")
@@ -291,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         profile = _profile(args)
+        if args.command in ("probe-python", "status"):
+            _require_tools("ssh")
         if args.command == "probe-python":
             return _probe_python(profile)
         if args.command == "submit":

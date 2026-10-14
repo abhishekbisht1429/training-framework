@@ -108,6 +108,12 @@ class EnvironmentCache:
             raise HpcError(f"environment setup failed:\n{output}")
 
 
+#: Next to an upload in progress: the key being uploaded. rsync never deletes
+#: at the destination, so resuming an interrupted upload with different
+#: content would leave files the new content does not have.
+PENDING_SUFFIX = ".tf-hpc-pending"
+
+
 class DataUploader:
     def __init__(self, plan: ExecutionPlan, filesystem, transfer, probe, owner: dict):
         self.plan = plan
@@ -141,8 +147,23 @@ class DataUploader:
         try:
             if check_marker(self.filesystem, artifact.location, artifact.key):
                 return 0
+            pending_path = artifact.location + PENDING_SUFFIX
+            pending = self.filesystem.read(pending_path)
+            if pending is not None:
+                started = json.loads(pending.decode())["key"]
+                if started != artifact.key:
+                    raise HpcError(
+                        f"data source '{artifact.source}': {artifact.location} holds an "
+                        f"interrupted upload of different content (key {started[:12]}, "
+                        f"now {artifact.key[:12]}); resuming would keep files the new "
+                        f"content does not have. Delete {artifact.location} and "
+                        f"{pending_path} on the cluster, then submit again"
+                    )
+            else:
+                self.filesystem.write(pending_path, json.dumps({"key": artifact.key}).encode())
             sent = self.transfer.sync(artifact.details["local"], artifact.location)
             write_marker(self.filesystem, artifact.location, artifact.key)
+            self.filesystem.delete(pending_path)
             return sent
         finally:
             lease.release()
