@@ -62,6 +62,8 @@ A task-ordered path. It picks up where the
   `dataset` role.
 - [Infinite samplers](reference/samplers.md) — `InfiniteSampler` and
   `DistributedInfiniteSampler`.
+- [Profiler](reference/profiler.md) — `profiler`: `torch.profiler` traces
+  of chosen iterations and ranks, and what they show.
 - [CLI reference](reference/cli.md) — every command-line flag.
 - [API summary](reference/api.md) — public imports and type members.
 

@@ -553,3 +553,58 @@ def test_full_spawned_ddp_training_flow_with_a_linked_child_model(
             rel=1e-6,
             abs=1e-6,
         )
+
+
+@pytest.mark.parametrize("ranks", [[0, 1], [1]])
+def test_spawned_ddp_profiler_records_only_the_listed_ranks(
+    tmp_path,
+    monkeypatch,
+    ranks,
+):
+    _register_integration_components()
+    session_config = _ddp_session_config(
+        tmp_path,
+        tmp_path / "rank-results",
+        max_iterations=4,
+    )
+    session_config["ddp"]["parallel_components"].append("profiler")
+    session_config["profiler"] = {
+        "activities": ["cpu"],
+        "start_iteration": 2,
+        "warmup": 1,
+        "active": 2,
+        "ranks": ranks,
+    }
+    config_path = tmp_path / "profiled-training.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"sessions": [session_config]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "training-framework",
+            "--config",
+            str(config_path),
+            "--heartbeat-timeout",
+            "30",
+            "--process_timeout_on_join",
+            "10",
+        ],
+    )
+
+    with TrainingEngine(Configurator()) as engine:
+        engine.start_session()
+
+    written = sorted(
+        path.name for path in (tmp_path / "sessions").rglob("profiler/*")
+    )
+    assert written == [
+        name
+        for rank in ranks
+        for name in (
+            f"rank{rank}_iter3-4.pt.trace.json.gz",
+            f"rank{rank}_iter3-4.summary.txt",
+        )
+    ]

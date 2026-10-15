@@ -33,6 +33,7 @@ which registers all built-ins. Their classes are also importable from
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations |
 | `tensorboard` | Resource | Exposes a `SummaryWriter`; starts a TensorBoard server unless `serve: false` |
 | `model_diagram` | Session hook | Draws the `model`'s data flow (from its first forward call), and the component wiring of the model and of the whole session, into the session dir; rank 0; [below](#model_diagram); also in analysis sessions |
+| `profiler` | Lifecycle hook | Records `torch.profiler` traces and operator summaries of chosen iterations, on chosen ranks; `activities` is required; [Profiler](profiler.md); also in analysis sessions |
 
 `dataset` and `model` are declared roles (see [Role
 bindings](../guide/02-wiring-components.md#role-bindings)) with no default
@@ -299,6 +300,7 @@ seen.
 | `load_batch` | Step | Takes the next batch from the analysis `data_manager` and names its parts; [generic step](generic-steps.md#load_batch) |
 | `forward` | Step | Calls `trained_model.model` on context keys, without gradients by default; [generic step](generic-steps.md#forward-in-an-analysis-session) |
 | `compute` | Step | Shared with training; [generic step](generic-steps.md#compute) |
+| `profiler` | Lifecycle hook | Shared with training; [Profiler](profiler.md) |
 
 The analysis logger lives in the analysis registry. `trained_model` is shared
 and can be activated by any session type. Analysis sessions activate it by

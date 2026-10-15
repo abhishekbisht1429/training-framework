@@ -37,6 +37,7 @@ from training_framework.components.builtin.optimization import (
     OptimizerResource,
     OptimizerStep,
 )
+from training_framework.components.builtin.profiling import Profiler
 from training_framework.components.builtin.transformer import (
     AttentionPooledEncoder,
     PatchTransformer,
@@ -69,6 +70,7 @@ __all__ = [
     "OptimizerStep",
     "PatchTransformer",
     "PooledPatchTransformer",
+    "Profiler",
     "Tensorboard",
     "Timer",
     "TrainedModel",
