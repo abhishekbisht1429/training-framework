@@ -25,6 +25,8 @@ class RepositoryReader(Protocol):
 
     def object_id(self, sha: str, path: str) -> str | None: ...
 
+    def is_directory(self, sha: str, path: str) -> bool: ...
+
 
 class GitRepository:
     """`RepositoryReader` over the `git` executable."""
@@ -68,6 +70,10 @@ class GitRepository:
 
     def exists(self, sha: str, path: str) -> bool:
         return self._run(["cat-file", "-e", self._spec(sha, path)]).returncode == 0
+
+    def is_directory(self, sha: str, path: str) -> bool:
+        result = self._run(["cat-file", "-t", self._spec(sha, path)])
+        return result.returncode == 0 and result.stdout.decode().strip() == "tree"
 
     def object_id(self, sha: str, path: str) -> str | None:
         """Git's content hash of a file or directory at `sha`."""

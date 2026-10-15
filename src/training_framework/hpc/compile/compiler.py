@@ -105,6 +105,9 @@ def compile_plan(
     for path in manifest.code_paths:
         if not repository.exists(sha, path):
             problems.add(f"code.paths: '{path}' does not exist at {sha[:12]}")
+        elif not repository.is_directory(sha, path):
+            problems.add(f"code.paths: '{path}' is a file at {sha[:12]}; code.paths are "
+                         "directories put on PYTHONPATH")
     problems.raise_if_any()
 
     # Environment, Python, code layout ------------------------------------

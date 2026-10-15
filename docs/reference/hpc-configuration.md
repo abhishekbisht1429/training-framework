@@ -143,7 +143,7 @@ error.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `framework` | yes | `checkout`: this repository *is* training-framework; it runs from the staged commit and the requirements must not contain it. `dependency`: training-framework is installed in the environment and the requirements must pin it exactly once. |
+| `framework` | yes | `checkout`: this repository *is* training-framework; it runs from the staged commit and the requirements must not contain it. `dependency`: training-framework is installed in the environment: with a managed environment the requirements must pin it exactly once; with `env.existing` the environment must already contain it (no requirements file is needed). |
 | `paths` | yes | Relative directories of the repository put on `PYTHONPATH` for tasks (e.g. `["."]`, `["src"]`). Your code is never pip-installed. |
 
 ### environment
@@ -187,7 +187,7 @@ once with rsync and reused by every batch with the same content.
 
 | Key | Meaning |
 |---|---|
-| `version` | Optional. Key the upload by this string instead of hashing its content (for very large datasets that never change; change the string to upload again). |
+| `version` | Optional. Key the upload by the source's `name` and this string instead of hashing its content (for very large datasets that never change). Change the string to upload again; renaming the source also gives a new key, so it uploads again too. |
 
 Paths inside the repository, containing it, `/`, or your home directory are
 refused.

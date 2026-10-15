@@ -47,10 +47,12 @@ def parse_settings(raw, where, problems, reader_class) -> SlurmSettings:
     reader = reader_class(raw, where, problems, {"defaults", "partitions", "max_array_size"})
     defaults = reader.get("defaults", {})
     if not isinstance(defaults, Mapping) or not all(
-            isinstance(value, (str, int)) and not isinstance(value, bool)
-            for value in defaults.values()
+            isinstance(key, str) and key
+            and isinstance(value, (str, int)) and not isinstance(value, bool)
+            for key, value in defaults.items()
     ):
-        problems.add(f"{where}.defaults must map option names to values")
+        problems.add(f"{where}.defaults must map option names (strings) to string "
+                     "or integer values")
         defaults = {}
     partitions_reader = reader_class(reader.get("partitions", {}), f"{where}.partitions",
                                      problems, {"gpu", "cpu"})

@@ -540,3 +540,18 @@ def test_different_content_for_one_location_is_refused(tmp_path):
                                        path_map={"/data": "/N/project/me/data"})
     assert "would upload different content to the same location" in problems_of(
         root, profile_data=data, facts=facts)
+
+
+def test_a_file_in_code_paths_is_refused(tmp_path):
+    data = manifest(code={"framework": "dependency", "paths": [".", "pyproject.toml"]})
+    text = problems_of(make_repo(tmp_path, manifest=data))
+    assert "'pyproject.toml' is a file" in text and "directories put on PYTHONPATH" in text
+    assert "'.'" not in text                         # the repository root is a directory
+
+
+@pytest.mark.parametrize("defaults", [{123: "x"}, {"": "x"}, {"account": True}, ["account"]])
+def test_malformed_slurm_defaults_are_validation_errors(tmp_path, defaults):
+    data = profile()
+    data["profiles"]["cluster"]["slurm"]["defaults"] = defaults
+    assert "slurm.defaults must map option names (strings) to string or integer values" in \
+        problems_of(make_repo(tmp_path), profile_data=data)
