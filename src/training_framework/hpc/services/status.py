@@ -20,11 +20,18 @@ class Row:
     values: str
     state: str
     detail: str
+    #: The state is the scheduler's (the job is in its queue), not a record's.
+    live: bool = False
 
 
-#: Live scheduler states in which a job still occupies or waits for resources.
-ACTIVE_STATES = frozenset({"pending", "running", "configuring", "completing", "suspended",
-                           "requeued", "resizing", "signaling", "stage_out"})
+#: Slurm job states after which a job holds nothing and will not run again.
+#: Every other state the queue reports (including ones not listed in this
+#: version, or flags shown in place of the base state) counts as active.
+TERMINAL_STATES = frozenset({"completed", "cancelled", "failed", "timeout", "node_fail",
+                             "preempted", "boot_fail", "deadline", "out_of_memory", "revoked"})
+#: Active states in which nothing has started yet.
+WAITING_STATES = frozenset({"pending", "requeued", "requeue_hold", "requeue_fed",
+                            "resv_del_hold", "special_exit"})
 #: Task states counted together in summaries ("failed (exit 1)" -> "failed").
 _SUMMARY_ORDER = ("running", "pending", "done", "interrupted", "failed",
                   "ended without a record", "cancelled")
@@ -135,8 +142,9 @@ def task_rows(receipt: dict, files: BatchFiles | None, live: dict) -> list[Row]:
             continue
         record = files.records.get(f"nodes/{node_id}/record.json")
         if node.get("job_ref") in live:
-            state, detail = live[node["job_ref"]], f"job {node['job_ref']}"
-        elif record:
+            rows.append(Row(node_id, "", live[node["job_ref"]], f"job {node['job_ref']}", True))
+            continue
+        if record:
             state, detail = _record_state(record)
         else:
             state, detail = node["status"], ""
@@ -157,9 +165,11 @@ def task_rows(receipt: dict, files: BatchFiles | None, live: dict) -> list[Row]:
             if record:
                 state, detail = _record_state(record)
             elif element in live:
-                state, detail = live[element], f"job {element}"
+                rows.append(Row(task, values, live[element], f"job {element}", True))
+                continue
             elif node.get("job_ref") in live:
-                state, detail = live[node["job_ref"]], f"job {node['job_ref']}"
+                rows.append(Row(task, values, live[node["job_ref"]], f"job {node['job_ref']}", True))
+                continue
             elif node["status"] in ("cancelled", "unknown", "refused", "cancel failed"):
                 state, detail = node["status"], ""
             elif node["status"] == "submitted":
@@ -168,6 +178,34 @@ def task_rows(receipt: dict, files: BatchFiles | None, live: dict) -> list[Row]:
                 state, detail = node["status"], ""
             rows.append(Row(task, values, state, detail))
     return rows
+
+
+def receipt_problem(receipt) -> str | None:
+    """What makes `receipt` unusable, or None."""
+    if not isinstance(receipt, dict):
+        return "not a JSON object"
+    missing = [key for key, kind in (("batch_id", str), ("batch_dir", str), ("status", str),
+                                     ("nodes", dict)) if not isinstance(receipt.get(key), kind)]
+    if missing:
+        return f"missing or malformed: {', '.join(missing)}"
+    if not all(isinstance(node, dict) and isinstance(node.get("status"), str)
+               for node in receipt["nodes"].values()):
+        return "malformed: nodes"
+    return None
+
+
+def missing_files(receipt: dict, files: BatchFiles | None) -> str | None:
+    """Why a submitted batch's cluster files cannot be trusted, or None.
+    Batches that never reached the cluster (not staged) have none to miss."""
+    if not receipt.get("staged"):
+        return None
+    if files is None:
+        return f"batch directory {receipt['batch_dir']} not found (deleted, purged, or another cluster)"
+    groups = [node_id[len("group-"):] for node_id in receipt["nodes"] if node_id.startswith("group-")]
+    absent = [group for group in groups if group not in files.tables]
+    if absent:
+        return f"task table missing for group(s) {', '.join(absent)} in {receipt['batch_dir']}"
+    return None
 
 
 def batch_status(receipt: dict, filesystem, executor, job_states) -> list[Row]:
@@ -199,19 +237,26 @@ def summarize(receipt: dict, rows: list[Row]) -> str:
         return "submit failed"
     if status == "submitting":
         return "submit interrupted (no final status)"
-    counts = Counter(_short(row.state) for row in rows if is_task(row, receipt))
+    tasks = [row for row in rows if is_task(row, receipt)]
+    counts = Counter(_short(row.state) for row in tasks)
     steps_failed = [row.name for row in rows
                     if not is_task(row, receipt) and _short(row.state) == "failed"]
-    active = sum(count for state, count in counts.items() if state in ACTIVE_STATES)
-    phase = ("running" if counts.get("running") else "queued") if active else "finished"
+    active = [row.state for row in rows if row.live and row.state not in TERMINAL_STATES]
+    if status == "needs reconciliation":
+        # An sbatch had an uncertain outcome: never call this batch finished.
+        phase = "needs reconciliation"
+    elif not active:
+        phase = "finished"
+    elif all(state in WAITING_STATES for state in active):
+        phase = "queued"
+    else:
+        phase = "running"
     ordered = sorted(counts.items(), key=lambda item: (
         _SUMMARY_ORDER.index(item[0]) if item[0] in _SUMMARY_ORDER else len(_SUMMARY_ORDER),
         item[0]))
     text = f"{phase}: " + ", ".join(f"{count} {state}" for state, count in ordered)
     if steps_failed:
         text += f" ({', '.join(steps_failed)} failed)"
-    if status == "needs reconciliation":
-        text += " (needs reconciliation)"
     return text
 
 

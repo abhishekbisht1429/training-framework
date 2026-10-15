@@ -323,14 +323,24 @@ batches: one `squeue` for all your jobs, and one command that reads every
 listed batch's task records. The `now` column summarizes the tasks:
 
 - `running: ...` / `queued: ...`: some tasks are still in Slurm's queue
-  (`queued` when none has started yet);
+  (`queued` when every one of them is still waiting to start). Any Slurm
+  state other than a final one (completed, failed, cancelled, timeout,
+  out of memory, node failure, preempted, ...) counts as still in the queue,
+  including held, suspended, and requeued jobs;
 - `finished: ...`: none is left in the queue; the counts say how they ended;
 - `(setup failed)`, `(prepare-... failed)`: a step the tasks depended on
   failed, so they were cancelled;
+- `needs reconciliation: ...`: an `sbatch` had an uncertain outcome, so a
+  job may exist that the receipt does not know; check with the `squeue
+  --name` query in the receipt (`status` prints it) before resubmitting;
 - `not submitted`, `submit failed`: nothing ran.
 
-A batch on a cluster that cannot be reached shows `? (cannot read <host>:
-...)` instead; the others are unaffected.
+When a batch's state cannot be known, `now` says why instead of guessing:
+`? (cannot read <host>: ...)` for a cluster that cannot be reached, `?
+(batch directory ... not found ...)` when the batch directory or a task
+table is gone (deleted, purged from scratch, or the receipt points at
+another cluster; it adds when the batch's jobs are still in the queue), or
+`? (...receipt...)` for a damaged receipt. Other batches are unaffected.
 
 ### Every task: `--tasks`
 
@@ -407,8 +417,12 @@ probes/frozen/001  lr=0.001 rng_seed=42   running          job 4711_1
 probes/frozen/002  lr=0.0001 rng_seed=41  failed (exit 1)  ValueError: ...
 ```
 
-The same rows as `batches --tasks`, for one batch, with its directory on
-the cluster. (Values are shortened above; both print full addresses such
+The same rows as `batches --tasks`, for one batch, with its cluster and
+directory. `status` connects to the cluster recorded in the receipt, whatever
+your default profile is; a profile is read only for receipts written before
+receipts recorded their cluster, and a `--profile` that points at a
+different cluster is refused rather than queried. A batch whose directory is
+gone is an error, not a list of tasks without records. (Values are shortened above; both print full addresses such
 as `optimizer.optimizer.kwargs.lr`.)
 
 ### Logs

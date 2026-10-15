@@ -295,23 +295,52 @@ def _submit(args, profile) -> int:
     return 0 if receipt.status == "submitted" else 1
 
 
-def _status(args, profile) -> int:
+def _status(args) -> int:
+    from training_framework.hpc.ports.ssh import SshExecutor
     from training_framework.hpc.scheduler import get_scheduler
     from training_framework.hpc.services.receipt import default_receipts_dir
-    from training_framework.hpc.services.status import batch_status, format_rows
+    from training_framework.hpc.services.status import (
+        fetch_batches,
+        format_rows,
+        missing_files,
+        receipt_problem,
+        task_rows,
+    )
 
     path = Path(args.batch_id)
     if not path.is_file():
         path = Path(args.receipts or default_receipts_dir()) / f"{args.batch_id}.json"
     if not path.is_file():
         raise HpcError(f"no receipt for {args.batch_id} (looked at {path})")
-    receipt = json.loads(path.read_text())
-    ports = _cluster(profile)
-    scheduler = get_scheduler(profile.scheduler)
-    job_states = scheduler.job_states(ports["executor"]) if scheduler.job_states else None
-    print(f"batch {receipt['batch_id']}: {receipt['status']} | {receipt['batch_dir']}")
-    rows = batch_status(receipt, ports["filesystem"], ports["executor"], job_states)
-    print(format_rows(rows))
+    try:
+        receipt = json.loads(path.read_text())
+    except ValueError as error:
+        raise HpcError(f"{path} is not valid JSON: {error}") from None
+    if problem := receipt_problem(receipt):
+        raise HpcError(f"{path} is not a valid receipt ({problem})")
+    # The batch went where its receipt says; a profile is needed only for
+    # receipts written before receipts recorded it, and an explicitly named
+    # profile must agree with the receipt.
+    host, scheduler = receipt.get("ssh_host"), receipt.get("scheduler") or "slurm"
+    if host is None or args.profile or args.profiles:
+        profile = _profile(args)
+        if host is None:
+            host, scheduler = profile.ssh_host, profile.scheduler
+        elif (profile.ssh_host, profile.scheduler) != (host, scheduler):
+            raise HpcError(
+                f"{receipt['batch_id']} was submitted to {host} ({scheduler}), but profile "
+                f"'{profile.name}' is {profile.ssh_host} ({profile.scheduler}); drop --profile "
+                "to use the receipt's cluster")
+    _require_tools("ssh")
+    executor = SshExecutor(host)
+    bundle = get_scheduler(scheduler)
+    refs = [node["job_ref"] for node in receipt["nodes"].values() if node.get("job_ref")]
+    live = bundle.job_states(executor)(refs) if bundle.job_states and refs else {}
+    files = fetch_batches(executor, [receipt["batch_dir"]]).get(receipt["batch_dir"])
+    print(f"batch {receipt['batch_id']}: {receipt['status']} | {host}:{receipt['batch_dir']}")
+    if problem := missing_files(receipt, files):
+        raise HpcError(f"{problem} on {host}")
+    print(format_rows(task_rows(receipt, files, live)))
     return 0
 
 
@@ -328,11 +357,12 @@ def _batches(args) -> int:
             since = listing.parse_age(args.since)
         except ValueError as error:
             raise HpcError(str(error)) from None
-    # The profile is optional: receipts name their cluster. It is needed for
-    # --remote, and for receipts written before they recorded the cluster.
-    profile = None
-    if args.remote or args.profile or args.profiles or default_profiles_path().exists():
-        profile = _profile(args)
+    # Receipts name their cluster, so the profile is read only when it is
+    # needed: for --remote, when one is named explicitly, or (lazily) for a
+    # live lookup of a receipt written before receipts recorded the cluster.
+    # A plain listing never reads it.
+    explicit = bool(args.profile or args.profiles)
+    profile = _profile(args) if args.remote or explicit else None
     if live or args.remote:
         _require_tools("ssh")
     views = listing.load_receipts(str(args.receipts or default_receipts_dir()))
@@ -355,7 +385,10 @@ def _batches(args) -> int:
     views = listing.select(views, since=since, name=args.name,
                            limit=None if args.active else args.limit)
     if live:
-        fallback = (profile.ssh_host, profile.scheduler) if profile else None
+        def fallback():
+            selected = profile or _profile(args)
+            return selected.ssh_host, selected.scheduler
+
         listing.add_live_state(views, connect, fallback)
         if args.active:
             views = listing.select(views, active=True, limit=args.limit)
@@ -393,15 +426,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "batches":
             return _batches(args)
+        if args.command == "status":
+            return _status(args)
         profile = _profile(args)
-        if args.command in ("probe-python", "status"):
+        if args.command == "probe-python":
             _require_tools("ssh")
         if args.command == "probe-python":
             return _probe_python(profile)
         if args.command == "submit":
             return _submit(args, profile)
-        if args.command == "status":
-            return _status(args, profile)
         compiled, _ = _compile(args, profile)
     except HpcError as error:  # includes PlanError, with every problem
         print(f"error: {error}", file=sys.stderr)

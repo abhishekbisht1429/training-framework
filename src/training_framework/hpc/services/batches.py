@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from training_framework.hpc.services.status import (
     Row,
     fetch_batches,
+    missing_files,
+    receipt_problem,
     format_rows,
     is_task,
     summarize,
@@ -71,8 +73,9 @@ def load_receipts(directory: str) -> list[BatchView]:
         try:
             with open(path) as handle:
                 receipt = json.load(handle)
-            if not isinstance(receipt, dict) or "batch_id" not in receipt:
-                raise ValueError("not a receipt")
+            problem = receipt_problem(receipt)
+            if problem:
+                raise ValueError(f"not a valid receipt ({problem})")
         except (OSError, ValueError) as error:
             receipt = {"batch_id": name[:-len(".json")], "status": "unreadable receipt",
                        "error": f"{path}: {error}", "nodes": {}}
@@ -96,7 +99,7 @@ def remote_receipts(executor, batches_root: str) -> list[dict]:
             receipt = json.loads(line)
         except ValueError:
             continue
-        if isinstance(receipt, dict) and "batch_id" in receipt:
+        if receipt_problem(receipt) is None:
             receipts.append(receipt)
     return receipts
 
@@ -120,27 +123,37 @@ def select(views: list[BatchView], *, since: timedelta | None = None, name: str 
     return chosen[:limit] if limit else chosen
 
 
-def cluster_of(receipt: dict, fallback: tuple[str, str] | None) -> tuple[str, str] | None:
-    """(SSH host, scheduler) a batch was submitted to. Receipts written before
-    they recorded it use the selected profile's (`fallback`)."""
-    if receipt.get("ssh_host"):
-        return receipt["ssh_host"], receipt.get("scheduler") or "slurm"
-    return fallback
+def add_live_state(views: list[BatchView], connect, fallback=None) -> None:
+    """Fill `now` and `rows` of every view, or `problem` when its state cannot
+    be known. `connect(ssh_host, scheduler)` returns (executor, function
+    returning all of the user's job states). Receipts that do not record
+    their cluster (written before receipts did) use `fallback()`, called at
+    most once and only if such a receipt is listed; it returns (ssh_host,
+    scheduler) or raises with the reason it cannot."""
+    resolved: dict = {}
 
+    def fallback_cluster():
+        if "value" not in resolved:
+            try:
+                resolved["value"] = fallback() if fallback else None
+                resolved["error"] = None if resolved["value"] else "no profile was given"
+            except Exception as error:   # reported on the receipts that needed it
+                resolved["value"], resolved["error"] = None, str(error)
+        return resolved["value"], resolved["error"]
 
-def add_live_state(views: list[BatchView], connect, fallback: tuple[str, str] | None) -> None:
-    """Fill `now` and `rows` of every view. `connect(ssh_host, scheduler)`
-    returns (executor, function returning all of the user's job states)."""
     by_cluster: dict[tuple[str, str], list[BatchView]] = {}
     for view in views:
         if view.receipt.get("status") == "unreadable receipt":
             view.problem = view.receipt.get("error")
             continue
-        cluster = cluster_of(view.receipt, fallback)
-        if cluster is None:
-            view.problem = ("this receipt does not say which cluster it went to; "
-                            "pass --profile for it")
-            continue
+        if view.receipt.get("ssh_host"):
+            cluster = (view.receipt["ssh_host"], view.receipt.get("scheduler") or "slurm")
+        else:
+            cluster, error = fallback_cluster()
+            if cluster is None:
+                view.problem = ("this receipt predates receipts recording their cluster, so the "
+                                f"profile is needed ({error}); pass --profile")
+                continue
         by_cluster.setdefault(cluster, []).append(view)
     for (host, scheduler), members in by_cluster.items():
         try:
@@ -152,8 +165,22 @@ def add_live_state(views: list[BatchView], connect, fallback: tuple[str, str] | 
                 view.problem = f"cannot read {host}: {type(error).__name__}: {error}"
             continue
         for view in members:
-            view.rows = task_rows(view.receipt, files.get(view.receipt["batch_dir"]), live)
-            view.now = summarize(view.receipt, view.rows)
+            receipt = view.receipt
+            try:
+                found = files.get(receipt["batch_dir"])
+                problem = missing_files(receipt, found)
+                if problem:
+                    refs = [node["job_ref"] for node in receipt["nodes"].values() if node.get("job_ref")]
+                    queued = any(element == ref or element.startswith(f"{ref}_")
+                                 for ref in refs for element in live)
+                    view.problem = f"{problem} on {host}" + (
+                        "; its jobs are still in the queue" if queued else "")
+                    continue
+                view.rows = task_rows(receipt, found, live)
+                view.now = summarize(receipt, view.rows)
+            except Exception as error:  # one bad batch does not hide the others
+                view.rows, view.now = None, None
+                view.problem = f"cannot summarize: {type(error).__name__}: {error}"
 
 
 # Output ---------------------------------------------------------------------------

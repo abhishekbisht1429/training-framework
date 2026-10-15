@@ -71,8 +71,8 @@ def test_filters(tmp_path):
 
 def test_summaries_say_what_a_batch_is_doing():
     submitted = receipt("b", nodes={"setup": {}, "group-g": {"job_ref": "9"}})
-    rows = [Row("setup", "", "built", ""), Row("g/e/000", "", "running", ""),
-            Row("g/e/001", "", "pending", ""), Row("g/e/002", "", "done", ""),
+    rows = [Row("setup", "", "built", ""), Row("g/e/000", "", "running", "job 9_0", True),
+            Row("g/e/001", "", "pending", "job 9_1", True), Row("g/e/002", "", "done", ""),
             Row("g/e/003", "", "failed (exit 1)", "")]
     assert summarize(submitted, rows) == "running: 1 running, 1 pending, 1 done, 1 failed"
     assert summarize(submitted, rows[3:]) == "finished: 1 done, 1 failed"
@@ -117,7 +117,8 @@ def test_an_unreachable_cluster_is_reported_on_its_batches(tmp_path):
 def test_older_receipts_use_the_selected_profile_or_say_what_is_missing(tmp_path):
     batch = dict(_batch(tmp_path), created=NOW.isoformat())     # no ssh_host recorded
     with_profile, without = listing.BatchView(batch, "local"), listing.BatchView(dict(batch), "local")
-    listing.add_live_state([with_profile], lambda h, s: (LocalExecutor(), None), ("cluster", "slurm"))
+    listing.add_live_state([with_profile], lambda h, s: (LocalExecutor(), None),
+                           lambda: ("cluster", "slurm"))
     assert with_profile.now.startswith("finished")
     listing.add_live_state([without], lambda h, s: (LocalExecutor(), None), None)
     assert "pass --profile" in without.problem
