@@ -117,13 +117,14 @@ def submit(
         confirm: Callable[[ExecutionPlan], bool] = lambda plan: True,
         review: Callable[[ExecutionPlan, Summary], bool] = lambda plan, summary: not summary.over_limit,
         progress: Callable[[str], None] = lambda message: None,
+        receipt_info: dict | None = None,
 ) -> Receipt:
     """`review` sees the summary (uploads, sizes) and may decline; by default
     it declines an upload above `upload_limit`. `confirm` is a plain yes/no."""
     environment = EnvironmentCache(plan, filesystem, executor)
     preparer = DataPreparer(plan, filesystem, executor)
     uploader = DataUploader(plan, filesystem, transfer, probe, owner or {})
-    receipt = Receipt.create(receipts_dir or receipts.default_receipts_dir(), plan)
+    receipt = Receipt.create(receipts_dir or receipts.default_receipts_dir(), plan, receipt_info)
     try:
         return _submit(plan, manifest_raw, receipt, environment, preparer, uploader,
                        stager, filesystem, executor, submitter, transfer, probe,

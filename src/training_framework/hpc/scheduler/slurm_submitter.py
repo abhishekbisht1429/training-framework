@@ -95,3 +95,17 @@ def job_states(executor):
         return states
     return query
 
+
+def user_job_states(executor) -> dict:
+    """Live states of all the user's jobs and array elements, in one call."""
+    result = executor.run(["sh", "-c", 'squeue --noheader --array --user "$(id -un)" '
+                                       '--format "%i|%T"'])
+    if result.status != 0:
+        raise RuntimeError(f"squeue failed: {result.stderr.strip()}")
+    states = {}
+    for line in result.stdout.splitlines():
+        element, _, state = line.strip().partition("|")
+        if element:
+            states[element] = state.lower()
+    return states
+

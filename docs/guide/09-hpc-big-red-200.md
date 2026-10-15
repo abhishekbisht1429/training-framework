@@ -159,6 +159,7 @@ D repeats them with a managed one.
 ```bash
 python -m training_framework.hpc submit batch.yaml
 python -m training_framework.hpc status <batch-id>        # pending -> running -> done
+python -m training_framework.hpc batches --tasks           # every batch and task at a glance
 ssh bigred200 'cat <batch-dir>/logs/cpu/*.out'
 ssh bigred200 'cat <batch-dir>/tasks/cpu/seeds/000/record.json'
 ```

@@ -41,7 +41,9 @@ class Receipt:
         self._mirror = None   # (filesystem, remote path)
 
     @classmethod
-    def create(cls, directory: str, plan: ExecutionPlan) -> "Receipt":
+    def create(cls, directory: str, plan: ExecutionPlan, info: dict | None = None) -> "Receipt":
+        """`info`: where the batch came from and went (profile, SSH host,
+        manifest, submitting host), for listing batches later."""
         path = os.path.join(directory, f"{plan.batch_id}.json")
         if os.path.exists(path):
             raise FileExistsError(f"a receipt for {plan.batch_id} already exists at {path}")
@@ -50,6 +52,11 @@ class Receipt:
             "batch_id": plan.batch_id,
             "batch_dir": plan.batch_dir,
             "sha": plan.sha,
+            "profile": plan.profile,
+            "scheduler": plan.scheduler,
+            "task_count": len(plan.tasks),
+            "group_count": sum(node.kind == "task_set" for node in plan.nodes),
+            **(info or {}),
             "status": SUBMITTING,
             "staged": False,
             "created": _now(),

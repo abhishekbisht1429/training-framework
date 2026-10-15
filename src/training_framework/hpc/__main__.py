@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import sys
 import time
 from datetime import datetime, timezone
@@ -128,6 +129,25 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--receipts", type=Path, help="receipt directory "
                         "(default: $XDG_STATE_HOME/training-framework/submissions)")
     profile_options(status)
+    listing = commands.add_parser(
+        "batches", help="list every batch you submitted, past and present",
+        description="List every batch submitted from this machine (from its receipts). "
+                    "--live adds what each batch is doing now; --tasks shows every task.")
+    listing.add_argument("--live", action="store_true",
+                         help="connect to the cluster(s) and show what each batch is doing now")
+    listing.add_argument("--tasks", action="store_true",
+                         help="show every task of each batch (implies --live)")
+    listing.add_argument("--remote", action="store_true",
+                         help="also list batches submitted from other machines (needs a profile)")
+    listing.add_argument("--active", action="store_true",
+                         help="only batches with queued or running tasks (implies --live)")
+    listing.add_argument("--since", metavar="AGE", help="only batches submitted within AGE: 30m, 12h, 7d, 2w")
+    listing.add_argument("--name", help="only batches whose id contains NAME")
+    listing.add_argument("--limit", type=int, help="only the newest LIMIT batches")
+    listing.add_argument("--json", action="store_true", help="print JSON instead of a table")
+    listing.add_argument("--receipts", type=Path, help="receipt directory "
+                         "(default: $XDG_STATE_HOME/training-framework/submissions)")
+    profile_options(listing)
     probe = commands.add_parser("probe-python",
                                 help="print the site interpreter's identity for the profile")
     profile_options(probe)
@@ -245,6 +265,13 @@ def _submit(args, profile) -> int:
             executor=ports["executor"], submitter=ports["submitter"],
             transfer=ports["transfer"], probe=ports["probe"], owner=current_process_owner(),
             upload_limit=profile.upload_limit, review=_review(args.yes), progress=_progress,
+            receipt_info={
+                "ssh_host": profile.ssh_host,
+                "repository": str(repository.root),
+                "manifest": Path(args.batch).resolve().relative_to(
+                    repository.root.resolve()).as_posix(),
+                "submitted_from": socket.gethostname(),
+            },
         )
     except HpcError as error:
         receipt = getattr(error, "receipt", None)
@@ -288,6 +315,57 @@ def _status(args, profile) -> int:
     return 0
 
 
+def _batches(args) -> int:
+    from training_framework.hpc.ports.ssh import SshExecutor
+    from training_framework.hpc.scheduler import get_scheduler
+    from training_framework.hpc.services import batches as listing
+    from training_framework.hpc.services.receipt import default_receipts_dir
+
+    live = args.live or args.tasks or args.active
+    since = None
+    if args.since:
+        try:
+            since = listing.parse_age(args.since)
+        except ValueError as error:
+            raise HpcError(str(error)) from None
+    # The profile is optional: receipts name their cluster. It is needed for
+    # --remote, and for receipts written before they recorded the cluster.
+    profile = None
+    if args.remote or args.profile or args.profiles or default_profiles_path().exists():
+        profile = _profile(args)
+    if live or args.remote:
+        _require_tools("ssh")
+    views = listing.load_receipts(str(args.receipts or default_receipts_dir()))
+
+    def connect(ssh_host: str, scheduler: str):
+        executor = SshExecutor(ssh_host)
+        bundle = get_scheduler(scheduler)
+        return executor, (lambda: bundle.user_job_states(executor)) if bundle.user_job_states else None
+
+    if args.remote:
+        if profile is None:
+            raise HpcError("--remote needs a profile (it lists the profile's roots.batches)")
+        known = {view.batch_id for view in views}
+        executor = SshExecutor(profile.ssh_host)
+        for receipt in listing.remote_receipts(executor, profile.roots["batches"]):
+            if receipt["batch_id"] not in known:
+                views.append(listing.BatchView(receipt, "cluster"))
+        views = listing.sort_views(views)
+    # Cheap filters first, so --live only reads the batches that are shown.
+    views = listing.select(views, since=since, name=args.name,
+                           limit=None if args.active else args.limit)
+    if live:
+        fallback = (profile.ssh_host, profile.scheduler) if profile else None
+        listing.add_live_state(views, connect, fallback)
+        if args.active:
+            views = listing.select(views, active=True, limit=args.limit)
+    if args.json:
+        print(json.dumps(listing.as_json(views, tasks=args.tasks), indent=2))
+    else:
+        print(listing.format_views(views, live=live, tasks=args.tasks, origins=args.remote))
+    return 0
+
+
 def _probe_python(profile) -> int:
     from training_framework.hpc.compile.compiler import (
         SET_VARIABLES,
@@ -313,6 +391,8 @@ def _probe_python(profile) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "batches":
+            return _batches(args)
         profile = _profile(args)
         if args.command in ("probe-python", "status"):
             _require_tools("ssh")

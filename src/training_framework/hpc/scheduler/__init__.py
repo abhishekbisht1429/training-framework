@@ -24,6 +24,9 @@ class SchedulerBundle:
     owner_probe: Callable[[Any], Any]      # RemoteExecutor -> LeaseOwnerProbe
     #: RemoteExecutor -> (job refs -> {job or array element id: state}).
     job_states: Callable[[Any], Callable[[list[str]], dict]] | None = None
+    #: RemoteExecutor -> {job or array element id: state} of all the user's
+    #: queued and running jobs, in one call.
+    user_job_states: Callable[[Any], dict] | None = None
 
 
 def _slurm() -> SchedulerBundle:
@@ -36,6 +39,7 @@ def _slurm() -> SchedulerBundle:
         submitter=slurm_submitter.SlurmSubmitter,
         owner_probe=slurm_submitter.RemoteOwnerProbe,
         job_states=slurm_submitter.job_states,
+        user_job_states=slurm_submitter.user_job_states,
     )
 
 

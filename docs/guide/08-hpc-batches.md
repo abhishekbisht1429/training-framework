@@ -11,6 +11,8 @@ pip install 'training-framework[hpc]'     # adds `packaging`, used on the workst
 python -m training_framework.hpc validate experiments/sweep.yaml
 python -m training_framework.hpc render   experiments/sweep.yaml --output /tmp/preview
 python -m training_framework.hpc submit   experiments/sweep.yaml
+python -m training_framework.hpc batches  --live        # all your batches and what they are doing
+python -m training_framework.hpc status   <batch-id>    # one batch, task by task
 ```
 
 Every key of the profile and the manifest is described in the
@@ -262,7 +264,135 @@ If a submission's outcome is uncertain (a dropped connection), nothing is
 retried; the receipt says `needs reconciliation` and prints the `squeue
 --name=...` query that finds the job.
 
-## 7. Following a batch
+## 7. Keeping track of your batches
+
+Every `submit` leaves a **receipt**: a small JSON file describing the batch
+(when and from where it was submitted, profile, cluster, commit, task count)
+and every job it submitted, with its Slurm job ID. Receipts live in
+`~/.local/state/training-framework/submissions/<batch-id>.json` (or
+`$XDG_STATE_HOME/...`), and a copy is kept in the batch directory on the
+cluster as `receipt.json`. Two commands read them; neither changes anything.
+
+| Command | Shows | Connects to the cluster |
+|---|---|---|
+| `batches` | every batch, one line each | no |
+| `batches --live` | ... plus what each batch is doing now | yes, once per cluster |
+| `batches --tasks` | ... plus every task of every batch | yes, once per cluster |
+| `status <batch-id>` | one batch in detail | yes |
+
+### All your batches: `batches`
+
+```bash
+python -m training_framework.hpc batches
+```
+
+```
+batch                                   submitted         profile    tasks  submit
+ssl-dino-20261015T091200Z-3f2a1c9e4b7d  2026-10-15 09:12  bigred200  4      submitted
+vit-probes-20261014T220100Z-9a8b7c6d5e  2026-10-14 22:01  bigred200  24     submitted
+vit-probes-20261014T214000Z-9a8b7c6d5e  2026-10-14 21:40  bigred200  24     staged (declined at confirmation)
+imagenet-20261013T014700Z-1c2d3e4f5a6b  2026-10-13 01:47  bigred200  8      failed (rsync not found on this machine's PATH; ...)
+```
+
+Newest first, from the receipts on this machine; it works offline and
+needs no profile. The `submit` column is how the submission itself ended:
+
+| `submit` | Meaning |
+|---|---|
+| `submitted` | every job was accepted by Slurm |
+| `staged (...)` | the batch was prepared but not submitted (declined, or over `upload_limit`) |
+| `failed (...)` | submission stopped with an error; jobs already submitted were cancelled |
+| `needs reconciliation (...)` | an `sbatch` had an uncertain outcome; check with the `squeue --name` query in the receipt |
+| `submitting` | `submit` was killed before it could record an outcome |
+
+### What they are doing now: `--live`
+
+```bash
+python -m training_framework.hpc batches --live
+```
+
+```
+batch                                   submitted         profile    tasks  submit     now
+ssl-dino-20261015T091200Z-3f2a1c9e4b7d  2026-10-15 09:12  bigred200  4      submitted  running: 2 running, 2 pending
+vit-probes-20261014T220100Z-9a8b7c6d5e  2026-10-14 22:01  bigred200  24     submitted  finished: 20 done, 3 interrupted, 1 failed
+vit-probes-20261014T214000Z-9a8b7c6d5e  2026-10-14 21:40  bigred200  24     staged     not submitted
+```
+
+`--live` makes one SSH connection per cluster, whatever the number of
+batches: one `squeue` for all your jobs, and one command that reads every
+listed batch's task records. The `now` column summarizes the tasks:
+
+- `running: ...` / `queued: ...`: some tasks are still in Slurm's queue
+  (`queued` when none has started yet);
+- `finished: ...`: none is left in the queue; the counts say how they ended;
+- `(setup failed)`, `(prepare-... failed)`: a step the tasks depended on
+  failed, so they were cancelled;
+- `not submitted`, `submit failed`: nothing ran.
+
+A batch on a cluster that cannot be reached shows `? (cannot read <host>:
+...)` instead; the others are unaffected.
+
+### Every task: `--tasks`
+
+```bash
+python -m training_framework.hpc batches --tasks --since 1d
+```
+
+```
+batch                                  submitted         profile    tasks  submit     now
+listing-20261015T012123Z-97dfad756615  2026-10-15 01:21  bigred200  3      submitted  running: 2 running, 1 done
+    task           values                     state    detail
+    cpu/seeds/000  session_config.rng_seed=1  done     /N/scratch/.../tasks/cpu/seeds/000/sessions/session_...
+    cpu/seeds/001  session_config.rng_seed=2  running  job 8565732_1
+    cpu/seeds/002  session_config.rng_seed=3  running  job 8565732_2
+```
+
+Each batch is followed by its steps (`setup`, `prepare-...`) and tasks:
+the task's name (`<group>/<experiment>/<NNN>`), its matrix values, its
+state, and a detail. `--tasks` implies `--live`. Task states:
+
+| State | Meaning | Detail |
+|---|---|---|
+| `pending`, `running` (and other Slurm states) | in Slurm's queue | the job or array element, e.g. `job 4711_3` |
+| `done` | exited 0 | its run directory |
+| `failed (exit N)` | exited non-zero | the last line of the error |
+| `interrupted` | stopped by the early-stop signal before the time limit, or by `scancel --signal=USR1` | |
+| `ended without a record` | the job ended without writing its record: killed for memory or time, or the node failed | the log to read |
+| `cancelled` | cancelled before it ran (for example, its setup failed) | |
+| `built`, `already ready`, `prepared`, `ran on login` | (steps) the environment or data step's outcome | its location |
+
+### Choosing what to list
+
+| Option | Lists |
+|---|---|
+| `--since 30m` / `12h` / `7d` / `2w` | batches submitted within that time |
+| `--name TEXT` | batches whose ID contains `TEXT` (IDs start with the manifest's `name`) |
+| `--active` | only batches with queued or running tasks (implies `--live`) |
+| `--limit N` | the newest `N` |
+| `--json` | the same information as JSON (with `--tasks`, every task), for scripts and notebooks |
+| `--receipts DIR` | receipts from another directory |
+
+For example, `batches --active` answers "what is running right now", and
+`batches --tasks --name vit-probes --limit 1` shows the latest sweep task by
+task.
+
+### Batches submitted from other machines: `--remote`
+
+Receipts are per machine: a batch submitted from your laptop is not in the
+list on a workstation. `--remote` also reads the receipts kept in the batch
+directories on the cluster (under the profile's `roots.batches`) and adds
+the batches that are missing here, with a `from` column naming the machine
+that submitted them:
+
+```bash
+python -m training_framework.hpc batches --remote --live
+```
+
+`--remote` needs a profile (`--profile`, or the default in your profile
+file). So do `--live` and `--tasks` for receipts written before receipts
+recorded their cluster; newer receipts carry their SSH host.
+
+### One batch in detail: `status`
 
 ```bash
 python -m training_framework.hpc status <batch-id>      # or the receipt's path
@@ -277,11 +407,15 @@ probes/frozen/001  lr=0.001 rng_seed=42   running          job 4711_1
 probes/frozen/002  lr=0.0001 rng_seed=41  failed (exit 1)  ValueError: ...
 ```
 
-`status` only reads: the receipt, each group's `tasks.tsv`, the records on
-the cluster, and `squeue` for jobs still queued or running. A task whose job
-ended without writing a record (killed at the time limit, out of memory)
-points at its log file. (Values are shortened above; `status` prints full
-addresses such as `optimizer.optimizer.kwargs.lr`.)
+The same rows as `batches --tasks`, for one batch, with its directory on
+the cluster. (Values are shortened above; both print full addresses such
+as `optimizer.optimizer.kwargs.lr`.)
+
+### Logs
+
+A task's log is `<batch-dir>/logs/<group>/<jobid>_<index>.out` on the
+cluster: `status` gives the batch directory and, for a running task, the
+`<jobid>_<index>`. Follow it with `ssh <host> 'tail -f <log>'`.
 
 Every log line written by the HPC layer starts with `[hpc ...]` (`[hpc setup
 ...]`, `[hpc prepare ...]`) and a UTC time. A task log opens with the task's
