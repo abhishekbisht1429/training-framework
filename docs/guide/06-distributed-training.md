@@ -220,18 +220,20 @@ During setup, the built-in DDP resource:
   using NCCL; and
 - wraps the model with `torch.nn.parallel.DistributedDataParallel`.
 
-Before each DDP iteration, every rank contributes its local cooperative-stop
-state to an `all_reduce(MAX)` decision. A stop request received by any rank
-therefore causes all ranks to leave the training loop at the same iteration
-boundary instead of allowing another rank to enter a mismatched forward or
-backward collective. Gloo uses a CPU control tensor; NCCL uses the session's
-CUDA device.
+Before each DDP iteration, every rank casts its local cooperative-stop state
+as an asynchronous `all_reduce(MAX)` vote, and reads the result after that
+iteration. A stop request received by any rank therefore causes all ranks to
+leave the training loop after the same iteration instead of allowing another
+rank to enter a mismatched forward or backward collective. Ranks never wait on
+the vote while they train: it completes during the iteration. The vote is a
+CPU tensor; with NCCL it travels on a separate gloo process group, so reading
+it never waits for the GPU.
 
-A request that arrives just after this decision may allow one additional
-iteration, but that iteration is admitted for every rank. The consensus does
-not interrupt a collective already in progress. Worker failures and unhealthy
-process groups still rely on the supervisor's configured graceful-join timeout
-and terminate/kill fallback. Non-DDP workers keep using their local stop event.
+A stop requested before the first iteration runs none. A request that arrives
+during an iteration lets every rank finish that iteration and one more. The
+consensus does not interrupt a collective already in progress. Worker failures
+and unhealthy process groups still rely on the supervisor's configured
+graceful-join timeout and terminate/kill fallback. Non-DDP workers keep using their local stop event.
 
 The wrapped module is available only inside the active session context, to a
 component that declares `@requires_resource("ddp")`:
