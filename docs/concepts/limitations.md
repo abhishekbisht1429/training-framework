@@ -30,7 +30,7 @@ def run(self, session):
 
 ### Graceful stopping occurs between iterations
 
-Non-DDP workers use their local stop event. DDP workers make a rank-wide stop decision before each iteration, so every rank may complete one final synchronized iteration when a request races with that decision. Work already inside a component or collective must finish or wait until the join timeout causes termination.
+Non-DDP workers check their local stop event after each iteration. DDP workers agree on a stop with a vote that every rank casts before an iteration and reads after it, so the ranks never wait for the vote while they train; with the `nccl` backend the vote travels on a separate gloo process group and never touches the GPU. A stop requested before the first iteration runs none. A stop requested during an iteration lets every rank finish that iteration and one more, and all ranks stop after the same one. Work already inside a component or collective must finish or wait until the join timeout causes termination.
 
 ## Distributed training
 

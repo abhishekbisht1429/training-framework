@@ -181,41 +181,89 @@ def load_session_for_worker(
     return session
 
 
+class _StopVote:
+    """This rank's stop request, all-reduced across the ranks in flight.
+
+    Casting does not wait: the ranks agree while the iteration runs, and the
+    result is read once it is over. The flag is a CPU tensor, so reading it
+    never waits for the GPU.
+    """
+
+    def __init__(self, session: Session, local_stop_requested: bool, group):
+        self._session = session
+        self._flag = torch.tensor(int(local_stop_requested), dtype=torch.int32)
+        # The default group of a CPU backend takes the CPU flag as it is; an
+        # NCCL launch passes its gloo side group.
+        group_kwargs = {} if group is None else {"group": group}
+        session.send_heartbeat("Synchronizing worker stop state")
+        self._sync = distributed.all_reduce(
+            self._flag,
+            op=distributed.ReduceOp.MAX,
+            async_op=True,
+            **group_kwargs,
+        )
+
+    def result(
+            self,
+            *,
+            stop_sync_grace_period: float = _STOP_SYNC_GRACE_PERIOD,
+            stop_sync_poll_interval: float = _STOP_SYNC_POLL_INTERVAL,
+    ) -> bool:
+        poll_started = time.monotonic()
+        while not self._sync.is_completed():
+            self._session.send_heartbeat("Synchronizing worker stop state")
+            if time.monotonic() - poll_started >= stop_sync_grace_period:
+                time.sleep(stop_sync_poll_interval)
+        self._sync.wait()
+        return bool(self._flag.item())
+
+
+def _stop_vote_group(session: Session):
+    """The process group stop votes travel on: `None` for the default group.
+
+    NCCL carries only CUDA tensors, and reading a CUDA flag waits for every
+    kernel queued before it, so an NCCL launch votes on a gloo side group.
+    Every rank calls this at the same point, after `ddp` has set up.
+    """
+    if not session._components.has_resource("ddp"):
+        return None
+    if session._components.get_resource("ddp").backend != "nccl":
+        return None
+    return distributed.new_group(backend="gloo")
+
+
+def _cast_stop_vote(session: Session, stop_event, group) -> _StopVote | None:
+    """Cast this rank's stop vote; `None` when there are no other ranks."""
+    if not session._components.has_resource("ddp"):
+        return None
+    return _StopVote(session, stop_event.is_set(), group)
+
+
+def _vote_says_stop(
+        vote: _StopVote | None,
+        stop_event,
+        **stop_sync_timing,
+) -> bool:
+    if vote is None:
+        return stop_event.is_set()
+    return vote.result(**stop_sync_timing)
+
+
 def _stop_requested(
         session: Session,
         stop_event,
         *,
+        group=None,
         stop_sync_grace_period: float = _STOP_SYNC_GRACE_PERIOD,
         stop_sync_poll_interval: float = _STOP_SYNC_POLL_INTERVAL,
 ) -> bool:
-    local_stop_requested = stop_event.is_set()
-    if not session._components.has_resource("ddp"):
-        return local_stop_requested
-
-    ddp_resource = session._components.get_resource("ddp")
-    control_device = (
-        session.device
-        if ddp_resource.backend == "nccl"
-        else torch.device("cpu")
+    """Agree on a stop now, waiting for every rank's vote."""
+    return _vote_says_stop(
+        _cast_stop_vote(session, stop_event, group),
+        stop_event,
+        stop_sync_grace_period=stop_sync_grace_period,
+        stop_sync_poll_interval=stop_sync_poll_interval,
     )
-    stop_flag = torch.tensor(
-        int(local_stop_requested),
-        dtype=torch.int32,
-        device=control_device,
-    )
-    session.send_heartbeat("Synchronizing worker stop state")
-    stop_sync = distributed.all_reduce(
-        stop_flag,
-        op=distributed.ReduceOp.MAX,
-        async_op=True,
-    )
-    poll_started = time.monotonic()
-    while not stop_sync.is_completed():
-        session.send_heartbeat("Synchronizing worker stop state")
-        if time.monotonic() - poll_started >= stop_sync_grace_period:
-            time.sleep(stop_sync_poll_interval)
-    stop_sync.wait()
-    return bool(stop_flag.item())
 
 
 def session_process_worker(
@@ -245,19 +293,30 @@ def session_process_worker(
             "stop_sync_poll_interval",
             _STOP_SYNC_POLL_INTERVAL,
         )
+        stop_sync_timing = {
+            "stop_sync_grace_period": stop_sync_grace_period,
+            "stop_sync_poll_interval": stop_sync_poll_interval,
+        }
         with session:
-            while True:
-                if _stop_requested(
-                        session,
-                        stop_event,
-                        stop_sync_grace_period=stop_sync_grace_period,
-                        stop_sync_poll_interval=stop_sync_poll_interval,
-                ):
-                    break
-                try:
-                    next(session)
-                except StopIteration:
-                    break
+            group = _stop_vote_group(session)
+            # A stop requested before the first iteration runs none.
+            if not _stop_requested(
+                    session, stop_event, group=group, **stop_sync_timing,
+            ):
+                while True:
+                    # Every rank votes before an iteration and reads the
+                    # result after it, so all of them stop after the same
+                    # iteration without waiting on the vote in between.
+                    vote = _cast_stop_vote(session, stop_event, group)
+                    try:
+                        next(session)
+                    except StopIteration:
+                        # Every rank cast this vote; let it finish before
+                        # teardown destroys the process group.
+                        _vote_says_stop(vote, stop_event, **stop_sync_timing)
+                        break
+                    if _vote_says_stop(vote, stop_event, **stop_sync_timing):
+                        break
     except BaseException as error:
         try:
             # Session.__exit__ already reports failures raised while the

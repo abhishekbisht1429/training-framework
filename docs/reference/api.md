@@ -77,8 +77,8 @@ name and the suffix), `format_instance_name`, `is_instance_name` and
 | `topology_overrides` | `ddp.world_size` / `master_addr` / `master_port` overrides, separated out because they describe the launch rather than the session |
 | `new_max_iters` | Deprecated positional iteration limit, when supplied |
 | `heartbeat_timeout` | Seconds a worker may go without marking progress |
-| `stop_sync_grace_period` | Busy-poll duration before a pending DDP stop collective sleeps |
-| `stop_sync_poll_interval` | Sleep duration between pending DDP stop-collective polls |
+| `stop_sync_grace_period` | Busy-poll duration before a DDP stop vote still pending when it is read sleeps |
+| `stop_sync_poll_interval` | Sleep duration between polls of a pending DDP stop vote |
 | `process_timeout_on_join` | Graceful process-join timeout |
 | `debug` | Whether the parent only joins workers without monitoring them |
 | `get_component_config(session_index, key)` | Return a deep copy of one component mapping, or `{}` for a listed no-config component |

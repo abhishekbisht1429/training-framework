@@ -172,6 +172,145 @@ def test_ddp_stop_wait_keeps_worker_heartbeat_active(
     assert sleep_calls == expected_sleeps
 
 
+def _run_single_rank_ddp_worker(
+    monkeypatch,
+    *,
+    backend="gloo",
+    stop_before_start=False,
+    stop_during_iteration=None,
+    max_iterations=10,
+):
+    """Drive the worker loop for one fake DDP rank and record, in order, each
+    stop vote cast (flag, group), each vote read and each iteration run."""
+    events = []
+    new_groups = []
+    stop = {"requested": stop_before_start}
+    ddp = SimpleNamespace(backend=backend)
+
+    class Components:
+        @staticmethod
+        def has_resource(name):
+            return name == "ddp"
+
+        @staticmethod
+        def get_resource(name):
+            assert name == "ddp"
+            return ddp
+
+    class Session:
+        _components = Components
+        iteration = 0
+
+        def set_dist_manager_err_conn(self, conn):
+            pass
+
+        def set_progress_beacon(self, beacon):
+            pass
+
+        def send_heartbeat(self, stage):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def __next__(self):
+            if self.iteration == max_iterations:
+                events.append("max iterations")
+                raise StopIteration
+            self.iteration += 1
+            events.append(f"run {self.iteration}")
+            if self.iteration == stop_during_iteration:
+                stop["requested"] = True
+
+    class VoteSync:
+        def is_completed(self):
+            return True
+
+        def wait(self):
+            events.append("read")
+
+    def all_reduce(stop_flag, *, op, async_op, **kwargs):
+        assert stop_flag.device.type == "cpu"
+        assert op is worker_module.distributed.ReduceOp.MAX
+        assert async_op is True
+        events.append(("cast", stop_flag.item(), kwargs.get("group", "default")))
+        return VoteSync()
+
+    def new_group(*, backend):
+        new_groups.append(backend)
+        return "side-group"
+
+    session = Session()
+    monkeypatch.setattr(
+        worker_module, "load_session_for_worker", lambda *args, **kwargs: session,
+    )
+    monkeypatch.setattr(worker_module.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(worker_module.distributed, "new_group", new_group)
+    # The worker ignores SIGINT; keep that out of the test process.
+    monkeypatch.setattr(
+        worker_module,
+        "signal",
+        SimpleNamespace(signal=lambda *args: None, SIGINT=None, SIG_IGN=None),
+    )
+
+    worker_module.session_process_worker(
+        None,
+        0,
+        SimpleNamespace(is_set=lambda: stop["requested"]),
+        SimpleNamespace(close=lambda: None),
+        None,
+    )
+    return events, new_groups
+
+
+def test_ddp_stop_vote_is_read_after_the_iteration_it_was_cast_before(
+    monkeypatch,
+):
+    events, _ = _run_single_rank_ddp_worker(
+        monkeypatch, stop_during_iteration=1,
+    )
+
+    assert events == [
+        ("cast", 0, "default"), "read",  # the check before iteration 1
+        ("cast", 0, "default"), "run 1", "read",  # cast before the stop
+        ("cast", 1, "default"), "run 2", "read",  # every rank stops here
+    ]
+
+
+def test_ddp_stop_requested_before_the_first_iteration_runs_none(monkeypatch):
+    events, _ = _run_single_rank_ddp_worker(
+        monkeypatch, stop_before_start=True,
+    )
+
+    assert events == [("cast", 1, "default"), "read"]
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_groups", "expected_group"),
+    [
+        ("nccl", ["gloo"], "side-group"),
+        ("gloo", [], "default"),
+    ],
+)
+def test_ddp_stop_votes_stay_off_the_gpu(
+    monkeypatch, backend, expected_groups, expected_group,
+):
+    events, new_groups = _run_single_rank_ddp_worker(
+        monkeypatch, backend=backend, max_iterations=1,
+    )
+
+    assert new_groups == expected_groups
+    assert events == [
+        ("cast", 0, expected_group), "read",
+        ("cast", 0, expected_group), "run 1", "read",
+        # The vote cast before the session ran out is still read.
+        ("cast", 0, expected_group), "max iterations", "read",
+    ]
+
+
 def test_spawned_worker_reconstructs_paused_state_and_continues_exactly(tmp_path):
     """The child must resume model, optimizer, step, iteration, and RNG state."""
 
