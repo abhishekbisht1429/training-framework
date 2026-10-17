@@ -5,9 +5,13 @@ transform to each image. Every sample is an ``(image, label)`` pair, so the
 data manager's default collate turns a batch into ``[images, labels]`` and
 ``load_batch`` names them with ``fields: [images, labels]``.
 
-Construction reads (and, with ``download: true``, fetches) the files. The
-engine constructs every component in its parent process before any worker
-starts, so a download happens once there rather than once per rank.
+By default construction reads (and, with ``download: true``, fetches) the
+files. The engine constructs every component in its parent process before
+any worker starts, so a download happens there before any rank needs it.
+Every rank then constructs its own copy, so construction is repeated, not
+shared: a dataset that can name its classes without reading every sample
+overrides `_find_labels`, and its samples are then read on first use only --
+once per rank, never in the parent.
 """
 
 from __future__ import annotations
@@ -173,7 +177,9 @@ class TorchvisionDataset(Dataset, Resource):
 
     A subclass sets its config (for the splits), builds the torchvision
     dataset in `_build_source`, and may change the default image size and
-    the train/eval presets. Normalization comes from the config.
+    the train/eval presets. Normalization comes from the config. Overriding
+    `_find_labels` defers `_build_source` to the first sample or length
+    asked for.
     """
 
     config_schema: ClassVar[type[TorchvisionDatasetConfig]] = (
@@ -184,13 +190,30 @@ class TorchvisionDataset(Dataset, Resource):
 
     def __init__(self, config: Mapping | None = None) -> None:
         super().__init__(config)
-        self._source = self._build_source()
+        self._source = None
+        self._labels = self._find_labels()
         self._transform = self._resolve_transform()
 
     @abstractmethod
     def _build_source(self) -> Any:
         """Return the untransformed torchvision dataset for the split."""
         raise NotImplementedError
+
+    def _find_labels(self) -> list[str]:
+        """Return the class names, indexed by label; run by the constructor.
+
+        The default builds the source to read them, so construction reads
+        (or downloads) the files. Override it to name the classes without
+        reading every sample -- a model may size its head from `num_classes`
+        in its own constructor -- and the source is built on first use.
+        """
+        return list(self._get_source().classes)
+
+    def _get_source(self) -> Any:
+        """The torchvision dataset, built on first use."""
+        if self._source is None:
+            self._source = self._build_source()
+        return self._source
 
     @property
     def split(self) -> str:
@@ -213,7 +236,7 @@ class TorchvisionDataset(Dataset, Resource):
     @property
     def labels(self) -> list[str]:
         """The class names, indexed by label."""
-        return list(self._source.classes)
+        return list(self._labels)
 
     @property
     def num_classes(self) -> int:
@@ -260,10 +283,10 @@ class TorchvisionDataset(Dataset, Resource):
         return transform
 
     def __len__(self) -> int:
-        return len(self._source)
+        return len(self._get_source())
 
     def __getitem__(self, index: int) -> tuple[Any, int]:
-        image, label = self._source[index]
+        image, label = self._get_source()[index]
         return self._transform(image), label
 
     def setup(self, session: Session) -> None:

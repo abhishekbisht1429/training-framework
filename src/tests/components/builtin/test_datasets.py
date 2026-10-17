@@ -145,6 +145,30 @@ def test_imagenet_reads_classes_and_images_in_sorted_order(tmp_path):
     assert darker.mean() < lighter.mean()
 
 
+def test_imagenet_names_its_classes_at_construction_and_lists_images_on_first_use(
+        tmp_path,
+):
+    root = _image_folders(tmp_path)
+    dataset = ImageNet({"root": str(root), "split": "train", "transform": "eval"})
+
+    # Written after construction: still counted, so the images were not
+    # listed then -- the launching process never walks the whole tree.
+    _write_image(root / "train" / "n01" / "late.png", shade=0)
+
+    assert dataset.num_classes == 2
+    assert len(dataset) == 5
+
+
+def test_imagenet_refuses_class_folders_changed_after_construction(tmp_path):
+    root = _image_folders(tmp_path)
+    dataset = ImageNet({"root": str(root), "split": "train", "transform": "eval"})
+
+    _write_image(root / "train" / "n00" / "img0.png", shade=0)
+
+    with pytest.raises(RuntimeError, match="class folders .* changed"):
+        len(dataset)
+
+
 def test_the_eval_preset_is_deterministic_and_normalized(tmp_path):
     dataset = ImageNet({
         "root": str(_image_folders(tmp_path)),

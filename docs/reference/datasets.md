@@ -89,7 +89,9 @@ Two splits of one dataset are two instances, e.g. `cifar10#train` and
 
 `imagenet` reads `root/<split>/<class folder>/<image>`, with classes and
 files in sorted order, so a sample index names the same image on every rank
-and machine. `inaturalist` reads `root/<split>` and labels by species.
+and machine. Construction lists only the class folders; the images are
+listed when the dataset is first read, once per rank, so the launching
+process never walks the whole tree. `inaturalist` reads `root/<split>` and labels by species.
 
 Each dataset exposes `labels` (class names, indexed by label),
 `num_classes`, `split`, `image_size`, `mean`, `std` and `transform`.
@@ -99,7 +101,13 @@ Each dataset exposes `labels` (class names, indexed by label),
 Subclass `TorchvisionDataset`, give it a config listing its splits, and
 build the untransformed torchvision dataset in `_build_source`. Override
 `IMAGE_SIZE`, `train_transform` / `eval_transform` (the
-steps before normalization), or `labels` where the defaults don't fit:
+steps before normalization), or `labels` where the defaults don't fit.
+
+`_build_source` runs in the constructor by default, since `labels` (and so
+`num_classes`, which a model may read in its own constructor) come from the
+source. A dataset that can name its classes cheaply -- `imagenet` lists its
+class folders -- overrides `_find_labels` to return them, and its source is
+then built on the first sample or length asked for:
 
 ```python
 from dataclasses import dataclass

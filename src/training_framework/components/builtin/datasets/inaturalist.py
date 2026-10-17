@@ -39,6 +39,5 @@ class INaturalist(TorchvisionDataset):
             download=self._cfg.download,
         )
 
-    @property
-    def labels(self) -> list[str]:
-        return list(self._source.all_categories)
+    def _find_labels(self) -> list[str]:
+        return list(self._get_source().all_categories)
