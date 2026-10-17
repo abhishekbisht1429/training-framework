@@ -7,6 +7,8 @@ and raised together as one `PlanError`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import dataclasses
 import itertools
 import shlex
@@ -293,6 +295,7 @@ def compile_plan(
             "requires_python": str(requires_python) if requires_python else None,
         },
         engine_options=manifest.engine_options,
+        scheduler_settings=_settings_json(profile.scheduler_settings),
         notes=tuple(notes),
     )
     return Compiled(plan, manifest, suggestions)
@@ -419,6 +422,17 @@ def _environment(manifest, profile, requirements, expectation, batch_id, batch_d
         unset_variables=UNSET_VARIABLES, hooks=hooks_setup + resolve_hooks,
     )
     return environment, setup_context
+
+
+def _settings_json(settings) -> dict:
+    """The scheduler settings as plain data for plan.json (what `resume`
+    renders a later attempt with). Settings that are neither a dataclass nor
+    a mapping are not recorded; such batches cannot be resumed."""
+    if dataclasses.is_dataclass(settings) and not isinstance(settings, type):
+        return dataclasses.asdict(settings)
+    if isinstance(settings, Mapping):
+        return dict(settings)
+    return {}
 
 
 def bootstrap_interpreter(env, pin: str | None, batch_dir: str) -> tuple[str, tuple[str, ...]]:

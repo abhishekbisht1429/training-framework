@@ -179,7 +179,9 @@ scancel --signal=USR1 --batch <jobid>_0
 ```
 
 The log shows `received the scheduler advance signal...` and `finished:
-exit 75 (interrupted)`; `status` shows `interrupted`. For the real time
+exit 75 (interrupted)`; `status` shows `interrupted`. Continue it with
+`python -m training_framework.hpc resume <batch-id> --walltime 01:00:00`
+(see [Resuming unfinished tasks](08-hpc-batches.md#10-resuming-unfinished-tasks)). For the real time
 limit: `walltime: "00:05:00"` with `stop_grace: 60`.
 
 **D. A managed environment.** Follow [section 5](#5-managed-environments-building-on-the-cluster):

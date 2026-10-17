@@ -30,6 +30,8 @@ from training_framework.hpc.remote.runtime import interpreter_identity
 
 SUPPORTED_PROTOCOL_VERSIONS = (EXECUTION_PROTOCOL_VERSION,)
 INTERRUPTED_EXIT = 75
+#: What this remote side can do beyond the protocol; `resume` checks for it.
+CAPABILITIES = ("resume",)
 
 
 def interpreter_facts() -> dict:
@@ -65,6 +67,7 @@ def preflight_facts(plan: dict) -> dict:
             components[package] = f"{type(error).__name__}: {error}"
     return {
         "protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
+        "capabilities": list(CAPABILITIES),
         "interpreter": interpreter_facts(),
         "framework": framework_facts(),
         "components": components,
@@ -125,8 +128,20 @@ def _variant_text(config_path: str) -> str:
     )
 
 
+def _previous_attempts(record_path: str) -> list[dict]:
+    """The records of earlier attempts: the current record, and its history."""
+    try:
+        with open(record_path) as handle:
+            previous = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    history = previous.pop("previous_attempts", [])
+    previous.setdefault("attempt", 1)
+    return [*history, previous]
+
+
 def run_task(config_path: str, record_path: str, plan_path: str,
-             engine_options: list[str]) -> int:
+             engine_options: list[str], resume: str | None = None, attempt: int = 1) -> int:
     interrupted = False
 
     def on_sigint(signum, frame):
@@ -149,12 +164,19 @@ def run_task(config_path: str, record_path: str, plan_path: str,
     log(f"batch {plan['batch_id']} | commit {plan['sha'][:12]} | host {socket.gethostname()} | "
         f"GPUs {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
     log(f"config {config_path}")
+    if resume:
+        log(f"attempt {attempt}: resuming from {resume}")
     started = datetime.now(timezone.utc).isoformat()
     status, error = 0, None
     try:
         from training_framework.engine import Configurator, TrainingEngine
 
-        sys.argv = [sys.argv[0], "--config", config_path, *engine_options]
+        if resume:
+            # The checkpoint holds the session (config, iteration, RNG, data
+            # position); only the launch topology comes from this run.
+            sys.argv = [sys.argv[0], "--resume-session", resume, *engine_options]
+        else:
+            sys.argv = [sys.argv[0], "--config", config_path, *engine_options]
         with TrainingEngine(Configurator()) as engine:
             engine.start_session()
     except KeyboardInterrupt:
@@ -173,7 +195,11 @@ def run_task(config_path: str, record_path: str, plan_path: str,
         "error": error,
         "started": started,
         "finished": datetime.now(timezone.utc).isoformat(),
+        "attempt": attempt,
     }
+    if resume:
+        record["resumed_from"] = resume
+        record["previous_attempts"] = _previous_attempts(record_path)
     _write_atomic(record_path, record)
     outcome = "interrupted" if interrupted else ("ok" if status == 0 else "failed")
     log(f"finished: exit {record['exit_status']} ({outcome}) | record {record_path}")
@@ -187,6 +213,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config")
     parser.add_argument("--record")
     parser.add_argument("--plan")
+    parser.add_argument("--resume", metavar="CHECKPOINT",
+                        help="continue the task from this checkpoint (a later attempt)")
+    parser.add_argument("--attempt", type=int, default=1)
     args, engine_options = parser.parse_known_args(argv)
     if args.preflight:
         with open(args.preflight) as handle:
@@ -201,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_prepare(args.plan, args.prepare)
     if not (args.config and args.record and args.plan):
         parser.error("a task needs --config, --record, and --plan")
-    return run_task(args.config, args.record, args.plan, engine_options)
+    return run_task(args.config, args.record, args.plan, engine_options,
+                    resume=args.resume, attempt=args.attempt)
 
 
 if __name__ == "__main__":

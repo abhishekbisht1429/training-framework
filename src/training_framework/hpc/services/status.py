@@ -129,6 +129,48 @@ def expand_ranges(live: dict) -> dict:
     return expanded
 
 
+def _is_group(node_id: str, node: dict) -> bool:
+    """An original group node (attempts of a group carry `attempt`)."""
+    return node_id.startswith("group-") and not node.get("attempt")
+
+
+#: Attempt node states in which its job reached (or may have reached) the
+#: scheduler. A failed submission's other nodes (pending, refused, cancelled
+#: before running) never ran, so the tasks keep their earlier state.
+_EFFECTIVE_ATTEMPT_STATES = ("submitted", "unknown", "cancel failed")
+
+
+def latest_attempts(receipt: dict) -> dict[tuple[str, int], tuple[int, dict]]:
+    """(group, array index) -> (attempt, node) of the latest later attempt
+    (from `resume`) that included the task and reached the scheduler."""
+    latest: dict[tuple[str, int], tuple[int, dict]] = {}
+    for node in receipt["nodes"].values():
+        attempt = node.get("attempt")
+        if not attempt or node.get("status") not in _EFFECTIVE_ATTEMPT_STATES:
+            continue
+        for index in node.get("tasks", []):
+            key = (node["group"], int(index))
+            if key not in latest or latest[key][0] < attempt:
+                latest[key] = (attempt, node)
+    return latest
+
+
+def _attempt_row(task, values, group, index, attempt, node, record, live) -> Row:
+    suffix = f" (attempt {attempt})"
+    element = f"{node.get('job_ref')}_{index}"
+    if record and record.get("attempt", 1) >= attempt:
+        state, detail = _record_state(record)
+        return Row(task, values, state, detail + suffix if detail else suffix.strip(" ()"))
+    if element in live:
+        return Row(task, values, live[element], f"job {element}{suffix}", True)
+    if node.get("job_ref") in live:
+        return Row(task, values, live[node["job_ref"]], f"job {node['job_ref']}{suffix}", True)
+    if node["status"] == "submitted":
+        return Row(task, values, "ended without a record",
+                   f"see logs/{group}/{node['job_ref']}_{index}.out{suffix}")
+    return Row(task, values, node["status"], suffix.strip(" ()"))
+
+
 def task_rows(receipt: dict, files: BatchFiles | None, live: dict) -> list[Row]:
     """One row per step (setup, prepare) and task of a batch. `files` is what
     `fetch_batches` found for it (None: nothing on the cluster); `live` maps
@@ -137,6 +179,7 @@ def task_rows(receipt: dict, files: BatchFiles | None, live: dict) -> list[Row]:
     live = expand_ranges(live)
     nodes = receipt["nodes"]
     rows = []
+    attempts = latest_attempts(receipt)
     for node_id, node in nodes.items():
         if node_id.startswith("group-"):
             continue
@@ -150,7 +193,7 @@ def task_rows(receipt: dict, files: BatchFiles | None, live: dict) -> list[Row]:
             state, detail = node["status"], ""
         rows.append(Row(node_id, "", state, detail))
     for node_id, node in nodes.items():
-        if not node_id.startswith("group-"):
+        if not _is_group(node_id, node):
             continue
         group = node_id[len("group-"):]
         table = files.tables.get(group)
@@ -161,6 +204,11 @@ def task_rows(receipt: dict, files: BatchFiles | None, live: dict) -> list[Row]:
             index, task, variant, config, _hash = line.split("\t")
             values = _variant_text(json.loads(variant))
             record = files.records.get(f"{config.rsplit('/', 1)[0]}/record.json")
+            if (group, int(index)) in attempts:
+                attempt, attempt_node = attempts[(group, int(index))]
+                rows.append(_attempt_row(task, values, group, index, attempt, attempt_node,
+                                         record, live))
+                continue
             element = f"{node.get('job_ref')}_{index}"
             if record:
                 state, detail = _record_state(record)
@@ -191,6 +239,22 @@ def receipt_problem(receipt) -> str | None:
     if not all(isinstance(node, dict) and isinstance(node.get("status"), str)
                for node in receipt["nodes"].values()):
         return "malformed: nodes"
+    def _int(value) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    for node in receipt["nodes"].values():
+        if "attempt" not in node:
+            continue
+        if not (_int(node["attempt"]) and node["attempt"] >= 2
+                and isinstance(node.get("group"), str)
+                and isinstance(node.get("tasks"), list) and all(_int(i) for i in node["tasks"])):
+            return "malformed: attempt nodes"
+    attempts = receipt.get("attempts", [])
+    if not isinstance(attempts, list) or not all(
+            isinstance(entry, dict) and _int(entry.get("attempt"))
+            and isinstance(entry.get("status"), str) and isinstance(entry.get("tasks", {}), dict)
+            for entry in attempts):
+        return "malformed: attempts"
     return None
 
 
@@ -201,7 +265,8 @@ def missing_files(receipt: dict, files: BatchFiles | None) -> str | None:
         return None
     if files is None:
         return f"batch directory {receipt['batch_dir']} not found (deleted, purged, or another cluster)"
-    groups = [node_id[len("group-"):] for node_id in receipt["nodes"] if node_id.startswith("group-")]
+    groups = [node_id[len("group-"):] for node_id, node in receipt["nodes"].items()
+              if _is_group(node_id, node)]
     absent = [group for group in groups if group not in files.tables]
     if absent:
         return f"task table missing for group(s) {', '.join(absent)} in {receipt['batch_dir']}"

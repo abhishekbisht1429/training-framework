@@ -123,7 +123,11 @@ class SlurmDialect:
         return int(math.ceil(process_timeout_on_join)) + stop_grace
 
     def render(self, node: JobNode, batch_id: str, batch_dir: str,
-               command: list[str], signal_lead: int | None) -> str:
+               command: list[str], signal_lead: int | None, *,
+               array_indices: list[int] | None = None, resume_table: str | None = None) -> str:
+        """`array_indices`: run only these elements of the group's task set
+        (a later attempt); `resume_table`: a table mapping each index to the
+        checkpoint it resumes from, read into `{checkpoint}`."""
         # Deterministic, so a job whose reference was lost can be found by
         # name (submission receipt, B11).
         directives = [f"--job-name={batch_id}.{node.id}", "--nodes=1", "--ntasks=1"]
@@ -145,7 +149,9 @@ class SlurmDialect:
             directives += [f"--{key}={value}" for key, value in sorted(options.items())]
         if node.kind == "task_set":
             throttle = f"%{node.max_parallel}" if node.max_parallel else ""
-            directives.append(f"--array=0-{node.task_count - 1}{throttle}")
+            elements = (",".join(str(index) for index in sorted(array_indices))
+                        if array_indices else f"0-{node.task_count - 1}")
+            directives.append(f"--array={elements}{throttle}")
             directives.append(f"--output={log_dir}/%A_%a.out")
         else:
             directives.append(f"--output={log_dir}/%j.out")
@@ -162,21 +168,30 @@ class SlurmDialect:
         lines += render_context(node.context)
         command = launched(node.context, command)
         if node.kind == "task_set":
-            lines += _task_body(batch_dir, node.group, command)
+            lines += _task_body(batch_dir, node.group, command, resume_table)
         else:
             lines.append("exec " + shlex.join(command))
         return "\n".join(lines) + "\n"
 
 
-def _task_body(batch_dir: str, group: str, command: list[str]) -> list[str]:
+def _task_body(batch_dir: str, group: str, command: list[str],
+               resume_table: str | None = None) -> list[str]:
     table = shlex.quote(f"{batch_dir}/groups/{group}/tasks.tsv")
     run = shlex.join(command)
-    for name in ("config", "record"):
+    for name in ("config", "record", "checkpoint"):
         run = run.replace(f"'{{{name}}}'", f'"${name}"').replace(f"{{{name}}}", f'"${name}"')
+    lookup = []
+    if resume_table:
+        lookup = [
+            f"checkpoint=$(awk -F'\\t' -v i=\"$SLURM_ARRAY_TASK_ID\" "
+            f"'NR > 1 && $1 == i {{print $3}}' {shlex.quote(resume_table)})",
+            '[ -n "$checkpoint" ] || { echo "no checkpoint for array index $SLURM_ARRAY_TASK_ID" >&2; exit 2; }',
+        ]
     return [
         f"config={shlex.quote(batch_dir)}/$(awk -F'\\t' -v i=\"$SLURM_ARRAY_TASK_ID\" "
         f"'NR > 1 && $1 == i {{print $4}}' {table})",
         'record="$(dirname "$config")/record.json"',
+        *lookup,
         "interrupted=0",
         "child=''",
         'log() { echo "[hpc $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }',

@@ -148,6 +148,29 @@ def _parser() -> argparse.ArgumentParser:
     listing.add_argument("--receipts", type=Path, help="receipt directory "
                          "(default: $XDG_STATE_HOME/training-framework/submissions)")
     profile_options(listing)
+    resume = commands.add_parser(
+        "resume", help="continue a batch's unfinished tasks from their checkpoints",
+        description="Resubmit a batch's interrupted tasks (and those that ended without a "
+                    "record) from their latest checkpoints, as a new attempt in the same batch "
+                    "directory, with the same environment and task wrapper.")
+    resume.add_argument("batch_id", help="a batch id, or the path to its receipt")
+    resume.add_argument("--task", action="append", metavar="NAME",
+                        help="resume this task (repeatable); default: every interrupted task "
+                             "and every task that ended without a record")
+    resume.add_argument("--include-failed", action="store_true",
+                        help="also resume failed tasks (fix the cause first)")
+    resume.add_argument("--checkpoint", action="append", default=[], metavar="NAME=PATH",
+                        help="resume task NAME from this checkpoint instead of its latest")
+    resume.add_argument("--walltime", help="walltime of the resumed tasks ([D-]HH:MM:SS)")
+    resume.add_argument("--cpus", type=int, help="CPUs per resumed task")
+    resume.add_argument("--memory", help="memory per resumed task (e.g. 64G)")
+    resume.add_argument("--max-parallel", type=int, help="most resumed tasks running at once")
+    resume.add_argument("--yes", action="store_true", help="do not ask")
+    resume.add_argument("--dry-run", action="store_true",
+                        help="show what would be resumed and the job scripts; submit nothing")
+    resume.add_argument("--receipts", type=Path, help="receipt directory "
+                        "(default: $XDG_STATE_HOME/training-framework/submissions)")
+    profile_options(resume)
     probe = commands.add_parser("probe-python",
                                 help="print the site interpreter's identity for the profile")
     profile_options(probe)
@@ -295,17 +318,9 @@ def _submit(args, profile) -> int:
     return 0 if receipt.status == "submitted" else 1
 
 
-def _status(args) -> int:
-    from training_framework.hpc.ports.ssh import SshExecutor
-    from training_framework.hpc.scheduler import get_scheduler
+def _load_receipt(args) -> tuple[Path, dict]:
     from training_framework.hpc.services.receipt import default_receipts_dir
-    from training_framework.hpc.services.status import (
-        fetch_batches,
-        format_rows,
-        missing_files,
-        receipt_problem,
-        task_rows,
-    )
+    from training_framework.hpc.services.status import receipt_problem
 
     path = Path(args.batch_id)
     if not path.is_file():
@@ -318,10 +333,15 @@ def _status(args) -> int:
         raise HpcError(f"{path} is not valid JSON: {error}") from None
     if problem := receipt_problem(receipt):
         raise HpcError(f"{path} is not a valid receipt ({problem})")
-    # The batch went where its receipt says; a profile is needed only for
-    # receipts written before receipts recorded it, and an explicitly named
-    # profile must agree with the receipt.
+    return path, receipt
+
+
+def _receipt_cluster(args, receipt: dict):
+    """(ssh host, scheduler, profile or None) for a receipt: the cluster it
+    went to. A profile is read only for older receipts that do not record
+    it, or when named; a named profile must point at the receipt's cluster."""
     host, scheduler = receipt.get("ssh_host"), receipt.get("scheduler") or "slurm"
+    profile = None
     if host is None or args.profile or args.profiles:
         profile = _profile(args)
         if host is None:
@@ -331,6 +351,22 @@ def _status(args) -> int:
                 f"{receipt['batch_id']} was submitted to {host} ({scheduler}), but profile "
                 f"'{profile.name}' is {profile.ssh_host} ({profile.scheduler}); drop --profile "
                 "to use the receipt's cluster")
+    return host, scheduler, profile
+
+
+def _status(args) -> int:
+    from training_framework.hpc.ports.ssh import SshExecutor
+    from training_framework.hpc.scheduler import get_scheduler
+    from training_framework.hpc.services.status import (
+        fetch_batches,
+        format_rows,
+        missing_files,
+        task_rows,
+    )
+
+    _, receipt = _load_receipt(args)
+    # The batch went where its receipt says (see _receipt_cluster).
+    host, scheduler, _ = _receipt_cluster(args, receipt)
     _require_tools("ssh")
     executor = SshExecutor(host)
     bundle = get_scheduler(scheduler)
@@ -399,6 +435,107 @@ def _batches(args) -> int:
     return 0
 
 
+def _resume(args) -> int:
+    from training_framework.hpc.ports.ssh import SshExecutor, SshFilesystem
+    from training_framework.hpc.scheduler import get_scheduler
+    from training_framework.hpc.services import resume as resuming
+    from training_framework.hpc.services.receipt import Receipt
+    from training_framework.hpc.services.status import (
+        fetch_batches,
+        missing_files,
+        task_rows,
+    )
+
+    path, data = _load_receipt(args)
+    if not data.get("staged") or data.get("status") != "submitted":
+        raise HpcError(f"{data['batch_id']} was not submitted ({data.get('status')}); "
+                       "only a submitted batch can be resumed")
+    for attempt in data.get("attempts", []):
+        if attempt.get("status") == "needs reconciliation":
+            raise HpcError(f"attempt {attempt['attempt']} needs reconciliation: "
+                           f"{attempt.get('error')}; resolve it before resuming again")
+    # The receipt names the cluster; the plan holds the scheduler settings the
+    # batch was rendered with, so the current profile does not matter.
+    host, scheduler, _ = _receipt_cluster(args, data)
+    changes = resuming.ResourceChanges(args.walltime, args.cpus, args.memory, args.max_parallel)
+    changes.check()
+    _require_tools("ssh")
+    executor = SshExecutor(host)
+    filesystem = SshFilesystem(executor)
+    bundle = get_scheduler(scheduler)
+    batch_dir = data["batch_dir"]
+
+    live = bundle.user_job_states(executor) if bundle.user_job_states else {}
+    if running := resuming.active_jobs(data, live):
+        raise HpcError(f"{data['batch_id']} still has jobs in the queue ({', '.join(running[:5])}"
+                       f"{' ...' if len(running) > 5 else ''}); resume after they end, or cancel them")
+    files = fetch_batches(executor, [batch_dir]).get(batch_dir)
+    if problem := missing_files(data, files):
+        raise HpcError(f"{problem} on {host}")
+    rows = task_rows(data, files, live)
+    candidates = resuming.select_tasks(data, rows, resuming.task_index(files.tables),
+                                       args.task, args.include_failed)
+    if not candidates:
+        raise HpcError(f"{data['batch_id']} has no interrupted tasks and none that ended without "
+                       "a record; name tasks with --task (or --include-failed)")
+    explicit = resuming.explicit_checkpoints(filesystem, batch_dir, args.checkpoint)
+    if unknown := sorted(set(explicit) - {c.task for c in candidates}):
+        raise HpcError(f"--checkpoint names {', '.join(unknown)}, which this command does not "
+                       "resume; name it with --task too, or fix the task name")
+    checkpoints, configs = resuming.find_checkpoints(executor, batch_dir,
+                                                     [c.task for c in candidates])
+    resuming.choose_checkpoints(candidates, checkpoints, configs, explicit)
+    chosen = [c for c in candidates if c.reason is None]
+    skipped = [c for c in candidates if c.reason is not None]
+    for candidate in skipped:
+        print(f"skip {candidate.task} ({candidate.state}): {candidate.reason}")
+    if not chosen:
+        raise HpcError("nothing can be resumed (see above)")
+    plan = resuming.read_plan(filesystem, batch_dir)
+    dialect = resuming.plan_dialect(plan)
+    attempt = resuming.build_attempt(plan, data, chosen, dialect, changes)
+    attempt.skipped = skipped
+    _progress("checking the batch's source, environment, and task entry point on the cluster")
+    resuming.check_cluster(plan, filesystem, executor)
+
+    print(f"resume {data['batch_id']} as attempt {attempt.attempt}: {len(chosen)} task(s)")
+    for candidate in chosen:
+        total = "?" if candidate.max_iterations is None else candidate.max_iterations
+        relative = candidate.checkpoint.removeprefix(batch_dir + "/")
+        print(f"  {candidate.task:<30} {candidate.state:<24} from iteration "
+              f"{candidate.iteration}/{total}  {relative}")
+    for group in attempt.groups:
+        r = group.node.resources
+        print(f"  group {group.group}: walltime {r.walltime}, {r.gpus} GPU(s), {r.cpus} CPU(s), "
+              f"{r.memory}" + (f", at most {group.node.max_parallel} at once"
+                               if group.node.max_parallel else ""))
+    if args.dry_run:
+        for group in attempt.groups:
+            print(f"\n# {group.script_path}\n{group.script}# {group.table_path}\n{group.table}")
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("error: not interactive; pass --yes to resume", file=sys.stderr)
+            return 1
+        if input("Resume? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("not resumed")
+            return 1
+    receipt = Receipt(str(path), data)
+    receipt.mirror_to(filesystem, f"{batch_dir}/receipt.json")
+    try:
+        entry = resuming.submit_attempt(receipt, attempt, filesystem, bundle.submitter(executor),
+                                        submitted_from=socket.gethostname(), progress=_progress)
+    except KeyboardInterrupt:
+        print(f"\ninterrupted; receipt: {path}", file=sys.stderr)
+        return 130
+    except HpcError:
+        print(f"receipt: {path}")
+        raise
+    print(f"resumed: attempt {entry['attempt']} of {data['batch_id']}")
+    print(f"receipt: {path}")
+    return 0
+
+
 def _probe_python(profile) -> int:
     from training_framework.hpc.compile.compiler import (
         SET_VARIABLES,
@@ -428,6 +565,8 @@ def main(argv: list[str] | None = None) -> int:
             return _batches(args)
         if args.command == "status":
             return _status(args)
+        if args.command == "resume":
+            return _resume(args)
         profile = _profile(args)
         if args.command == "probe-python":
             _require_tools("ssh")

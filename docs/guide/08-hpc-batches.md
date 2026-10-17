@@ -13,6 +13,7 @@ python -m training_framework.hpc render   experiments/sweep.yaml --output /tmp/p
 python -m training_framework.hpc submit   experiments/sweep.yaml
 python -m training_framework.hpc batches  --live        # all your batches and what they are doing
 python -m training_framework.hpc status   <batch-id>    # one batch, task by task
+python -m training_framework.hpc resume   <batch-id>    # continue unfinished tasks from their checkpoints
 ```
 
 Every key of the profile and the manifest is described in the
@@ -468,10 +469,76 @@ wrapper turns it into a cooperative stop of the engine; the task records
 Slurm's own SIGTERM at the limit stops everything without that grace, so
 leave enough `stop_grace` for one iteration.
 
+## 10. Resuming unfinished tasks
+
+A task stopped by its time limit (`interrupted`) or killed (`ended without a
+record`, e.g. out of memory or time) can continue from its latest
+checkpoint:
+
+```bash
+python -m training_framework.hpc resume <batch-id> --walltime 2-00:00:00
+```
+
+```
+resume vit-probes-20261014T220100Z-9a8b7c6d5e as attempt 2: 3 task(s)
+  probes/frozen/001   interrupted             from iteration 35640/89124  tasks/probes/frozen/001/sessions/.../checkpoints/...
+  ...
+  group probes: walltime 2-00:00:00, 1 GPU(s), 8 CPU(s), 64G
+Resume? [y/N]
+```
+
+What it does:
+
+1. Picks the batch's tasks that are `interrupted` or `ended without a
+   record`. Failed tasks are left out (resuming repeats their error); add
+   `--include-failed` after fixing the cause, or name tasks with `--task
+   <name>` (repeatable). A finished task is never resumed.
+2. Finds each task's newest **complete** checkpoint (one with its
+   `manifest.json`; a checkpoint still being written is skipped) under the
+   task's sessions directory, by iteration. Tasks that cannot resume are
+   listed with the reason: no `checkpointer` in the config, no checkpoint
+   written yet, a checkpoint already at `max_iterations`, or an explicit
+   `checkpointer.checkpoints_dir` (not searched; pass `--checkpoint
+   <task>=<path>`).
+3. Checks the cluster can still run them: the batch's source checkout and
+   environment are there, and its framework supports resuming (batches
+   whose environment predates `resume` are refused: submit a new batch).
+   It refuses while any job of the batch is still queued or running.
+4. Submits one job array per group with exactly those tasks, as **attempt
+   2** (then 3, ...), in the same batch directory, with the same environment,
+   task wrapper (early-stop signal, logs), and Slurm settings: account, QoS,
+   partitions, and defaults come from the batch's own plan, so editing or
+   switching profiles afterwards does not change them, and no profile is
+   needed to resume. A submission that fails part-way cancels only that
+   attempt's jobs, and its tasks stay resumable. Each task runs
+   the engine with `--resume-session <checkpoint>`: weights, optimizer,
+   learning-rate schedule, RNG, and data position continue exactly, in the
+   same session directory.
+
+Only the attempt's resources may change: `--walltime`, `--cpus`,
+`--memory`, `--max-parallel`. The training config and the number of GPUs
+stay as they were (a resumed session continues unchanged). `--dry-run`
+shows the summary and the job scripts without submitting; `--yes` skips the
+question (required when not interactive).
+
+Afterwards `status` and `batches --tasks` follow each task's latest attempt
+(`running  job 150_0 (attempt 2)`, then `done ... (attempt 2)`), and
+`batches` shows `submitted (attempt 2)`. The task's `record.json` describes
+the latest attempt (`attempt`, `resumed_from`) and keeps the earlier ones
+under `previous_attempts`; the receipt lists every attempt (`attempts`),
+with its jobs, tasks, checkpoints, and resources, under the same
+transactional rules as `submit`.
+
+To lose less work when a task is stopped, checkpoint often enough
+(`checkpointer.checkpoint_every`): the stop keeps the latest periodic
+checkpoint.
+
 ## Limitations
 
-Single-node tasks only; Slurm only; no cancel, retry, or result download
-commands yet (use `scancel`, `rsync`); components that
+Single-node tasks only; Slurm only; no cancel or result download commands
+yet (use `scancel`, `rsync`); resuming cannot change the config or the
+number of GPUs, and batches submitted before `resume` existed cannot be
+resumed; components that
 bind fixed ports (other than `tensorboard` with `serve: false`) fail when
 tasks share a node; explicitly configured component output directories are
 not redirected per task.

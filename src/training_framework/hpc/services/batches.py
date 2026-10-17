@@ -194,6 +194,11 @@ def _local_time(view: BatchView) -> str:
 def _submit_text(receipt: dict) -> str:
     status = receipt.get("status", "?")
     error = (receipt.get("error") or "").strip().splitlines()
+    attempts = receipt.get("attempts") or []
+    if attempts:
+        last = attempts[-1]
+        outcome = "" if last.get("status") == "submitted" else f" {last.get('status')}"
+        return f"{status} (attempt {last.get('attempt')}{outcome})"
     if status == "submitted" or not error:
         return status
     reason = error[0].removeprefix("not submitted: ")
@@ -252,6 +257,7 @@ def as_json(views: list[BatchView], *, tasks: bool) -> list[dict]:
             "submitted_from": receipt.get("submitted_from"),
             "now": view.now,
             "problem": view.problem,
+            "attempts": receipt.get("attempts") or [],
         }
         if tasks:
             entry["tasks"] = [row.__dict__ for row in view.rows or []]

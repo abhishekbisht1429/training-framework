@@ -98,6 +98,16 @@ class JobNode:
     script: str = ""
 
 
+def _resources_json(resources) -> dict | None:
+    if resources is None:
+        return None
+    return {
+        "walltime": resources.walltime, "walltime_seconds": resources.walltime_seconds,
+        "gpus": resources.gpus, "cpus": resources.cpus, "memory": resources.memory,
+        "scheduler_options": resources.scheduler_options,
+    }
+
+
 @dataclass(frozen=True)
 class ExecutionPlan:
     protocol_version: int
@@ -115,6 +125,9 @@ class ExecutionPlan:
     preflight: dict
     engine_options: tuple[str, ...]
     notes: tuple[str, ...]
+    #: The profile's scheduler settings the scripts were rendered with (e.g.
+    #: Slurm account, QoS, partitions), so a later attempt renders the same.
+    scheduler_settings: dict = field(default_factory=dict)
 
     def node(self, node_id: str) -> JobNode:
         for node in self.nodes:
@@ -136,6 +149,7 @@ class ExecutionPlan:
             "preflight": self.preflight,
             "engine_options": list(self.engine_options),
             "notes": list(self.notes),
+            "scheduler_settings": self.scheduler_settings,
             "artifacts": [artifact.as_json() for artifact in self.artifacts],
             "nodes": [
                 {
@@ -145,6 +159,9 @@ class ExecutionPlan:
                     "group": node.group, "task_count": node.task_count,
                     "max_parallel": node.max_parallel,
                     "artifact": node.artifact,
+                    # What `resume` needs to render a later attempt of a group.
+                    "resources": _resources_json(node.resources),
+                    "stop_grace_seconds": node.stop_grace_seconds,
                 }
                 for node in self.nodes
             ],

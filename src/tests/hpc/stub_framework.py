@@ -40,6 +40,7 @@ if __name__ == "__main__":
             components[package] = repr(error)
     print(json.dumps({
         "protocol_versions": json.loads(os.environ.get("STUB_PROTOCOLS", "[1]")),
+        "capabilities": json.loads(os.environ.get("STUB_CAPABILITIES", "[]")),
         "interpreter": interpreter(),
         "framework": {"file": os.path.realpath(training_framework.__file__),
                       "distribution": distribution},
