@@ -153,6 +153,15 @@ def _human(size: int) -> str:
     return f"{value:.1f} TiB"
 
 
+#: `-a` without owner and group: copies belong to the user on the receiving
+#: side. Preserving them made a root receiver chown every file to the
+#: sender's numeric IDs (cluster account IDs mean nothing on a workstation,
+#: and some filesystems or containers reject them: "chown ... Invalid
+#: argument"); timestamps and permissions are still kept, which is what lets
+#: a later run skip files already copied.
+RSYNC_ARCHIVE = ("-a", "--no-owner", "--no-group")
+
+
 class RsyncTransfer:
     """Resumable one-way sync over SSH (`--partial`).
 
@@ -178,7 +187,7 @@ class RsyncTransfer:
         target = remote.rstrip("/") + "/" if is_dir else remote
         parent = remote.rstrip("/") if is_dir else posixpath.dirname(remote)
         command = [
-            self.rsync, "-a", "--partial", "--protect-args", "--stats",
+            self.rsync, *RSYNC_ARCHIVE, "--partial", "--protect-args", "--stats",
             "-e", shlex.join([*self.ssh, *SSH_OPTIONS]),
             "--rsync-path", f"mkdir -p {shlex.quote(parent)} && rsync",
             source, f"{self.host}:{target}",
@@ -205,7 +214,7 @@ class RsyncTransfer:
             listing.write("".join(f"{path}\n" for path in paths))
         try:
             command = [
-                self.rsync, "-a", "--partial", "--protect-args", "--stats",
+                self.rsync, *RSYNC_ARCHIVE, "--partial", "--protect-args", "--stats",
                 f"--files-from={listing.name}",
                 "-e", shlex.join([*self.ssh, *SSH_OPTIONS]),
                 f"{self.host}:{remote_root.rstrip('/')}/", local_root.rstrip("/") + "/",
