@@ -327,6 +327,12 @@ the environment meanwhile`.
 
 ## 6. When something goes wrong
 
+- `error: cannot reach bigred200 over SSH: ...`: SSH could not log in; the
+  end of the line is SSH's reason (`Permission denied (publickey)`, `bad
+  permissions` on the key file, `Connection timed out`). Check that `ssh
+  bigred200 true` works in a terminal without a prompt, re-open the Duo
+  control connection if it expired (`ssh bigred200 true`), and keep the key
+  private (`chmod 600 ~/.ssh/id_*`).
 - `submit` prints the batch directory and the receipt path on failure; the
   receipt is `~/.local/state/training-framework/submissions/<batch>.json`.
 - `sbatch` refusing with `Invalid account or account/partition combination

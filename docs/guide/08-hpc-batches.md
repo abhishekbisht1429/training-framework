@@ -337,6 +337,15 @@ listed batch's task records. The `now` column summarizes the tasks:
   --name` query in the receipt (`status` prints it) before resubmitting;
 - `not submitted`, `submit failed`: nothing ran.
 
+If the cluster cannot be reached over SSH (a missing or unreadable key,
+an empty agent, no open control connection for two-factor login), every
+command that connects says so with SSH's own reason and what to check, e.g.
+`error: cannot reach bigred200 over SSH: me@h: Permission denied
+(publickey).`, and exits non-zero. `batches --live` checks the connection
+even when this machine has no receipts; a plain `batches` never connects,
+and an empty list notes that it shows only batches submitted from this
+machine.
+
 When a batch's state cannot be known, `now` says why instead of guessing:
 `? (cannot read <host>: ...)` for a cluster that cannot be reached, `?
 (batch directory ... not found ...)` when the batch directory or a task

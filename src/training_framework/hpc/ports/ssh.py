@@ -27,7 +27,25 @@ SSH_OPTIONS = ("-o", "BatchMode=yes", "-T")
 
 class TransportError(HpcError):
     """The SSH connection itself failed (exit 255); the remote command may or
-    may not have run."""
+    may not have run. `reason` is what SSH said, without its noise."""
+
+    def __init__(self, host: str, reason: str):
+        self.host, self.reason = host, reason
+        super().__init__(f"cannot reach {host} over SSH: {reason}")
+
+
+#: What to check when SSH cannot log in (shown once by the CLI).
+SSH_HINT = ("check that `ssh {host} true` works here without a prompt: the key file "
+            "and its permissions (chmod 600), the SSH agent (ssh-add -l), the host entry "
+            "in ~/.ssh/config, and, if the site uses two-factor login, an open control "
+            "connection")
+
+
+def ssh_reason(stderr: str) -> str:
+    """SSH's error output without host-key notices, on one line."""
+    lines = [line.strip() for line in stderr.splitlines()
+             if line.strip() and not line.startswith("Warning: Permanently added")]
+    return "; ".join(lines) or "ssh exited 255 without a message"
 
 
 class SshExecutor:
@@ -44,7 +62,7 @@ class SshExecutor:
                                 timeout=timeout, check=False)
         stderr = result.stderr.decode(errors="replace")
         if result.returncode == 255:
-            raise TransportError(f"ssh {self.host} failed: {stderr.strip()}")
+            raise TransportError(self.host, ssh_reason(stderr))
         return result.returncode, result.stdout, stderr
 
     def run(self, argv: list[str], context: ExecutionContext | None = None,

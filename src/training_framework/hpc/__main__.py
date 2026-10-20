@@ -18,6 +18,7 @@ from training_framework.hpc.compile.content import HashCache, content_summary, d
 from training_framework.hpc.config.schema import parse_profiles
 from training_framework.hpc.errors import HpcError
 from training_framework.hpc.ports.repository import GitRepository
+from training_framework.hpc.ports.ssh import SSH_HINT, TransportError
 
 
 def default_profiles_path() -> Path:
@@ -424,7 +425,8 @@ def _batches(args) -> int:
     profile = _profile(args) if args.remote or explicit else None
     if live or args.remote:
         _require_tools("ssh")
-    views = listing.load_receipts(str(args.receipts or default_receipts_dir()))
+    receipts_dir = str(args.receipts or default_receipts_dir())
+    views = listing.load_receipts(receipts_dir)
 
     def connect(ssh_host: str, scheduler: str):
         executor = SshExecutor(ssh_host)
@@ -451,11 +453,30 @@ def _batches(args) -> int:
         listing.add_live_state(views, connect, fallback)
         if args.active:
             views = listing.select(views, active=True, limit=args.limit)
+    if live and not views:
+        # Nothing to look up, but a live listing should still say whether the
+        # cluster can be reached (e.g. after a submit failed before its receipt).
+        try:
+            selected = profile or _profile(args)
+        except HpcError:
+            selected = None
+        if selected is not None:
+            SshExecutor(selected.ssh_host).run(["true"])        # raises TransportError
     if args.json:
         print(json.dumps(listing.as_json(views, tasks=args.tasks), indent=2))
     else:
         print(listing.format_views(views, live=live, tasks=args.tasks, origins=args.remote))
-    return 0
+        if not views:
+            print(f"note: no batches were submitted from this machine (receipts in "
+                  f"{receipts_dir}){'' if args.remote else '; `batches --remote` also lists the batches on the cluster'}",
+                  file=sys.stderr)
+    unreachable = sorted({view.unreachable for view in views if view.unreachable})
+    for host in unreachable:
+        problem = next(view.problem for view in views if view.unreachable == host)
+        reason = problem.removeprefix(f"cannot read {host}: ")
+        print(f"error: cannot reach {host} over SSH: {reason}", file=sys.stderr)
+        print(f"hint: {SSH_HINT.format(host=host)}", file=sys.stderr)
+    return 1 if unreachable else 0
 
 
 def _resume(args) -> int:
@@ -672,6 +693,8 @@ def main(argv: list[str] | None = None) -> int:
         compiled, _ = _compile(args, profile)
     except HpcError as error:  # includes PlanError, with every problem
         print(f"error: {error}", file=sys.stderr)
+        if isinstance(error, TransportError):
+            print(f"hint: {SSH_HINT.format(host=error.host)}", file=sys.stderr)
         return 2
     plan = compiled.plan
     for note in plan.notes:

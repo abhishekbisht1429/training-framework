@@ -39,6 +39,7 @@ class BatchView:
     now: str | None = None           # live summary (`summarize`)
     rows: list[Row] | None = None    # live per-task rows (`task_rows`)
     problem: str | None = None       # why live state is missing
+    unreachable: str | None = None   # the host SSH could not reach, if that is why
 
     @property
     def batch_id(self) -> str:
@@ -161,8 +162,13 @@ def add_live_state(views: list[BatchView], connect, fallback=None) -> None:
             live = job_states() if job_states else {}
             files = fetch_batches(executor, [view.receipt["batch_dir"] for view in members])
         except Exception as error:  # reported on each affected batch
+            from training_framework.hpc.ports.ssh import TransportError
+
+            reason = (error.reason if isinstance(error, TransportError)
+                      else f"{type(error).__name__}: {error}")
             for view in members:
-                view.problem = f"cannot read {host}: {type(error).__name__}: {error}"
+                view.problem = f"cannot read {host}: {reason}"
+                view.unreachable = host if isinstance(error, TransportError) else None
             continue
         for view in members:
             receipt = view.receipt
