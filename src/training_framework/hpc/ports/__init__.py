@@ -54,10 +54,22 @@ class RemoteFilesystem(Protocol):
     def stat(self, path: str) -> Stat | None: ...
 
 
+@dataclass(frozen=True)
+class FetchSummary:
+    files: int            # files listed
+    fetched: int          # files copied this time (the rest were already here)
+    bytes: int            # bytes copied this time
+
+
 class FileTransfer(Protocol):
     def sync(self, local: str, remote: str) -> int:
         """Resumable one-way copy of `local` to `remote`; returns the bytes
         transferred."""
+
+    def fetch(self, remote_root: str, paths: list[str], local_root: str) -> FetchSummary:
+        """Resumable copy of `paths` (relative to `remote_root`) from the
+        cluster into the same relative paths under `local_root`; files
+        already here with the same size and modification time are skipped."""
 
 
 class SubmissionFailed(HpcError):

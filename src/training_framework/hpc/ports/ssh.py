@@ -19,7 +19,7 @@ import uuid
 
 from training_framework.hpc.errors import HpcError
 from training_framework.hpc.compile.plan import ExecutionContext
-from training_framework.hpc.ports import ExecResult, Stat
+from training_framework.hpc.ports import ExecResult, FetchSummary, Stat
 from training_framework.hpc.ports.shell import exec_script
 
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-T")
@@ -167,7 +167,7 @@ class RsyncTransfer:
         ]
         if self.show_progress or self.report is not None:
             command.insert(1, "--info=progress2")
-            stdout = self._stream(command, f"{self.host}:{remote}")
+            stdout = self._stream(command, f"upload to {self.host}:{remote}")
             returncode, stderr = self._returncode, self._stderr
         else:
             result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -177,34 +177,71 @@ class RsyncTransfer:
         match = _TRANSFERRED.search(stdout)
         return int(match.group(1).replace(",", "")) if match else 0
 
+    def fetch(self, remote_root: str, paths: list[str], local_root: str) -> FetchSummary:
+        if not paths:
+            return FetchSummary(0, 0, 0)
+        import tempfile
+
+        os.makedirs(local_root, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", suffix=".files", delete=False) as listing:
+            listing.write("".join(f"{path}\n" for path in paths))
+        try:
+            command = [
+                self.rsync, "-a", "--partial", "--protect-args", "--stats",
+                f"--files-from={listing.name}",
+                "-e", shlex.join([*self.ssh, *SSH_OPTIONS]),
+                f"{self.host}:{remote_root.rstrip('/')}/", local_root.rstrip("/") + "/",
+            ]
+            where = f"download from {self.host}:{remote_root}"
+            if self.show_progress or self.report is not None:
+                command.insert(1, "--info=progress2")
+                stdout = self._stream(command, where)
+                returncode, stderr = self._returncode, self._stderr
+            else:
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                stdout, returncode, stderr = result.stdout, result.returncode, result.stderr
+        finally:
+            os.unlink(listing.name)
+        if returncode != 0:
+            raise HpcError(f"rsync from {self.host}:{remote_root} failed: {stderr.strip()}")
+        sent = _FILES_SENT.search(stdout)
+        size = _TRANSFERRED.search(stdout)
+        return FetchSummary(
+            len(paths),
+            int(sent.group(1).replace(",", "")) if sent else 0,
+            int(size.group(1).replace(",", "")) if size else 0,
+        )
+
     def _stream(self, command: list[str], destination: str) -> str:
         """Run rsync, passing its progress on (see the class); return the
         tail of its output (the --stats summary is at the end)."""
         import sys
 
         # One merged pipe: reading two pipes in turn could deadlock.
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        tail = bytearray()
-        pending, latest, last_report = "", None, None
-        for chunk in iter(lambda: process.stdout.read(4096), b""):
-            tail += chunk
-            del tail[:-_TAIL]
-            if self.show_progress:
-                sys.stderr.write(chunk.decode(errors="replace"))
-                sys.stderr.flush()
-            if self.report is None:
-                continue
-            pieces = re.split(r"[\r\n]", pending + chunk.decode(errors="replace"))
-            pending = pieces.pop()
-            for piece in pieces:
-                if match := _PROGRESS.match(piece):
-                    latest = match
-            now = self.clock()
-            if latest is not None and (last_report is None
-                                       or now - last_report >= self.report_interval):
-                self.report(self._progress_line(destination, latest))
-                last_report = now
-        self._returncode = process.wait()
+        # The context manager closes the pipe and reaps the process, also
+        # when reading is interrupted (Ctrl-C).
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+            tail = bytearray()
+            pending, latest, last_report = "", None, None
+            for chunk in iter(lambda: process.stdout.read(4096), b""):
+                tail += chunk
+                del tail[:-_TAIL]
+                if self.show_progress:
+                    sys.stderr.write(chunk.decode(errors="replace"))
+                    sys.stderr.flush()
+                if self.report is None:
+                    continue
+                pieces = re.split(r"[\r\n]", pending + chunk.decode(errors="replace"))
+                pending = pieces.pop()
+                for piece in pieces:
+                    if match := _PROGRESS.match(piece):
+                        latest = match
+                now = self.clock()
+                if latest is not None and (last_report is None
+                                           or now - last_report >= self.report_interval):
+                    self.report(self._progress_line(destination, latest))
+                    last_report = now
+            self._returncode = process.wait()
         if self.show_progress:
             sys.stderr.write("\n")
         output = bytes(tail).decode(errors="replace")
@@ -215,14 +252,15 @@ class RsyncTransfer:
 
     @staticmethod
     def _finished_line(destination: str, latest, output: str) -> str:
-        line = f"upload to {destination} finished"
+        line = f"{destination} finished"
         if latest is not None:
             line += f": {_human(int(latest.group(1).replace(',', '')))} in place"
         files, sent = _FILES.search(output), _FILES_SENT.search(output)
         if files and sent:
             total, now = (int(match.group(1).replace(",", "")) for match in (files, sent))
             # Says whether an interrupted upload really resumed.
-            line += f"; {now:,} of {total:,} files sent now, {total - now:,} were already there"
+            moved = "fetched" if destination.startswith("download") else "sent"
+            line += f"; {now:,} of {total:,} files {moved} now, {total - now:,} were already there"
         return line
 
     @staticmethod
@@ -230,5 +268,5 @@ class RsyncTransfer:
         done, percent, rate, left = match.groups()
         # rsync lists large trees incrementally, so early percentages are of
         # the files listed so far.
-        return (f"upload to {destination}: {_human(int(done.replace(',', '')))} in place "
+        return (f"{destination}: {_human(int(done.replace(',', '')))} in place "
                 f"({percent}% of the files listed so far), {rate}, about {left} left")

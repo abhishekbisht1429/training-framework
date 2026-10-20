@@ -16,13 +16,10 @@ receipt's `attempts` list and as nodes `group-<group>.resume-<n>` carrying
 
 from __future__ import annotations
 
-import base64
 import json
 import posixpath
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
-import yaml
 
 from training_framework.hpc.compile.plan import ExecutionContext, JobNode
 from training_framework.hpc.config.schema import Resources, parse_size, parse_walltime
@@ -31,6 +28,7 @@ from training_framework.hpc.errors import HpcError
 from training_framework.hpc.ports import SubmissionFailed, SubmissionUncertain
 from training_framework.hpc.remote import preflight
 from training_framework.hpc.remote.lease import KeyMismatch, check_marker
+from training_framework.hpc.services.checkpoints import find_checkpoints, newest
 from training_framework.hpc.services.status import TERMINAL_STATES, Row, is_task
 
 #: Task states resumed by default; failed tasks only when named or asked for.
@@ -115,49 +113,6 @@ def select_tasks(receipt: dict, rows: list[Row], index: dict[str, tuple[str, int
 
 # Checkpoints ----------------------------------------------------------------------
 
-# For each task: every complete checkpoint directory (one with manifest.json;
-# directories still being written end in `.tmp`) with its iteration, and the
-# task's config. Lines: `K <task> <relative dir> <iteration>`,
-# `C <task> <base64 config.yaml>`.
-_FIND = r'''
-cd "$1" || exit 3
-shift
-for t in "$@"; do
-  for d in tasks/$t/sessions/session_*/checkpoints*/*/; do
-    d=${d%/}
-    case "$d" in *.tmp) continue;; esac
-    [ -f "$d/manifest.json" ] || continue
-    it=$(grep -o '"iteration": *[0-9]*' "$d/manifest.json" | head -1 | grep -o '[0-9]*$')
-    printf 'K\t%s\t%s\t%s\n' "$t" "$d" "$it"
-  done
-  [ -f "tasks/$t/config.yaml" ] && printf 'C\t%s\t%s\n' "$t" "$(base64 < "tasks/$t/config.yaml" | tr -d '\n')"
-done
-true
-'''
-
-
-def find_checkpoints(executor, batch_dir: str, tasks: list[str]):
-    """{task: [(absolute dir, iteration)]} and {task: config}, in one command."""
-    checkpoints: dict[str, list[tuple[str, int | None]]] = {task: [] for task in tasks}
-    configs: dict[str, dict] = {}
-    if not tasks:
-        return checkpoints, configs
-    result = executor.run(["sh", "-c", _FIND, "sh", batch_dir, *tasks])
-    if result.status != 0:
-        raise ResumeError(f"cannot list checkpoints in {batch_dir}: {result.stderr.strip()}")
-    for line in result.stdout.splitlines():
-        parts = line.split("\t")
-        if parts[0] == "K" and len(parts) == 4 and parts[1] in checkpoints:
-            iteration = int(parts[3]) if parts[3].isdigit() else None
-            checkpoints[parts[1]].append((f"{batch_dir}/{parts[2]}", iteration))
-        elif parts[0] == "C" and len(parts) == 3:
-            try:
-                configs[parts[1]] = yaml.safe_load(base64.b64decode(parts[2]))
-            except (ValueError, yaml.YAMLError):
-                continue
-    return checkpoints, configs
-
-
 def _has_key(value, key: str) -> bool:
     if isinstance(value, dict):
         return key in value or any(_has_key(item, key) for item in value.values())
@@ -184,8 +139,8 @@ def choose_checkpoints(candidates: list[Candidate], checkpoints, configs,
         if candidate.task in overrides:
             candidate.checkpoint, candidate.iteration = overrides[candidate.task]
         else:
-            found = [item for item in checkpoints.get(candidate.task, []) if item[1] is not None]
-            if not found:
+            found = newest(checkpoints.get(candidate.task, []))
+            if found is None:
                 session = (config or {}).get("sessions", [{}])[0] if config else {}
                 if not _has_key(session, "checkpointer"):
                     candidate.reason = "no checkpoint: the task config has no checkpointer"
@@ -196,7 +151,7 @@ def choose_checkpoints(candidates: list[Candidate], checkpoints, configs,
                 else:
                     candidate.reason = "no complete checkpoint was written yet"
                 continue
-            candidate.checkpoint, candidate.iteration = max(found, key=lambda item: (item[1], item[0]))
+            candidate.checkpoint, candidate.iteration = found
         if (candidate.max_iterations is not None and candidate.iteration is not None
                 and candidate.iteration >= candidate.max_iterations):
             candidate.reason = (f"its checkpoint is at iteration {candidate.iteration}, the "

@@ -171,6 +171,29 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--receipts", type=Path, help="receipt directory "
                         "(default: $XDG_STATE_HOME/training-framework/submissions)")
     profile_options(resume)
+    fetch = commands.add_parser(
+        "fetch", help="download a batch's results (records, logs, run files, checkpoints)",
+        description="Download the results of a batch's tasks to this machine: records, "
+                    "configs, run directories (TensorBoard events, outputs), Slurm logs, and "
+                    "the latest complete checkpoint of each task. Running it again copies "
+                    "only what is new.")
+    fetch.add_argument("batch_id", help="a batch id, or the path to its receipt")
+    fetch.add_argument("--dest", type=Path, default=Path("hpc-results"),
+                       help="where to put it: <dest>/<batch-id>/ (default: ./hpc-results)")
+    fetch.add_argument("--task", action="append", metavar="NAME", help="fetch this task (repeatable)")
+    fetch.add_argument("--state", choices=("done", "finished", "all"), default="done",
+                       help="done: finished successfully (default); finished: any final state; "
+                            "all: also tasks still queued or running")
+    fetch.add_argument("--checkpoints", choices=("latest", "all", "none"), default="latest",
+                       help="which checkpoints of each task (default: latest complete one)")
+    fetch.add_argument("--no-logs", action="store_true", help="skip the Slurm logs")
+    fetch.add_argument("--include", action="append", default=[], metavar="GLOB",
+                       help="also fetch files matching GLOB, relative to the batch directory")
+    fetch.add_argument("--yes", action="store_true", help="do not ask, even for large downloads")
+    fetch.add_argument("--dry-run", action="store_true", help="show what would be fetched")
+    fetch.add_argument("--receipts", type=Path, help="receipt directory "
+                       "(default: $XDG_STATE_HOME/training-framework/submissions)")
+    profile_options(fetch)
     probe = commands.add_parser("probe-python",
                                 help="print the site interpreter's identity for the profile")
     profile_options(probe)
@@ -536,6 +559,76 @@ def _resume(args) -> int:
     return 0
 
 
+def _fetch(args) -> int:
+    from training_framework.hpc.ports.ssh import RsyncTransfer, SshExecutor
+    from training_framework.hpc.scheduler import get_scheduler
+    from training_framework.hpc.services import fetch as fetching
+    from training_framework.hpc.services.resume import task_index
+    from training_framework.hpc.services.status import fetch_batches, missing_files, task_rows
+
+    _, receipt = _load_receipt(args)
+    if not receipt.get("staged"):
+        raise HpcError(f"{receipt['batch_id']} never reached the cluster ({receipt.get('status')}); "
+                       "there is nothing to fetch")
+    host, scheduler, _ = _receipt_cluster(args, receipt)
+    _require_tools("ssh", "rsync")
+    executor = SshExecutor(host)
+    bundle = get_scheduler(scheduler)
+    batch_dir = receipt["batch_dir"]
+    live = bundle.user_job_states(executor) if bundle.user_job_states else {}
+    files = fetch_batches(executor, [batch_dir]).get(batch_dir)
+    if problem := missing_files(receipt, files):
+        raise HpcError(f"{problem} on {host}")
+    rows = task_rows(receipt, files, live)
+    tasks, skipped = fetching.select(receipt, rows, task_index(files.tables), args.task, args.state)
+    for name, reason in skipped:
+        print(f"skip {name}: {reason}")
+    if not tasks:
+        raise HpcError("no task to fetch (see above)")
+    listing = fetching.plan_files(executor, batch_dir, tasks, args.checkpoints, args.include)
+    if not args.no_logs:
+        fetching.add_logs(executor, batch_dir, receipt, tasks, listing)
+    local_root = args.dest / receipt["batch_id"]
+    present, present_bytes = fetching.already_here(listing, str(local_root))
+    total = sum(listing.values())
+    print(f"fetch {receipt['batch_id']}: {len(tasks)} task(s) from {host} into {local_root}")
+    for task in tasks:
+        checkpoint = (", ".join(f"iteration {it}" for _, it in task.checkpoints)
+                      if task.checkpoints else "no checkpoint")
+        print(f"  {task.task:<30} {task.state:<24} {checkpoint}")
+    print(f"{len(listing)} file(s), {_size(total)}; already here: {present} file(s), "
+          f"{_size(present_bytes)}")
+    if args.dry_run:
+        return 0
+    to_fetch = total - present_bytes
+    if to_fetch > fetching.CONFIRM_BYTES and not args.yes:
+        if not sys.stdin.isatty():
+            print(f"error: {_size(to_fetch)} to download; pass --yes to confirm", file=sys.stderr)
+            return 1
+        if input(f"Download {_size(to_fetch)}? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("not fetched")
+            return 1
+    transfer = (RsyncTransfer(host, show_progress=True) if sys.stderr.isatty()
+                else RsyncTransfer(host, report=_progress))
+    summary = transfer.fetch(batch_dir, sorted(listing), str(local_root))
+    verified = {}
+    for task in tasks:
+        for relative, _ in task.checkpoints:
+            problems = fetching.verify_checkpoint(str(local_root / relative))
+            verified[relative] = problems
+            for problem in problems:
+                print(f"warning: checkpoint {relative}: {problem}", file=sys.stderr)
+    index = fetching.write_index(str(local_root), receipt, host, tasks, verified, summary)
+    bad = sum(1 for problems in verified.values() if problems)
+    print(f"fetched {summary.fetched} of {summary.files} file(s) ({_size(summary.bytes)}); "
+          f"{summary.files - summary.fetched} were already here")
+    if verified:
+        print(f"checkpoints: {len(verified) - bad} verified" + (f", {bad} with problems" if bad else ""))
+    print(f"results: {local_root}  (index: {index})")
+    print(f"view: tensorboard --logdir {local_root / 'tasks'}")
+    return 1 if bad else 0
+
+
 def _probe_python(profile) -> int:
     from training_framework.hpc.compile.compiler import (
         SET_VARIABLES,
@@ -567,6 +660,8 @@ def main(argv: list[str] | None = None) -> int:
             return _status(args)
         if args.command == "resume":
             return _resume(args)
+        if args.command == "fetch":
+            return _fetch(args)
         profile = _profile(args)
         if args.command == "probe-python":
             _require_tools("ssh")

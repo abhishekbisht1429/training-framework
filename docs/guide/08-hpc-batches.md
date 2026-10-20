@@ -14,6 +14,7 @@ python -m training_framework.hpc submit   experiments/sweep.yaml
 python -m training_framework.hpc batches  --live        # all your batches and what they are doing
 python -m training_framework.hpc status   <batch-id>    # one batch, task by task
 python -m training_framework.hpc resume   <batch-id>    # continue unfinished tasks from their checkpoints
+python -m training_framework.hpc fetch    <batch-id>    # download results, logs, latest checkpoints
 ```
 
 Every key of the profile and the manifest is described in the
@@ -452,7 +453,7 @@ holds the lease, and, on failure, a single `FAILED:` line.
 ```
 
 `record.json` ties each result to its commit, config, environment, and exit
-status. In HPC configs set the `tensorboard` component's `serve: false`, then
+status. To work with results on your machine, `fetch` them (section 11). In HPC configs set the `tensorboard` component's `serve: false`, then
 view a whole batch at once:
 
 ```bash
@@ -533,10 +534,60 @@ To lose less work when a task is stopped, checkpoint often enough
 (`checkpointer.checkpoint_every`): the stop keeps the latest periodic
 checkpoint.
 
+## 11. Getting results back
+
+```bash
+python -m training_framework.hpc fetch <batch-id>            # into ./hpc-results/<batch-id>/
+```
+
+```
+fetch vit-probes-20261014T220100Z-9a8b7c6d5e: 2 task(s) from bigred200 into hpc-results/vit-probes-...
+  probes/frozen/000              done                     iteration 6000
+  probes/frozen/001              done                     iteration 6000
+50 file(s), 1.2 GiB; already here: 0 file(s), 0 B
+fetched 50 of 50 file(s) (1.2 GiB); 0 were already here
+checkpoints: 2 verified
+view: tensorboard --logdir hpc-results/vit-probes-.../tasks
+```
+
+For each selected task, `fetch` downloads its `record.json`, `config.yaml`,
+and `variant.json`; its run directory without checkpoints (TensorBoard
+events, dumped configs, component outputs); its **latest complete
+checkpoint** (the newest with a `manifest.json`, across resumed attempts);
+and the Slurm log of every attempt. The batch's `plan.json`,
+`receipt.json`, and task tables come too. Files keep their paths relative
+to the batch directory, under `<dest>/<batch-id>/`.
+
+| Option | Effect |
+|---|---|
+| `--dest DIR` | download into `DIR/<batch-id>/` (default `./hpc-results`) |
+| `--state done` (default) / `finished` / `all` | successful tasks only; any task that ended (interrupted and failed ones too, for debugging); also tasks still queued or running (their files may be mid-write) |
+| `--task NAME` | these tasks, whatever their state (repeatable) |
+| `--checkpoints latest` (default) / `all` / `none` | which checkpoints of each task |
+| `--no-logs` | skip the Slurm logs |
+| `--include GLOB` | also files matching a shell glob relative to the batch directory (e.g. an explicit `checkpoints_dir` inside it) |
+| `--dry-run` | show the tasks, checkpoints, and sizes; download nothing |
+| `--yes` | do not ask; `fetch` asks only before downloading more than 1 GiB |
+
+It runs one `rsync` for the whole batch, resumable: running `fetch` again
+(say, after more tasks finished, or after an interruption) copies only new
+or changed files. Each fetched checkpoint is verified against its manifest
+(the SHA-256 of every component file); a mismatch is reported and `fetch`
+exits non-zero. `fetched.json` in the batch's local directory records what
+was fetched, from which cluster, and each checkpoint's iteration and
+verification. Nothing on the cluster changes.
+
+Fetched checkpoints load locally like any other
+(`Checkpointer.load_checkpoint(path)`, `load_component`, analysis
+sessions), with your project's components importable. Paths stored inside
+the files (configs' `sessions_dir`, records' `run_directories`) still name
+the cluster; `fetched.json` maps the batch to its local directory. Resuming a
+fetched checkpoint locally with `--resume-session` is not supported: the
+checkpoint's session would write to its cluster session directory.
+
 ## Limitations
 
-Single-node tasks only; Slurm only; no cancel or result download commands
-yet (use `scancel`, `rsync`); resuming cannot change the config or the
+Single-node tasks only; Slurm only; no cancel command yet (use `scancel`); resuming cannot change the config or the
 number of GPUs, and batches submitted before `resume` existed cannot be
 resumed; components that
 bind fixed ports (other than `tensorboard` with `serve: false`) fail when

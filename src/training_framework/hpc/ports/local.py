@@ -11,7 +11,7 @@ from pathlib import Path
 
 from training_framework.hpc.errors import HpcError
 from training_framework.hpc.compile.plan import ExecutionContext
-from training_framework.hpc.ports import ExecResult, Owner, Stat
+from training_framework.hpc.ports import ExecResult, FetchSummary, Owner, Stat
 from training_framework.hpc.remote.runtime import (
     ProcessProbe,
     StdlibFilesystem,
@@ -72,6 +72,25 @@ class LocalFileTransfer:
             shutil.copy2(source, target)
             transferred += source_stat.st_size
         return transferred
+
+    def fetch(self, remote_root: str, paths: list[str], local_root: str) -> FetchSummary:
+        fetched = size = 0
+        for path in paths:
+            source = os.path.join(remote_root, path)
+            target = os.path.join(local_root, path)
+            source_stat = os.stat(source)
+            try:
+                target_stat = os.stat(target)
+                if (target_stat.st_size == source_stat.st_size
+                        and int(target_stat.st_mtime) == int(source_stat.st_mtime)):
+                    continue
+            except FileNotFoundError:
+                pass
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+            shutil.copy2(source, target)
+            fetched += 1
+            size += source_stat.st_size
+        return FetchSummary(len(paths), fetched, size)
 
 
 class LocalProcessProbe:
