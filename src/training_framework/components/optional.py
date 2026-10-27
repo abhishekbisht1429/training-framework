@@ -28,6 +28,7 @@ OPTIONAL_COMPONENTS: dict[str, OptionalPackage] = {
         "flowers102",
         "imagenet",
         "inaturalist",
+        "normalize_images",
         "stanford_cars",
     )
 }

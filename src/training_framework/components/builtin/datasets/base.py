@@ -47,6 +47,11 @@ NAMED_STATISTICS: dict[str, tuple[tuple[float, ...], tuple[float, ...]]] = {
 DEFAULT_MEAN = (0.5, 0.5, 0.5)
 DEFAULT_STD = (0.5, 0.5, 0.5)
 
+#: What the presets can return: normalized ``float32`` images, or the
+#: ``uint8`` pixels for the `normalize_images` step to normalize on the
+#: device -- a quarter of the bytes through shared memory and the copy.
+IMAGE_DTYPES = ("float32", "uint8")
+
 
 @dataclass
 class TorchvisionDatasetConfig:
@@ -62,6 +67,10 @@ class TorchvisionDatasetConfig:
     both the same name from `NAMED_STATISTICS`. Set both or neither; unset,
     they are ``DEFAULT_MEAN`` / ``DEFAULT_STD``. After parsing they are
     tuples of three floats.
+
+    `image_dtype` is what the presets return, one of `IMAGE_DTYPES`; unset,
+    ``float32``. With ``uint8`` they stop before scaling and normalizing,
+    which the `normalize_images` step then does with `mean` and `std`.
     """
 
     root: str
@@ -71,6 +80,7 @@ class TorchvisionDatasetConfig:
     image_size: int | None = None
     mean: Any = None
     std: Any = None
+    image_dtype: str | None = None
 
     #: The splits the dataset accepts; each dataset's config sets its own.
     SPLITS: ClassVar[tuple[str, ...]] = ()
@@ -112,6 +122,18 @@ class TorchvisionDatasetConfig:
                 "image_size sizes the train/eval presets; a transform given "
                 "by dotted path sets its own size, so drop image_size"
             )
+        if self.image_dtype is not None:
+            if self.image_dtype not in IMAGE_DTYPES:
+                raise ValueError(
+                    f"image_dtype must be one of {list(IMAGE_DTYPES)}; got "
+                    f"{self.image_dtype!r}"
+                )
+            if self.transform not in TRANSFORM_PRESETS:
+                raise ValueError(
+                    "image_dtype sets what the train/eval presets return; a "
+                    "transform given by dotted path decides its own output, "
+                    "so drop image_dtype"
+                )
         self._resolve_statistics()
 
     def _resolve_statistics(self) -> None:
@@ -234,6 +256,14 @@ class TorchvisionDataset(Dataset, Resource):
         return self._cfg.std
 
     @property
+    def image_dtype(self) -> str | None:
+        """What the presets return, one of `IMAGE_DTYPES`; None for a
+        transform given by dotted path, which decides its own output."""
+        if self._cfg.transform not in TRANSFORM_PRESETS:
+            return None
+        return self._cfg.image_dtype or "float32"
+
+    @property
     def labels(self) -> list[str]:
         """The class names, indexed by label."""
         return list(self._labels)
@@ -263,12 +293,13 @@ class TorchvisionDataset(Dataset, Resource):
                 self.train_transform if choice == "train"
                 else self.eval_transform
             )
-            return v2.Compose([
-                v2.ToImage(),
-                *build(self.image_size),
-                v2.ToDtype(torch.float32, scale=True),
-                v2.Normalize(self.mean, self.std),
-            ])
+            steps = [v2.ToImage(), *build(self.image_size)]
+            if self.image_dtype == "float32":
+                steps += [
+                    v2.ToDtype(torch.float32, scale=True),
+                    v2.Normalize(self.mean, self.std),
+                ]
+            return v2.Compose(steps)
         context = f"{self._component_name()}.transform"
         transform = import_object(
             choice, context, example="my_project.transforms.augment",

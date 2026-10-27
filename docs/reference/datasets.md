@@ -55,6 +55,7 @@ cifar10#train:
   image_size: 224        # optional, default per dataset
   mean: imagenet         # optional, with std: default [0.5, 0.5, 0.5]
   std: imagenet
+  image_dtype: float32   # optional: float32 (default) or uint8
 
 data_manager: {batch_size: 128, num_workers: 4, pin_memory: true}
 load_batch: {fields: [images, labels]}
@@ -86,6 +87,11 @@ Two splits of one dataset are two instances, e.g. `cifar10#train` and
   the same name: `imagenet` or `cifar10`, for those datasets' published
   statistics. Unset, both are `[0.5, 0.5, 0.5]`. Refused together with a
   dotted-path transform, which does its own normalization.
+- `image_dtype` -- what the presets return: `float32` (the default),
+  normalized as above, or `uint8`, the pixels before scaling and
+  normalizing, for [`normalize_images`](#normalizing-on-the-device) to
+  finish on the device. Refused together with a dotted-path transform,
+  which decides its own output.
 
 `imagenet` reads `root/<split>/<class folder>/<image>`, with classes and
 files in sorted order, so a sample index names the same image on every rank
@@ -94,7 +100,44 @@ listed when the dataset is first read, once per rank, so the launching
 process never walks the whole tree. `inaturalist` reads `root/<split>` and labels by species.
 
 Each dataset exposes `labels` (class names, indexed by label),
-`num_classes`, `split`, `image_size`, `mean`, `std` and `transform`.
+`num_classes`, `split`, `image_size`, `mean`, `std`, `image_dtype` (`None`
+for a dotted-path transform) and `transform`.
+
+## Normalizing on the device
+
+A `float32` image is four times the bytes of its `uint8` pixels, and every
+batch crosses the DataLoader's shared memory (`/dev/shm`) and the copy to
+the device at that size. With many workers or large batches that fills
+shared memory, and the scaling and normalizing take the workers' CPU time.
+`image_dtype: uint8` moves both to the device: the dataset returns the
+pixels, and the `normalize_images` step, registered by the same package,
+scales and normalizes them there.
+
+```yaml
+imagenet#train:
+  root: /data/imagenet
+  split: train
+  transform: train
+  mean: imagenet
+  std: imagenet
+  image_dtype: uint8
+
+data_manager: {batch_size: 128, num_workers: 8, pin_memory: true}
+load_batch: {fields: [pixels, labels], non_blocking: true}
+normalize_images: {input: pixels, output: images}   # forward reads images
+```
+
+- `input`, `output` -- the key of the `uint8` images and the key the
+  normalized `float32` images are stored under; required, and different.
+- The mean and std are the bound dataset's, never configured here, so the
+  two cannot disagree.
+- The images it writes are bit for bit those of `image_dtype: float32`: the
+  presets crop, resize and flip the `uint8` pixels in both cases, and the
+  step scales and normalizes with the same operations in the same order.
+  Training is unchanged; only where the work runs moves.
+- A dataset that does not return `uint8` images -- `float32`, or a
+  dotted-path transform -- is refused when the session is built; a batch
+  that is not a `uint8` tensor is refused when the step runs.
 
 ## Adding a dataset
 

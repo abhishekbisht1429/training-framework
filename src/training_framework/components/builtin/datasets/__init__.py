@@ -27,6 +27,9 @@ from training_framework.components.builtin.datasets.imagenet import ImageNet
 from training_framework.components.builtin.datasets.inaturalist import (
     INaturalist,
 )
+from training_framework.components.builtin.datasets.normalization import (
+    NormalizeImages,
+)
 from training_framework.components.builtin.datasets.stanford_cars import (
     StanfordCars,
 )
@@ -36,6 +39,7 @@ __all__ = [
     "Flowers102",
     "ImageNet",
     "INaturalist",
+    "NormalizeImages",
     "StanfordCars",
     "TorchvisionDataset",
     "TorchvisionDatasetConfig",

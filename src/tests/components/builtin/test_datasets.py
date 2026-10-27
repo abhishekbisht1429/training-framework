@@ -17,10 +17,23 @@ torchvision = pytest.importorskip("torchvision")
 import torch
 from PIL import Image
 
-from tests.test_utils import make_config, resource_named, stub_process_group
+from tests.test_utils import (
+    build_session,
+    component_named,
+    make_config,
+    resource_named,
+    stub_process_group,
+)
 from torch import nn
 
-from training_framework.components import StatefulResource, Step, reads, resource, step
+from training_framework.components import (
+    StatefulResource,
+    Step,
+    reads,
+    resource,
+    step,
+    writes,
+)
 from training_framework.components.builtin.datasets import (
     CIFAR10,
     Flowers102,
@@ -601,3 +614,242 @@ def test_a_checkpointed_session_restores_its_dataset_instance(
     assert restored is not original
     assert restored.name == instance
     _same_dataset(restored, original)
+
+
+# -- uint8 images, normalized on the device -------------------------------------------
+
+
+def _noise_folders(root):
+    """Two classes of two random-noise images: every pixel value differs."""
+    generator = torch.Generator().manual_seed(0)
+    for name in ("n01", "n02"):
+        for index in range(2):
+            path = root / "train" / name / f"img{index}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pixels = torch.randint(0, 256, (30, 40, 3), generator=generator)
+            Image.fromarray(pixels.to(torch.uint8).numpy()).save(path)
+    return root
+
+
+def _noise_config(root, **overrides):
+    return {
+        "root": str(_noise_folders(root)),
+        "split": "train",
+        "transform": "eval",
+        "image_size": 16,
+        "mean": "imagenet",
+        "std": "imagenet",
+        **overrides,
+    }
+
+
+@writes("pixels")
+@step("pixel_source")
+class PixelSource(Step):
+    """Writes the key `normalize_images` reads; the tests call that step
+    directly, so this never runs."""
+
+    def run(self, session):
+        raise AssertionError("not run")
+
+
+def _normalizing_session(tmp_path, dataset_config):
+    for module in ("imagenet", "normalization"):
+        importlib.reload(importlib.import_module(
+            f"training_framework.components.builtin.datasets.{module}"
+        ))
+    step("pixel_source")(PixelSource)
+    return build_session(
+        tmp_path / "session",
+        {
+            "imagenet#train": dataset_config,
+            "pixel_source": {},
+            "normalize_images": {"input": "pixels", "output": "images"},
+        },
+        bindings={"dataset": "imagenet#train"},
+    )
+
+
+@pytest.mark.parametrize("preset", ["train", "eval"])
+def test_a_uint8_preset_returns_the_pixels_before_scaling(tmp_path, preset):
+    dataset = ImageNet(_noise_config(
+        tmp_path, transform=preset, image_dtype="uint8",
+    ))
+
+    image, label = dataset[0]
+
+    assert dataset.image_dtype == "uint8"
+    assert image.dtype == torch.uint8
+    assert image.shape == (3, 16, 16)
+    assert isinstance(label, int)
+
+
+def test_image_dtype_defaults_to_float32_and_is_none_for_a_dotted_transform(
+        tmp_path,
+):
+    root = str(_image_folders(tmp_path))
+    preset = ImageNet({"root": root, "split": "train", "transform": "eval"})
+    dotted = ImageNet({
+        "root": root, "split": "train",
+        "transform": f"{__name__}.augment",
+    })
+
+    assert preset.image_dtype == "float32"
+    assert dotted.image_dtype is None
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"transform": "eval", "image_dtype": "float16"},
+         r"image_dtype must be one of \['float32', 'uint8'\]"),
+        ({"transform": "a.b", "image_dtype": "uint8"}, "drop image_dtype"),
+    ],
+)
+def test_invalid_image_dtype_is_reported(tmp_path, config, message):
+    with pytest.raises(ValueError, match=message):
+        ImageNet({"root": str(tmp_path), "split": "train", **config})
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(
+            not torch.cuda.is_available(), reason="needs a GPU",
+        )),
+    ],
+)
+def test_normalize_images_matches_the_float32_preset_bit_for_bit(
+        tmp_path, device,
+):
+    config = _noise_config(tmp_path)
+    session = _normalizing_session(tmp_path, {**config, "image_dtype": "uint8"})
+    normalize = component_named(session, "normalize_images")
+    uint8_dataset = ImageNet({**config, "image_dtype": "uint8"})
+    float_dataset = ImageNet(config)
+    pixels = torch.stack([uint8_dataset[i][0] for i in range(4)])
+    expected = torch.stack([float_dataset[i][0] for i in range(4)])
+
+    images = normalize.run(session, pixels=pixels.to(device))
+
+    assert images.dtype == torch.float32
+    assert images.device.type == device
+    assert torch.equal(images.cpu(), expected)
+
+
+@pytest.mark.parametrize(
+    ("dataset_overrides", "message"),
+    [
+        ({}, "returns float32 images.*set image_dtype: uint8"),
+        ({"transform": f"{__name__}.augment", "image_size": None,
+          "mean": None, "std": None},
+         "images of its own making"),
+    ],
+)
+def test_normalize_images_refuses_a_dataset_without_uint8_images(
+        tmp_path, dataset_overrides, message,
+):
+    config = {
+        key: value
+        for key, value in {**_noise_config(tmp_path), **dataset_overrides}.items()
+        if value is not None
+    }
+    with pytest.raises(ValueError, match=message):
+        _normalizing_session(tmp_path, config)
+
+
+def test_normalize_images_refuses_images_that_are_not_uint8(tmp_path):
+    session = _normalizing_session(
+        tmp_path, _noise_config(tmp_path, image_dtype="uint8"),
+    )
+    normalize = component_named(session, "normalize_images")
+
+    with pytest.raises(TypeError, match="must be a uint8 tensor.*float32"):
+        normalize.run(session, pixels=torch.zeros(1, 3, 16, 16))
+
+
+def test_normalize_images_needs_two_different_keys(tmp_path):
+    config = _noise_config(tmp_path, image_dtype="uint8")
+    for module in ("imagenet", "normalization"):
+        importlib.reload(importlib.import_module(
+            f"training_framework.components.builtin.datasets.{module}"
+        ))
+
+    with pytest.raises(ValueError, match="must be different keys"):
+        build_session(
+            tmp_path / "session",
+            {
+                "imagenet#train": config,
+                "normalize_images": {"input": "pixels", "output": "pixels"},
+            },
+            bindings={"dataset": "imagenet#train"},
+        )
+
+
+def test_a_training_session_normalizes_uint8_batches_after_loading_them(
+        tmp_path, monkeypatch,
+):
+    stub_process_group(monkeypatch)
+    for module in ("imagenet", "normalization"):
+        importlib.reload(importlib.import_module(
+            f"training_framework.components.builtin.datasets.{module}"
+        ))
+    seen = []
+
+    @resource("uint8_test_model")
+    class Model(nn.Module, StatefulResource):
+        def __init__(self, config=None):
+            nn.Module.__init__(self)
+            self.linear = nn.Linear(1, 1)
+
+        def setup(self, session):
+            pass
+
+        def teardown(self, session):
+            pass
+
+        def get_state(self):
+            return {}
+
+        def set_state(self, state):
+            pass
+
+    @reads("pixels", "images")
+    @step("uint8_recorder")
+    class Recorder(Step):
+        def run(self, session, *, pixels, images):
+            seen.append((pixels, images))
+
+    config = make_config(tmp_path, max_iterations=2)
+    config["session_config"]["show_execution_graph"] = False
+    config.update({
+        "role_bindings": {
+            "dataset": "imagenet#train", "model": "uint8_test_model",
+        },
+        "uint8_test_model": {},
+        "imagenet#train": _noise_config(tmp_path / "imagenet", image_dtype="uint8"),
+        "ddp": {
+            "world_size": 1, "backend": "gloo",
+            "master_addr": "localhost", "master_port": "12355",
+        },
+        "data_manager": {"batch_size": 2, "num_workers": 0, "pin_memory": False},
+        "load_batch": {"fields": ["pixels", "labels"]},
+        "normalize_images": {"input": "pixels", "output": "images"},
+        "uint8_recorder": {},
+    })
+    session = TrainingSession(config)
+    session.unregister_hook("logger")
+    session.unregister_hook("checkpointer")
+    placeholder = resource_named(session, "ddp")
+    session.unregister_resource("ddp")
+    session.register_resource(type(placeholder)(config=placeholder.config, rank=0))
+
+    with session:
+        list(session)
+
+    assert len(seen) == 2
+    for pixels, images in seen:
+        assert pixels.dtype == torch.uint8
+        assert images.dtype == torch.float32
+        assert images.shape == pixels.shape == (2, 3, 16, 16)
