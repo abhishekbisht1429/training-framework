@@ -214,6 +214,23 @@ def _resolve_placeholders(
 
 
 
+def _steps_in_optimizer_state(state: Mapping | None) -> int | None:
+    """The optimizer steps a saved `torch.optim` state counted, or None if
+    the optimizer keeps no per-parameter `step`.
+
+    The largest count wins: a parameter frozen for the first steps
+    (`freeze_gradients`) has a smaller one.
+    """
+    if not state:
+        return None
+    counts = [
+        int(parameter_state["step"])
+        for parameter_state in state.get("state", {}).values()
+        if "step" in parameter_state
+    ]
+    return max(counts) if counts else None
+
+
 def _unwrapped(wrapped_model: nn.Module) -> nn.Module:
     """The model DDP wraps, whose parameter names patterns are written for."""
     if isinstance(wrapped_model, nn.parallel.DistributedDataParallel):
@@ -252,6 +269,10 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         self._max_iterations = None
         # How many optimizer steps the schedule was built for; see step.
         self._schedule_steps = None
+        # Optimizer steps actually taken (an fp16 step skipped for overflow
+        # is not one), and whether this iteration took one; see step.
+        self._completed_steps = 0
+        self._stepped = False
         self._device_type = None
         # Per iteration; see begin_iteration.
         self._boundary = True
@@ -634,6 +655,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             self._restore_optimizer_state(restored)
             self._restore_scheduler_state(restored)
         self._restore_scaler_state(restored)
+        self._restore_completed_steps(restored, session.iteration)
         self._restored_state = None
         # Gradients from a previous session, or a partly accumulated group,
         # are never carried into a new one.
@@ -653,6 +675,31 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                 "parameter groups; optimizer.param_groups (or the model) "
                 f"changed since it was saved: {error}"
             ) from error
+
+    def _restore_completed_steps(self, restored, iteration: int) -> None:
+        """Take the count of steps taken from the saved state.
+
+        A state saved before the count existed has none. The optimizer's own
+        state then says it exactly when it keeps a per-parameter `step`
+        (Adam, AdamW, RMSprop, ...): it rises only when `optimizer.step()`
+        runs, which an fp16 overflow skips. Failing that, the run stepped at
+        the end of every complete accumulation group, and once more at its
+        final iteration when that ended a partial one -- a checkpoint may
+        be written mid-group. A run extended after ending on a partial group
+        no longer knows its old final iteration, and counts one step fewer.
+        """
+        if restored is None:
+            self._completed_steps = 0
+            return
+        saved = restored.get("completed_steps")
+        if saved is None:
+            saved = _steps_in_optimizer_state(restored.get("optimizer_state"))
+        if saved is None:
+            accumulate_steps = self._settings.accumulate_steps
+            saved = iteration // accumulate_steps
+            if iteration % accumulate_steps and iteration >= self._max_iterations:
+                saved += 1
+        self._completed_steps = saved
 
     def _restore_scheduler_state(self, restored) -> None:
         if restored is None:
@@ -702,6 +749,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                 "lr_scheduler_state": None,
                 "schedule_steps": None,
                 "grad_scaler_state": None,
+                "completed_steps": None,
             }
         return {
             "optimizer_state": self._optimizer.state_dict(),
@@ -716,6 +764,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
                 if self._grad_scaler is not None
                 else None
             ),
+            "completed_steps": self._completed_steps,
         }
 
     @override
@@ -731,6 +780,8 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             if restored.get("lr_scheduler_state") is not None:
                 self._schedule_steps = restored.get("schedule_steps")
             self._restore_scaler_state(restored)
+            if restored.get("completed_steps") is not None:
+                self._completed_steps = restored["completed_steps"]
             self._restored_state = None
 
     # -- extension ----------------------------------------------------------
@@ -882,6 +933,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         """
         self.close_contexts()
         self._processed = set()
+        self._stepped = False
         accumulate_steps = self._settings.accumulate_steps
         self._boundary = (
             accumulate_steps == 1
@@ -950,6 +1002,20 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
     def is_boundary(self) -> bool:
         """Whether this iteration ends an accumulation group and steps."""
         return self._boundary
+
+    @property
+    def completed_steps(self) -> int:
+        """Optimizer steps actually taken in the run so far. A step fp16
+        skipped because its gradients overflowed is not counted, so a
+        schedule over this count advances only when the weights changed."""
+        return self._completed_steps
+
+    @property
+    def stepped(self) -> bool:
+        """Whether this iteration's `optimizer_step` changed the weights:
+        false before it runs, on an iteration inside an accumulation group,
+        and when fp16 skipped the step."""
+        return self._stepped
 
     def exit_autocast(self) -> None:
         context, self._autocast = self._autocast, None
@@ -1065,6 +1131,9 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
             skipped = self._grad_scaler.get_scale() < scale
         else:
             self._optimizer.step()
+        if not skipped:
+            self._completed_steps += 1
+            self._stepped = True
         if self._lr_scheduler is not None and not skipped:
             if metric is not None:
                 self._lr_scheduler.step(metric)

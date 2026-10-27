@@ -15,6 +15,7 @@ from training_framework.components.builtin.data import (
 from training_framework.components.builtin.diagram import ModelDiagram
 from training_framework.components.builtin.distributed import DDPResource
 from training_framework.components.builtin.fine_tuning import (
+    BackboneWithHead,
     FineTunedModel,
     ModulePart,
 )
@@ -38,6 +39,13 @@ from training_framework.components.builtin.optimization import (
     OptimizerStep,
 )
 from training_framework.components.builtin.profiling import Profiler
+from training_framework.components.builtin.self_supervised import (
+    DINOLoss,
+    EMATeacher,
+    EMAUpdate,
+    MultiView,
+    ProjectionHead,
+)
 from training_framework.components.builtin.transformer import (
     AttentionPooledEncoder,
     PatchTransformer,
@@ -49,12 +57,16 @@ __all__ = [
     "AnalysisForward",
     "AnalysisLogger",
     "AttentionPooledEncoder",
+    "BackboneWithHead",
     "Backward",
     "Checkpointer",
     "ClipGradients",
     "Compute",
     "DataManager",
     "DDPResource",
+    "DINOLoss",
+    "EMATeacher",
+    "EMAUpdate",
     "FineTunedModel",
     "Forward",
     "ForwardContext",
@@ -66,11 +78,13 @@ __all__ = [
     "Logger",
     "ModelDiagram",
     "ModulePart",
+    "MultiView",
     "OptimizerResource",
     "OptimizerStep",
     "PatchTransformer",
     "PooledPatchTransformer",
     "Profiler",
+    "ProjectionHead",
     "Tensorboard",
     "Timer",
     "TrainedModel",

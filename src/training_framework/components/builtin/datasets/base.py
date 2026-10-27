@@ -3,7 +3,9 @@
 A dataset resource wraps one split of a torchvision dataset and applies a
 transform to each image. Every sample is an ``(image, label)`` pair, so the
 data manager's default collate turns a batch into ``[images, labels]`` and
-``load_batch`` names them with ``fields: [images, labels]``.
+``load_batch`` names them with ``fields: [images, labels]``. With
+``transform: views`` the image is a list of augmented views, which collate
+into a list of view batches (``fields: [views, labels]``).
 
 By default construction reads (and, with ``download: true``, fetches) the
 files. The engine constructs every component in its parent process before
@@ -35,6 +37,31 @@ if TYPE_CHECKING:
 
 #: The transforms every dataset provides; any other value is a dotted path.
 TRANSFORM_PRESETS = ("train", "eval")
+
+#: The `transform` that returns several augmented views of each image, as
+#: the `views` key describes them (self-supervised training).
+VIEWS_TRANSFORM = "views"
+
+#: The transforms the dataset builds itself, so `mean`, `std` and
+#: `image_dtype` apply to them.
+_BUILT_TRANSFORMS = (*TRANSFORM_PRESETS, VIEWS_TRANSFORM)
+
+#: What one group of `views` may set, and the defaults: DINO's and BYOL's
+#: shared augmentation (crop, flip, colour jitter, greyscale), plus the blur
+#: and solarization each view group chooses.
+_VIEW_DEFAULTS: dict[str, Any] = {
+    "count": 1,
+    "flip_p": 0.5,
+    "color_jitter": {
+        "p": 0.8, "brightness": 0.4, "contrast": 0.4,
+        "saturation": 0.2, "hue": 0.1,
+    },
+    "grayscale_p": 0.2,
+    "blur_p": 0.0,
+    "solarize_p": 0.0,
+}
+_VIEW_REQUIRED = ("size", "scale")
+_JITTER_KEYS = ("p", "brightness", "contrast", "saturation", "hue")
 
 #: Channel statistics a config can name instead of listing: `mean` and
 #: `std` both set to one of these names.
@@ -71,6 +98,13 @@ class TorchvisionDatasetConfig:
     `image_dtype` is what the presets return, one of `IMAGE_DTYPES`; unset,
     ``float32``. With ``uint8`` they stop before scaling and normalizing,
     which the `normalize_images` step then does with `mean` and `std`.
+
+    ``transform: views`` returns a list of augmented views of each image
+    instead of one, as `views` lists them: groups of ``{count, size, scale,
+    flip_p, color_jitter, grayscale_p, blur_p, solarize_p}``, in order.
+    `views` is required with it and refused otherwise; each group sets its
+    own size, so `image_size` is refused too. `mean`, `std` and
+    `image_dtype` apply to every view.
     """
 
     root: str
@@ -81,6 +115,7 @@ class TorchvisionDatasetConfig:
     mean: Any = None
     std: Any = None
     image_dtype: str | None = None
+    views: Any = None
 
     #: The splits the dataset accepts; each dataset's config sets its own.
     SPLITS: ClassVar[tuple[str, ...]] = ()
@@ -93,13 +128,26 @@ class TorchvisionDatasetConfig:
                 f"split must be one of {list(self.SPLITS)}; got {self.split!r}"
             )
         if not isinstance(self.transform, str) or (
-                self.transform not in TRANSFORM_PRESETS
+                self.transform not in _BUILT_TRANSFORMS
                 and "." not in self.transform
         ):
             raise ValueError(
-                f"transform must be one of {list(TRANSFORM_PRESETS)} or the "
+                f"transform must be one of {list(_BUILT_TRANSFORMS)} or the "
                 "dotted path of a transform (e.g. "
                 f"'my_project.transforms.augment'); got {self.transform!r}"
+            )
+        if self.transform == VIEWS_TRANSFORM:
+            self.views = _view_groups(self.views)
+            if self.image_size is not None:
+                raise ValueError(
+                    "image_size sizes the train/eval presets; with transform: "
+                    "views each group sets its own size, so drop image_size"
+                )
+        elif self.views is not None:
+            raise ValueError(
+                "views describes the views of transform: views; set "
+                f"transform: views, or drop views (transform is "
+                f"{self.transform!r})"
             )
         if not isinstance(self.download, bool):
             raise ValueError(
@@ -128,7 +176,7 @@ class TorchvisionDatasetConfig:
                     f"image_dtype must be one of {list(IMAGE_DTYPES)}; got "
                     f"{self.image_dtype!r}"
                 )
-            if self.transform not in TRANSFORM_PRESETS:
+            if self.transform not in _BUILT_TRANSFORMS:
                 raise ValueError(
                     "image_dtype sets what the train/eval presets return; a "
                     "transform given by dotted path decides its own output, "
@@ -140,7 +188,7 @@ class TorchvisionDatasetConfig:
         if self.mean is None and self.std is None:
             self.mean, self.std = DEFAULT_MEAN, DEFAULT_STD
             return
-        if self.transform not in TRANSFORM_PRESETS:
+        if self.transform not in _BUILT_TRANSFORMS:
             raise ValueError(
                 "mean and std normalize the train/eval presets; a transform "
                 "given by dotted path normalizes itself, so drop them"
@@ -192,6 +240,119 @@ def _channel_values(value: Any, key: str) -> tuple[float, float, float]:
             f"{key} values must be finite numbers; got {list(channels)}"
         )
     return channels
+
+
+def _view_number(value: Any, name: str, *, low: float, high: float) -> float:
+    if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not low <= value <= high
+    ):
+        raise ValueError(
+            f"{name} must be a number between {low} and {high}; got {value!r}"
+        )
+    return float(value)
+
+
+def _positive_count(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer; got {value!r}")
+    return value
+
+
+def _view_groups(value: Any) -> tuple[dict[str, Any], ...]:
+    """Check the `views` groups of ``transform: views``; return them with
+    every default filled in."""
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(
+            "transform: views needs views, a non-empty list of view groups "
+            "such as {count: 2, size: 224, scale: [0.4, 1.0]}; got "
+            f"{value!r}"
+        )
+    groups = []
+    for index, group in enumerate(value):
+        name = f"views[{index}]"
+        if not isinstance(group, Mapping):
+            raise ValueError(f"{name} must be a mapping; got {group!r}")
+        allowed = (*_VIEW_REQUIRED, *_VIEW_DEFAULTS)
+        unknown = sorted(set(map(str, group)) - set(allowed))
+        if unknown:
+            raise ValueError(
+                f"{name} got unknown keys {unknown}; a view group takes "
+                f"{list(allowed)}"
+            )
+        missing = [key for key in _VIEW_REQUIRED if key not in group]
+        if missing:
+            raise ValueError(f"{name} needs {missing}")
+        scale = group["scale"]
+        if not isinstance(scale, (list, tuple)) or len(scale) != 2:
+            raise ValueError(
+                f"{name}.scale must be [low, high], the fraction of the image "
+                f"a crop covers; got {scale!r}"
+            )
+        low = _view_number(scale[0], f"{name}.scale[0]", low=0.0, high=1.0)
+        high = _view_number(scale[1], f"{name}.scale[1]", low=0.0, high=1.0)
+        if not 0 < low <= high:
+            raise ValueError(
+                f"{name}.scale must have 0 < low <= high; got {list(scale)}"
+            )
+        jitter = group.get("color_jitter", _VIEW_DEFAULTS["color_jitter"])
+        if jitter is not None:
+            if not isinstance(jitter, Mapping):
+                raise ValueError(
+                    f"{name}.color_jitter must be a mapping of "
+                    f"{list(_JITTER_KEYS)}, or null for none; got {jitter!r}"
+                )
+            unknown = sorted(set(map(str, jitter)) - set(_JITTER_KEYS))
+            if unknown:
+                raise ValueError(
+                    f"{name}.color_jitter got unknown keys {unknown}; it "
+                    f"takes {list(_JITTER_KEYS)}"
+                )
+            jitter = {**_VIEW_DEFAULTS["color_jitter"], **jitter}
+            jitter = {
+                key: _view_number(
+                    jitter[key], f"{name}.color_jitter.{key}",
+                    low=0.0, high=0.5 if key == "hue" else 1.0,
+                )
+                for key in _JITTER_KEYS
+            }
+        groups.append({
+            "count": _positive_count(group.get("count", 1), f"{name}.count"),
+            "size": _positive_count(group["size"], f"{name}.size"),
+            "scale": (low, high),
+            "color_jitter": jitter,
+            **{
+                key: _view_number(
+                    group.get(key, _VIEW_DEFAULTS[key]), f"{name}.{key}",
+                    low=0.0, high=1.0,
+                )
+                for key in ("flip_p", "grayscale_p", "blur_p", "solarize_p")
+            },
+        })
+    return tuple(groups)
+
+
+def blur_kernel_size(size: int) -> int:
+    """The Gaussian blur kernel for a `size` crop: about a tenth of it, odd,
+    at least 3 (BYOL's 23 for 224)."""
+    kernel = max(3, round(size / 10))
+    return kernel if kernel % 2 else kernel + 1
+
+
+class ImageViews:
+    """Return one augmented view of an image per entry of `transforms`.
+
+    A module-level class rather than a closure, so DataLoader workers
+    started by spawn can unpickle the dataset.
+    """
+
+    def __init__(self, transforms: list[Callable[[Any], Any]]) -> None:
+        self.transforms = list(transforms)
+
+    def __call__(self, image: Any) -> list[Any]:
+        return [transform(image) for transform in self.transforms]
 
 
 class TorchvisionDataset(Dataset, Resource):
@@ -259,9 +420,17 @@ class TorchvisionDataset(Dataset, Resource):
     def image_dtype(self) -> str | None:
         """What the presets return, one of `IMAGE_DTYPES`; None for a
         transform given by dotted path, which decides its own output."""
-        if self._cfg.transform not in TRANSFORM_PRESETS:
+        if self._cfg.transform not in _BUILT_TRANSFORMS:
             return None
         return self._cfg.image_dtype or "float32"
+
+    @property
+    def num_views(self) -> int | None:
+        """How many views ``transform: views`` returns per image; None for
+        any other transform, which returns one image."""
+        if self._cfg.transform != VIEWS_TRANSFORM:
+            return None
+        return sum(view["count"] for view in self._cfg.views)
 
     @property
     def labels(self) -> list[str]:
@@ -286,6 +455,53 @@ class TorchvisionDataset(Dataset, Resource):
         normalization."""
         return [v2.Resize(round(size * 256 / 224)), v2.CenterCrop(size)]
 
+    def view_transform(self, view: Mapping[str, Any]) -> list[Callable[[Any], Any]]:
+        """The augmentation of one view of ``transform: views``, before
+        normalization: a random resized crop, a flip, colour jitter,
+        greyscale, Gaussian blur and solarization, each with the group's
+        probability -- the pipeline DINO and BYOL share."""
+        steps: list[Callable[[Any], Any]] = [
+            v2.RandomResizedCrop(
+                view["size"],
+                scale=view["scale"],
+                interpolation=v2.InterpolationMode.BICUBIC,
+                antialias=True,
+            ),
+        ]
+        if view["flip_p"]:
+            steps.append(v2.RandomHorizontalFlip(view["flip_p"]))
+        jitter = view["color_jitter"]
+        if jitter is not None and jitter["p"]:
+            steps.append(v2.RandomApply([
+                v2.ColorJitter(
+                    brightness=jitter["brightness"],
+                    contrast=jitter["contrast"],
+                    saturation=jitter["saturation"],
+                    hue=jitter["hue"],
+                ),
+            ], p=jitter["p"]))
+        if view["grayscale_p"]:
+            steps.append(v2.RandomGrayscale(view["grayscale_p"]))
+        if view["blur_p"]:
+            steps.append(v2.RandomApply([
+                v2.GaussianBlur(blur_kernel_size(view["size"]), sigma=(0.1, 2.0)),
+            ], p=view["blur_p"]))
+        if view["solarize_p"]:
+            # On the uint8 pixels: invert every value at or above the middle.
+            steps.append(v2.RandomSolarize(128, p=view["solarize_p"]))
+        return steps
+
+    def _finish(self, steps: list[Callable[[Any], Any]]) -> v2.Compose:
+        """`steps` between conversion to an image and, for float32,
+        scaling and normalization."""
+        steps = [v2.ToImage(), *steps]
+        if self.image_dtype == "float32":
+            steps += [
+                v2.ToDtype(torch.float32, scale=True),
+                v2.Normalize(self.mean, self.std),
+            ]
+        return v2.Compose(steps)
+
     def _resolve_transform(self) -> Callable[[Any], Any]:
         choice = self._cfg.transform
         if choice in TRANSFORM_PRESETS:
@@ -293,13 +509,13 @@ class TorchvisionDataset(Dataset, Resource):
                 self.train_transform if choice == "train"
                 else self.eval_transform
             )
-            steps = [v2.ToImage(), *build(self.image_size)]
-            if self.image_dtype == "float32":
-                steps += [
-                    v2.ToDtype(torch.float32, scale=True),
-                    v2.Normalize(self.mean, self.std),
-                ]
-            return v2.Compose(steps)
+            return self._finish(build(self.image_size))
+        if choice == VIEWS_TRANSFORM:
+            return ImageViews([
+                self._finish(self.view_transform(view))
+                for view in self._cfg.views
+                for _ in range(view["count"])
+            ])
         context = f"{self._component_name()}.transform"
         transform = import_object(
             choice, context, example="my_project.transforms.augment",

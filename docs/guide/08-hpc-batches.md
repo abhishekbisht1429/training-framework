@@ -94,7 +94,7 @@ groups:
     experiments:
       - name: frozen-backbone
         overrides:
-          - {component: fine_tuned_model, path: frozen, value: ["module.*"]}
+          - {component: backbone_with_head, path: frozen, value: ["module.*"]}
         matrix:
           - {component: optimizer, path: optimizer.kwargs.lr, values: [0.001, 0.0001]}
           - {path: session_config.rng_seed, values: [41, 42]}

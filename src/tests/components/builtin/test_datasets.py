@@ -853,3 +853,160 @@ def test_a_training_session_normalizes_uint8_batches_after_loading_them(
         assert pixels.dtype == torch.uint8
         assert images.dtype == torch.float32
         assert images.shape == pixels.shape == (2, 3, 16, 16)
+
+
+# -- transform: views (self-supervised views) ------------------------------------------
+
+
+VIEWS = [
+    {"count": 2, "size": 24, "scale": [0.4, 1.0], "blur_p": 1.0},
+    {"count": 3, "size": 12, "scale": [0.05, 0.4], "blur_p": 0.5, "solarize_p": 0.2},
+]
+
+
+def _views_config(root, **overrides):
+    return _noise_config(
+        root, **{"transform": "views", "image_size": None, "views": VIEWS, **overrides},
+    )
+
+
+def _without_none(config):
+    return {key: value for key, value in config.items() if value is not None}
+
+
+def test_views_returns_each_groups_views_in_order(tmp_path):
+    dataset = ImageNet(_without_none(_views_config(tmp_path)))
+
+    views, label = dataset[0]
+
+    assert dataset.num_views == 5
+    assert [tuple(view.shape) for view in views] == [(3, 24, 24)] * 2 + [(3, 12, 12)] * 3
+    assert all(view.dtype == torch.float32 for view in views)
+    assert isinstance(label, int)
+
+
+def test_views_are_random_and_differ_from_each_other(tmp_path):
+    dataset = ImageNet(_without_none(_views_config(tmp_path)))
+
+    views, _ = dataset[0]
+    again, _ = dataset[0]
+
+    assert not torch.equal(views[0], views[1])
+    assert not torch.equal(views[0], again[0])
+
+
+def test_views_collate_into_one_batch_per_view(tmp_path):
+    dataset = ImageNet(_without_none(_views_config(tmp_path)))
+
+    views, labels = torch.utils.data.default_collate([dataset[0], dataset[1]])
+
+    assert [tuple(view.shape) for view in views] == (
+        [(2, 3, 24, 24)] * 2 + [(2, 3, 12, 12)] * 3
+    )
+    assert labels.shape == (2,)
+
+
+def test_other_transforms_have_no_views(tmp_path):
+    dataset = ImageNet({"root": str(_image_folders(tmp_path)), "split": "train",
+                        "transform": "eval"})
+
+    assert dataset.num_views is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"transform": "train"}, "views describes the views of transform: views"),
+        ({"views": None}, "transform: views needs views"),
+        ({"views": []}, "transform: views needs views"),
+        ({"image_size": 16}, "each group sets its own size, so drop image_size"),
+        ({"views": [{"size": 8}]}, r"views\[0\] needs \['scale'\]"),
+        ({"views": [{"size": 8, "scale": [0.5, 1], "crop": 1}]},
+         r"unknown keys \['crop'\]"),
+        ({"views": [{"size": 8, "scale": [0.6, 0.5]}]}, "0 < low <= high"),
+        ({"views": [{"size": 8, "scale": [0, 0.5]}]}, "0 < low <= high"),
+        ({"views": [{"size": 8, "scale": [0.5]}]}, r"scale must be \[low, high\]"),
+        ({"views": [{"size": 8, "scale": [0.5, 1], "count": 0}]},
+         "count must be a positive integer"),
+        ({"views": [{"size": 8, "scale": [0.5, 1], "blur_p": 2}]},
+         "blur_p must be a number between 0.0 and 1.0"),
+        ({"views": [{"size": 8, "scale": [0.5, 1],
+                     "color_jitter": {"gamma": 0.1}}]}, r"unknown keys \['gamma'\]"),
+        ({"views": [{"size": 8, "scale": [0.5, 1],
+                     "color_jitter": {"hue": 0.7}}]}, "hue must be a number between"),
+    ],
+)
+def test_invalid_views_are_reported(tmp_path, overrides, message):
+    config = {**_views_config(tmp_path), **overrides}
+    with pytest.raises(ValueError, match=message):
+        ImageNet(_without_none(config))
+
+
+def test_normalize_images_normalizes_uint8_views_like_the_float32_ones(tmp_path):
+    config = _without_none(_views_config(tmp_path))
+    session = _normalizing_session(tmp_path, {**config, "image_dtype": "uint8"})
+    normalize = component_named(session, "normalize_images")
+    uint8_dataset = ImageNet({**config, "image_dtype": "uint8"})
+    float_dataset = ImageNet(config)
+    torch.manual_seed(5)
+    pixels, _ = uint8_dataset[0]
+    torch.manual_seed(5)
+    expected, _ = float_dataset[0]
+
+    images = normalize.run(session, pixels=[view.unsqueeze(0) for view in pixels])
+
+    assert len(images) == 5
+    for image, view in zip(images, expected):
+        assert torch.equal(image[0], view)
+
+
+def test_normalize_images_refuses_an_empty_list_of_views(tmp_path):
+    config = _without_none(_views_config(tmp_path, image_dtype="uint8"))
+    session = _normalizing_session(tmp_path, config)
+
+    with pytest.raises(TypeError, match="empty list of view batches"):
+        component_named(session, "normalize_images").run(session, pixels=[])
+
+
+def test_a_pickled_views_dataset_reads_the_same_views(tmp_path, registered_datasets):
+    dataset = _dataset_class("imagenet")(_without_none(_views_config(tmp_path)))
+    copy = pickle.loads(pickle.dumps(dataset))
+
+    torch.manual_seed(9)
+    views, _ = dataset[1]
+    torch.manual_seed(9)
+    copied, _ = copy[1]
+
+    assert all(torch.equal(a, b) for a, b in zip(views, copied))
+
+
+def test_a_pickled_normalize_images_normalizes_alike(tmp_path):
+    session = _normalizing_session(
+        tmp_path, _noise_config(tmp_path, image_dtype="uint8"),
+    )
+    normalize = component_named(session, "normalize_images")
+    pixels = torch.randint(0, 256, (2, 3, 16, 16), dtype=torch.uint8)
+
+    copy = pickle.loads(pickle.dumps(normalize))
+
+    assert torch.equal(
+        copy.run(session, pixels=pixels), normalize.run(session, pixels=pixels),
+    )
+
+
+def test_a_checkpointed_session_restores_normalize_images(tmp_path):
+    from training_framework.components.builtin import Checkpointer
+
+    session = _normalizing_session(
+        tmp_path, _noise_config(tmp_path, image_dtype="uint8"),
+    )
+    path = Checkpointer.save_checkpoint(session, tmp_path / "checkpoint")
+    pixels = torch.randint(0, 256, (2, 3, 16, 16), dtype=torch.uint8)
+
+    restored = Checkpointer.load_checkpoint(path, restore_rng=False)
+
+    restored_step = component_named(restored, "normalize_images")
+    assert torch.equal(
+        restored_step.run(restored, pixels=pixels),
+        component_named(session, "normalize_images").run(session, pixels=pixels),
+    )

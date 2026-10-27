@@ -50,7 +50,7 @@ role_bindings:
 cifar10#train:
   root: /data/cifar10
   split: train
-  transform: train       # required: train, eval, or a dotted path
+  transform: train       # required: train, eval, views, or a dotted path
   download: true         # optional, default false
   image_size: 224        # optional, default per dataset
   mean: imagenet         # optional, with std: default [0.5, 0.5, 0.5]
@@ -72,6 +72,8 @@ Two splits of one dataset are two instances, e.g. `cifar10#train` and
     for `cifar10`, a 4 px padded `RandomCrop` + flip at 32 px.
   - `eval`: deterministic. Resize to `image_size * 256 / 224` and center
     crop; for `cifar10`, nothing beyond normalization.
+  - `views`: several augmented views of each image, for self-supervised
+    training; see [views](#views-for-self-supervised-training).
   - a dotted path (`my_project.transforms.augment`) to a transform instance
     or a function taking a PIL image. It replaces the preset entirely,
     normalization included. A class is refused: name an instance.
@@ -101,7 +103,8 @@ process never walks the whole tree. `inaturalist` reads `root/<split>` and label
 
 Each dataset exposes `labels` (class names, indexed by label),
 `num_classes`, `split`, `image_size`, `mean`, `std`, `image_dtype` (`None`
-for a dotted-path transform) and `transform`.
+for a dotted-path transform), `num_views` (`None` unless `transform: views`)
+and `transform`.
 
 ## Normalizing on the device
 
@@ -138,6 +141,48 @@ normalize_images: {input: pixels, output: images}   # forward reads images
 - A dataset that does not return `uint8` images -- `float32`, or a
   dotted-path transform -- is refused when the session is built; a batch
   that is not a `uint8` tensor is refused when the step runs.
+
+## Views for self-supervised training
+
+`transform: views` returns a list of augmented views of each image instead
+of one image, as `views` lists them -- what DINO's multi-crop and BYOL's two
+views need. The sample is `(views, label)`; the data manager's collate turns
+a batch into one batch per view, in order (`load_batch: {fields: [views,
+labels]}`), which [`multi_view`](self-supervised.md#multi_view) encodes.
+
+```yaml
+imagenet#train:
+  root: /data/imagenet
+  split: train
+  transform: views
+  mean: imagenet
+  std: imagenet
+  views:                                     # groups, in order: global first
+    - {count: 1, size: 224, scale: [0.4, 1.0], blur_p: 1.0}
+    - {count: 1, size: 224, scale: [0.4, 1.0], blur_p: 0.1, solarize_p: 0.2}
+    - {count: 6, size: 96, scale: [0.05, 0.4], blur_p: 0.5}
+```
+
+Each view runs, in this order, each step with its group's probability:
+
+| Key | Default | Step |
+|---|---|---|
+| `count` | `1` | How many views of this group |
+| `size` | required | `RandomResizedCrop` to `size` x `size`, bicubic |
+| `scale` | required | `[low, high]`: the fraction of the image a crop covers, `0 < low <= high <= 1` |
+| `flip_p` | `0.5` | Horizontal flip |
+| `color_jitter` | `{p: 0.8, brightness: 0.4, contrast: 0.4, saturation: 0.2, hue: 0.1}` | Colour jitter, applied with probability `p`; keys left out keep these defaults; `null` for none |
+| `grayscale_p` | `0.2` | Greyscale |
+| `blur_p` | `0.0` | Gaussian blur, sigma 0.1-2.0, kernel about a tenth of `size` (odd) |
+| `solarize_p` | `0.0` | Solarize (invert the pixels at or above 128) |
+
+These are the augmentations DINO and BYOL share; the two methods differ in
+the blur and solarization of each view, as in the example above (DINO) and
+in [the BYOL example](self-supervised.md#byol). `views` is required with
+`transform: views` and refused with any other transform; `image_size` is
+refused with it, since each group sets its own size. `mean`, `std` and
+`image_dtype` apply to every view: with `uint8`, `normalize_images` takes the
+list of view batches and normalizes each.
 
 ## Adding a dataset
 

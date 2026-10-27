@@ -35,6 +35,18 @@ want to configure one. Every post-iteration hook -- `checkpointer`, `logger`,
 | `clip_gradients` | Step | Clips, or only measures, the total gradient norm | [`clip_gradients`](#clip_gradients) |
 | `optimizer_step` | Step | Steps the optimizer and the schedule; the gradients stay until the next iteration (group) begins | none |
 
+`optimizer.completed_steps` counts the optimizer steps actually taken in the
+run -- a step `fp16` skipped because its gradients overflowed is not one --
+and is checkpointed; `optimizer.stepped` says whether this iteration's
+`optimizer_step` changed the weights. Anything scheduled over training
+(the [EMA teacher](self-supervised.md#ema_update), DINO's teacher
+temperature) follows them, as the lr schedule does. A checkpoint written
+before the count existed restores it from the optimizer's own state when it
+keeps a per-parameter `step` (Adam, AdamW, RMSprop, ...), which is exact;
+otherwise (SGD) as the complete accumulation groups so far, plus the last
+partial group if the checkpoint was written at the run's final iteration. A
+run extended after ending on a partial group then counts one step fewer.
+
 `freeze_gradients` and `clip_gradients` run, and edit gradients, only on
 iterations that step (see [gradient accumulation](#gradient-accumulation)),
 so they always see complete, unscaled gradients.
@@ -135,7 +147,7 @@ freeze_gradients:
 A parameter whose gradient is None is skipped by the optimizer entirely,
 weight decay and moment updates included. The backward pass still computes
 those gradients; to freeze parameters for a whole run and skip that work, see
-[`fine_tuned_model.frozen`](fine-tuning.md#fine_tuned_model).
+[`backbone_with_head.frozen`](fine-tuning.md#backbone_with_head).
 
 ## `clip_gradients`
 

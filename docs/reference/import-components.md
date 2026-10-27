@@ -23,7 +23,7 @@ import_components:
     checkpoint: runs/pretrain/checkpoints/last # a checkpoint directory
 
 role_bindings:
-  model: fine_tuned_model
+  model: backbone_with_head
   backbone: pooled_patch_transformer#imported  # the imported instance
   head: cifar_head
 ```

@@ -202,7 +202,9 @@ block must follow the call signature in the role's description and expose
 
 ---
 
-**See also:** [`ModuleResource`](../concepts/module-resource.md) for the
+**See also:** [self-supervised training](self-supervised.md) for heads,
+multi-view encoding and teachers on `patch_transformer`;
+[`ModuleResource`](../concepts/module-resource.md) for the
 ownership and checkpointing rules these blocks follow, and
 [built-in components](builtin-components.md) for everything else the framework
 ships with.

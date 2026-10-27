@@ -4,9 +4,11 @@ A pretrained model comes in through `import_components`, which makes it --
 and everything it was wired to -- components of this session. Two resources
 build on that. `module_part` takes a part of a module resource (an encoder
 out of a whole pretrained model, say) and calls one of its methods.
-`fine_tuned_model` composes whatever fills the `backbone` and `head` roles,
-freezes part of the backbone, and runs `head(backbone(x))`; bound as
+`backbone_with_head` composes whatever fills the `backbone` and `head`
+roles, freezes part of the backbone, and runs `head(backbone(x))`; bound as
 `model`, `ddp`, `forward` and `optimizer` use it like any other model.
+`fine_tuned_model` is its deprecated former name, kept for old
+configurations and checkpoints.
 
 The backbone need not come from another run -- any resource that is an
 `nn.Module` can fill the role -- and the head is always the user's own
@@ -16,10 +18,12 @@ count, say) itself.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import torch
 from torch import Tensor, nn
 
 from training_framework.components import (
@@ -157,7 +161,7 @@ class ModulePart(ModuleResource):
         return getattr(self.module, self._cfg.method)(*args, **kwargs)
 
 
-# -- fine_tuned_model -----------------------------------------------------
+# -- backbone_with_head (and fine_tuned_model, its former name) -----------
 
 
 @dataclass
@@ -199,12 +203,35 @@ class FineTunedModelConfig:
             )
 
 
+#: How `backbone_with_head` reduces `(B, N, D)` backbone tokens to `(B, D)`.
+POOLING_MODES = ("cls", "mean")
+
+
+@dataclass
+class BackboneWithHeadConfig(FineTunedModelConfig):
+    pool: Any = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.pool is not None and self.pool not in POOLING_MODES:
+            raise ValueError(
+                f"pool must be one of {list(POOLING_MODES)} or null; got "
+                f"{self.pool!r}"
+            )
+        if self.pool is not None and self.backbone_output is not None:
+            raise ValueError(
+                "pool reads the backbone's tokens through encode_with_mask, "
+                "not its forward output, so backbone_output (which selects "
+                "from that output) cannot be combined with it"
+            )
+
+
 @requires_resource("backbone")
 @requires_resource("head")
-@resource("fine_tuned_model", session_type=TRAINING_SESSION_TYPE)
-@resource("fine_tuned_model", session_type=ANALYSIS_SESSION_TYPE)
-class FineTunedModel(ModuleResource):
-    """`head(backbone(x))`, with part of the backbone frozen.
+@resource("backbone_with_head", session_type=TRAINING_SESSION_TYPE)
+@resource("backbone_with_head", session_type=ANALYSIS_SESSION_TYPE)
+class BackboneWithHead(ModuleResource):
+    """`head(pool(backbone(x)))`, with part of the backbone frozen.
 
     Both parts are prerequisites attached as the submodules `backbone` and
     `head`, so parameter names read `backbone.<...>` and `head.<...>` (what
@@ -225,9 +252,17 @@ class FineTunedModel(ModuleResource):
     - `backbone_output`: which part of the backbone's output the head gets:
       an index into a tuple/list, a key of a mapping (a Hugging Face output),
       or an attribute of another object. Default: the whole output.
+    - `pool` (default none): reduce the backbone's tokens to `(B, D)`
+      before the head. The tokens come from `encode_with_mask` -- the
+      token-encoder contract `patch_transformer` follows: `(B, N, D)`
+      tokens, the class token first exactly when `has_class_token`, and the
+      padding mask that covers them -- never from `forward`, which a
+      subclass may change (`pooled_patch_transformer` pools there). `cls`
+      takes the class token; `mean` averages the other tokens, leaving out
+      padded ones. Not combined with `backbone_output`.
     """
 
-    config_schema = FineTunedModelConfig
+    config_schema = BackboneWithHeadConfig
 
     def __init__(self, config: Mapping | None = None) -> None:
         super().__init__(config)
@@ -239,8 +274,32 @@ class FineTunedModel(ModuleResource):
                     f"by {type(part).__name__}, which is not an nn.Module"
                 )
             setattr(self, role_name, part)
+        self._check_pool()
         self._frozen_module_names = self._freeze()
         self.train(self.training)
+
+    def _pool_mode(self) -> str | None:
+        return self._cfg.pool
+
+    def _check_pool(self) -> None:
+        mode = self._pool_mode()
+        if mode is None:
+            return
+        has_class_token = getattr(self.backbone, "has_class_token", None)
+        encode_with_mask = getattr(self.backbone, "encode_with_mask", None)
+        if not isinstance(has_class_token, bool) or not callable(encode_with_mask):
+            raise ValueError(
+                f"{self._component_name()}.pool is {mode!r}, but the backbone "
+                f"({type(self.backbone).__name__}) is not a token encoder: "
+                "pooling needs encode_with_mask (tokens and their padding "
+                "mask) and a boolean has_class_token, as patch_transformer "
+                "has, so the class token can be told apart from the others"
+            )
+        if mode == "cls" and not has_class_token:
+            raise ValueError(
+                f"{self._component_name()}.pool is 'cls', but the backbone has "
+                "no class token; set class_token: true on it, or use pool: mean"
+            )
 
     def _freeze(self) -> tuple[str, ...]:
         """Freeze the matching backbone parameters; return the backbone
@@ -281,7 +340,7 @@ class FineTunedModel(ModuleResource):
         visit(self.backbone, "")
         return tuple(names)
 
-    def train(self, mode: bool = True) -> "FineTunedModel":
+    def train(self, mode: bool = True) -> "BackboneWithHead":
         super().train(mode)
         if mode and self._cfg.frozen_eval:
             for module_name in self._frozen_module_names:
@@ -294,7 +353,42 @@ class FineTunedModel(ModuleResource):
         self.train(self.training)
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        return self.head(self._select(self.backbone(*args, **kwargs)))
+        if self._pool_mode() is None:
+            return self.head(self._select(self.backbone(*args, **kwargs)))
+        tokens, mask = self.backbone.encode_with_mask(*args, **kwargs)
+        return self.head(self._pool(tokens, mask))
+
+    def _pool(self, tokens: Tensor, mask: Tensor | None) -> Tensor:
+        """Reduce `(B, N, D)` tokens to `(B, D)`; `mask` (`(B, N)`, true
+        where a token is padding) is what `encode_with_mask` returned."""
+        name = f"{self._component_name()}.pool"
+        if not isinstance(tokens, Tensor) or tokens.ndim != 3:
+            raise TypeError(
+                f"{name} reduces (B, N, D) tokens, but encode_with_mask "
+                "returned "
+                + (
+                    f"a tensor of shape {tuple(tokens.shape)}"
+                    if isinstance(tokens, Tensor)
+                    else f"a {type(tokens).__name__}"
+                )
+            )
+        if self._pool_mode() == "cls":
+            return tokens[:, 0]
+        if self.backbone.has_class_token:
+            tokens = tokens[:, 1:]
+            mask = mask[:, 1:] if mask is not None else None
+        if mask is None:
+            return tokens.mean(dim=1)
+        if mask.dtype != torch.bool or mask.shape != tokens.shape[:2]:
+            raise TypeError(
+                f"{name} needs a boolean (B, N) padding mask over the tokens; "
+                f"got {mask.dtype} {tuple(mask.shape)}"
+            )
+        kept = (~mask).unsqueeze(-1).to(tokens.dtype)
+        counts = kept.sum(dim=1)
+        if bool((counts == 0).any()):
+            raise ValueError(f"{name} is 'mean', but a sample has every token masked")
+        return (tokens * kept).sum(dim=1) / counts
 
     def _select(self, output: Any) -> Any:
         selector = self._cfg.backbone_output
@@ -337,4 +431,30 @@ class FineTunedModel(ModuleResource):
         return value
 
 
-__all__ = ["FineTunedModel", "ModulePart"]
+@resource("fine_tuned_model", session_type=TRAINING_SESSION_TYPE)
+@resource("fine_tuned_model", session_type=ANALYSIS_SESSION_TYPE)
+class FineTunedModel(BackboneWithHead):
+    """Deprecated: `backbone_with_head` under its former name.
+
+    Kept so configurations and checkpoints that name `fine_tuned_model`
+    still build and restore: same roles, same configuration (no `pool`),
+    same parameter names and state. A run saved under this name resumes
+    under it; new configurations use `backbone_with_head`.
+    """
+
+    config_schema = FineTunedModelConfig
+
+    def __init__(self, config: Mapping | None = None) -> None:
+        warnings.warn(
+            "fine_tuned_model is deprecated; use backbone_with_head, which "
+            "takes the same configuration (and adds pool)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(config)
+
+    def _pool_mode(self) -> str | None:
+        return None
+
+
+__all__ = ["BackboneWithHead", "FineTunedModel", "ModulePart", "POOLING_MODES"]

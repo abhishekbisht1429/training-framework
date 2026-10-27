@@ -53,8 +53,11 @@ A task-ordered path. It picks up where the
   `import_components`: another run's model, and what it was wired to, as this
   session's own components.
 - [Fine-tuning](reference/fine-tuning.md) — `module_part` and
-  `fine_tuned_model`: a pretrained backbone from another run, frozen layers,
-  and your own head.
+  `backbone_with_head`: a pretrained backbone from another run, frozen layers,
+  pooling, and your own head.
+- [Self-supervised training](reference/self-supervised.md) — DINO and BYOL
+  from generic parts: `projection_head`, `multi_view`, `ema_teacher`,
+  `ema_update`, `dino_distillation_loss`, and dataset views.
 - [Transformer blocks](reference/transformer-blocks.md) — the swappable
   transformer building blocks and the two composite models.
 - [Image datasets](reference/datasets.md) — optional torchvision datasets

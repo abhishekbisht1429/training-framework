@@ -62,6 +62,8 @@ class NormalizeImages(Step):
     The dataset must return ``uint8`` images (``image_dtype: uint8``);
     anything else is refused when the session is built, since its images
     are either normalized already or not ones this step knows how to scale.
+    A list of view batches (``transform: views``) becomes a list of
+    normalized ones.
     """
 
     config_schema = NormalizeImagesConfig
@@ -98,6 +100,17 @@ class NormalizeImages(Step):
     @override
     def run(self, session: Session, /, *args: Any, **reads: Any) -> Any:
         images = reads[self._cfg.input]
+        if isinstance(images, (list, tuple)):
+            # The view batches of `transform: views`, each normalized alike.
+            if not images:
+                raise TypeError(
+                    f"{self.name}.input '{self._cfg.input}' is an empty list "
+                    "of view batches"
+                )
+            return [self._normalized(view) for view in images]
+        return self._normalized(images)
+
+    def _normalized(self, images: Any) -> torch.Tensor:
         if not isinstance(images, torch.Tensor) or images.dtype != torch.uint8:
             raise TypeError(
                 f"{self.name}.input '{self._cfg.input}' must be a uint8 "
