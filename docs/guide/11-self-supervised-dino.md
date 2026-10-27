@@ -336,7 +336,55 @@ Logging and checkpoints, once per epoch:
     checkpointer: {checkpoint_every: 1251}
 ```
 
-## 6. Run it
+## 6. Watch it train
+
+The `logger` prints the learning rates, gradient norm and loss every
+`log_every` iterations. For curves, add TensorBoard: the `tensorboard`
+resource owns the writer, and `tensorboard_summaries` writes the values you
+name to it.
+
+```yaml
+    tensorboard: {serve: false}         # or a server: {host: 0.0.0.0, port: 6006}
+    tensorboard_summaries:
+      call_every: 50
+      scalars:
+        train/loss: loss
+        dino: dino_metrics
+        ema/momentum: ema_momentum
+      optimizer: true
+```
+
+and let the two DINO steps publish what they compute, in their entries from
+[step 4](#4-the-iteration):
+
+```yaml
+    dino_distillation_loss:
+      metrics_key: dino_metrics         # teacher_temp, center_norm, teacher_entropy
+      # ... the keys from step 4
+    ema_update:
+      momentum_key: ema_momentum
+      # ... the keys from step 4
+```
+
+The summaries hook reads `loss`, `dino_metrics` and `ema_momentum` the way a
+step reads its inputs, so a name no step writes is an error when the run
+starts. A mapping such as `dino_metrics` becomes one plot per entry
+(`dino/teacher_temp`, ...); `optimizer: true` adds the learning rate of each
+parameter group, the gradient norm, the loss and the steps taken. Only rank 0
+writes. The events are in `<session_dir>/Tensorboard_tensorboard/`; with
+`serve: false`, view them with `tensorboard --logdir <sessions_dir>`.
+
+What to look at:
+
+- `dino/teacher_entropy` -- the entropy of the targets. It should fall from
+  near `log(65536)` = 11.1 and settle well above 0. Stuck high means the
+  teacher outputs are uniform; falling to 0 means one prototype took over:
+  both are collapse.
+- `train/loss` -- falls quickly at first, then slowly; it is not comparable
+  across temperatures.
+- `dino/teacher_temp` and `ema/momentum` -- the schedules, as configured.
+
+## 7. Run it
 
 ```bash
 python train.py --config dino.yaml
@@ -368,13 +416,14 @@ two-rank DDP in a few seconds:
 
 ```text
 Iteration 1/3 | lr: 2.000e-06, 2.000e-06
-Iteration 2/3 | lr: 2.000e-03, 2.000e-03 | grad_norm: 4.279e+00
-Iteration 3/3 | lr: 1.000e-03, 1.000e-03 | grad_norm: 2.735e+00
+Iteration 2/3 | lr: 2.000e-03, 2.000e-03 | grad_norm: 4.279e+00 | loss: 1.0873e+01
+Iteration 3/3 | lr: 1.000e-03, 1.000e-03 | grad_norm: 2.735e+00 | loss: 1.0841e+01
 ```
 
-(Two learning rates: the two parameter groups.)
+Two learning rates: the two parameter groups. A line is printed before its
+iteration, so its gradient norm and loss are the previous iteration's.
 
-## 7. Resume and extend
+## 8. Resume and extend
 
 A checkpoint holds the student, the teacher, the centre, the optimizer, and
 the length of every schedule, so a resumed run continues exactly:
@@ -388,7 +437,7 @@ To train longer than planned, extend the session
 momentum and temperature schedules keep the length they were built for and
 hold their final values past it, rather than stretching or restarting.
 
-## 8. Use what it learned: a linear probe
+## 9. Use what it learned: a linear probe
 
 DINO is judged by how well a linear classifier on the frozen teacher's
 class token does. Import the teacher's ViT from the run, freeze it, and
@@ -542,8 +591,10 @@ sessions:
       num_student_views: 10
       num_teacher_views: 2
       teacher_temp: {start: 0.04, end: 0.07, kind: linear, steps: 37530}
+      metrics_key: dino_metrics
     ema_update:
       momentum: {start: 0.996, end: 1.0, kind: cosine}
+      momentum_key: ema_momentum
 
     optimizer:
       optimizer: {name: AdamW, kwargs: {lr: 0.002, weight_decay: 0.04}}
@@ -561,6 +612,14 @@ sessions:
 
     logger: {log_every: 50}
     checkpointer: {checkpoint_every: 1251}
+    tensorboard: {serve: false}
+    tensorboard_summaries:
+      call_every: 50
+      scalars:
+        train/loss: loss
+        dino: dino_metrics
+        ema/momentum: ema_momentum
+      optimizer: true
 ```
 
 ---

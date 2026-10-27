@@ -38,7 +38,10 @@ want to configure one. Every post-iteration hook -- `checkpointer`, `logger`,
 `optimizer.completed_steps` counts the optimizer steps actually taken in the
 run -- a step `fp16` skipped because its gradients overflowed is not one --
 and is checkpointed; `optimizer.stepped` says whether this iteration's
-`optimizer_step` changed the weights. Anything scheduled over training
+`optimizer_step` changed the weights, and `optimizer.last_loss` is the loss
+`backward` last received (read as a number only when asked, so keeping it
+costs nothing per iteration); the `logger` prints it. Anything scheduled
+over training
 (the [EMA teacher](self-supervised.md#ema_update), DINO's teacher
 temperature) follows them, as the lr schedule does. A checkpoint written
 before the count existed restores it from the optimizer's own state when it

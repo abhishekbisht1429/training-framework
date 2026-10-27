@@ -89,3 +89,40 @@ def test_self_supervised_training_on_two_ranks(tmp_path, monkeypatch, recipe):
             for name in initial
             if name.startswith(side) and initial[name].is_floating_point()
         ), f"the {side[:-1]} did not train"
+
+
+def test_tensorboard_summaries_are_written_once_on_two_ranks(tmp_path, monkeypatch):
+    from tensorboard.backend.event_processing.event_accumulator import (
+        EventAccumulator,
+    )
+
+    components = _components()
+    config = components.dino_config(
+        tmp_path / "sessions", max_iterations=ITERATIONS, world_size=2,
+    )
+    del config["ddp"]["master_port"]
+    config["dino_distillation_loss"]["metrics_key"] = "dino_metrics"
+    config["tensorboard"] = {"serve": False}
+    config["tensorboard_summaries"] = {
+        "scalars": {"train/loss": "loss", "dino": "dino_metrics"},
+        "optimizer": True,
+    }
+    config_path = tmp_path / "ssl.yaml"
+    config_path.write_text(yaml.safe_dump({"sessions": [config]}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "training-framework", "--config", str(config_path),
+        "--heartbeat-timeout", "60", "--process_timeout_on_join", "10",
+    ])
+    with TrainingEngine(Configurator()) as engine:
+        engine.start_session()
+
+    writers = list((tmp_path / "sessions").glob("*/*_tensorboard"))
+    assert len(writers) == 1
+    event_files = list(writers[0].glob("events.out.tfevents.*"))
+    assert len(event_files) == 1
+    events = EventAccumulator(str(writers[0]))
+    events.Reload()
+    losses = events.Scalars("train/loss")
+    assert [event.step for event in losses] == [1, 2, 3]
+    assert all(torch.isfinite(torch.tensor(event.value)) for event in losses)
+    assert "dino/teacher_entropy" in events.Tags()["scalars"]

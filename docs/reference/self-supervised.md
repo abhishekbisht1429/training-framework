@@ -350,6 +350,7 @@ a part path that does not exist.
 | Key | Default | Meaning |
 |---|---|---|
 | `momentum` | `{start: 0.996, end: 1.0, kind: cosine}` | A [schedule](#schedules) in [0, 1] |
+| `momentum_key` | none | Also write the momentum in effect (the last update's) under this key, every iteration |
 
 Requires `model` and `optimizer`, and runs after `optimizer_step`, only
 when that step changed the weights (`optimizer.stepped`): not inside a
@@ -369,6 +370,7 @@ anything else is an error on the first update.
 | `teacher_temp` | `0.04` | Teacher temperature, a [schedule](#schedules) |
 | `center_momentum` | `0.9` | Momentum of the centre's moving average |
 | `student_key`, `teacher_key`, `loss_key` | `student`, `teacher`, `loss` | The context keys it reads and writes |
+| `metrics_key` | none | Also write, under this key, `{teacher_temp, center_norm, teacher_entropy}` for [`tensorboard_summaries`](builtin-components.md#tensorboard_summaries) |
 
 The loss is the cross-entropy between the centred, sharpened teacher
 distribution of each teacher view and the student's distribution of each
@@ -377,6 +379,11 @@ are checked against every batch, never inferred. After the loss, the centre
 moves toward the batch mean of the teacher output -- the mean over every
 rank's batch when `torch.distributed` is initialized. The centre and the
 schedule's length are the step's state, so they are checkpointed.
+
+`teacher_entropy` (with `metrics_key`) is the mean entropy of the teacher's
+centred, sharpened distributions -- the targets. It is the usual signal of
+collapse: near 0, one prototype dominates; near `log(out_dim)`, the targets
+are uniform.
 
 ## `byol_loss`
 

@@ -15,7 +15,7 @@ which registers all built-ins. Their classes are also importable from
 
 | Name | Kind | Purpose and dependencies |
 |---|---|---|
-| `logger` | Hook | Prints `Iteration <current>/<maximum>`, followed by ` \| lr: <lr>` (one value per param group) when `optimizer` is active and ` \| grad_norm: <norm>` once one has been measured; enabled by default |
+| `logger` | Hook | Prints `Iteration <current>/<maximum>`, followed by ` \| lr: <lr>` (one value per param group) when `optimizer` is active, ` \| grad_norm: <norm>` once one has been measured, and ` \| loss: <loss>` once `backward` has run; enabled by default. Printed before each iteration, so the gradient norm and loss are the previous iteration's |
 | `checkpointer` | Hook | Saves complete session checkpoints; enabled by default |
 | `ddp` | Resource | Initializes distributed execution and wraps the required `model` resource |
 | `data_manager` | Stateful resource | Creates a resumable distributed `DataLoader`; requires `dataset` and `ddp` (analysis sessions use a [separate implementation](#analysis-data_manager)) |
@@ -38,6 +38,7 @@ which registers all built-ins. Their classes are also importable from
 | `dino_distillation_loss` | Stateful step | DINO's loss over student and teacher views, with its centre; [self-supervised](self-supervised.md#dino_distillation_loss) |
 | `timer` | Lifecycle hook | Reports iteration and elapsed durations |
 | `tensorboard` | Resource | Exposes a `SummaryWriter`; starts a TensorBoard server unless `serve: false` |
+| `tensorboard_summaries` | Hook | Writes chosen iteration values (and optimizer values) to the `tensorboard` writer; rank 0 only; see [`tensorboard_summaries`](#tensorboard_summaries) |
 | `model_diagram` | Session hook | Draws the `model`'s data flow (from its first forward call), and the component wiring of the model and of the whole session, into the session dir; rank 0; [below](#model_diagram); also in analysis sessions |
 | `profiler` | Lifecycle hook | Records `torch.profiler` traces and operator summaries of chosen iterations, on chosen ranks; `activities` is required; [Profiler](profiler.md); also in analysis sessions |
 
@@ -228,6 +229,37 @@ not adjusted automatically. Teardown
 closes the writer and terminates the external process.
 If setup fails after creating either handle, rollback closes the writer when
 present and terminates the partially started process.
+
+### `tensorboard_summaries`
+
+Writes summaries of the run to the [`tensorboard`](#tensorboard) resource's
+writer, after each iteration's steps, at `session.iteration`:
+
+```yaml
+tensorboard: {serve: false}
+tensorboard_summaries:
+  call_every: 10
+  scalars:                        # TensorBoard tag -> iteration_context key
+    train/loss: loss
+    dino: dino_metrics            # a mapping: one tag per entry (dino/<name>)
+  optimizer: true
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `call_every` | `1` | Write on the first iteration, every `call_every`-th, and the last |
+| `scalars` | `{}` | Tag -> iteration key. The value is a number, a one-element tensor, or a mapping of them (one tag per entry, `<tag>/<name>`) |
+| `optimizer` | `false` | Also write the optimizer's `optimizer/lr/group_<i>`, `optimizer/grad_norm`, `optimizer/last_loss` and `optimizer/completed_steps` |
+
+The values are read from the iteration context the way a step reads its
+inputs, so a key no step writes is an error when the session is built, not
+an empty plot. A value that is not a scalar is an error naming its tag. A
+configuration that writes nothing (no `scalars`, `optimizer: false`) is an
+error. It runs on rank 0 only, like `tensorboard`, so a distributed run
+writes one set of events.
+
+Summaries are grouped by kind (`scalars`, and `optimizer`) so that other
+kinds -- images, histograms -- can be added as their own sections.
 
 ### `model_diagram`
 

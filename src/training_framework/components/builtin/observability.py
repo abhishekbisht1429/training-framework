@@ -6,7 +6,10 @@ import sys
 import time
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, override
+
+import torch
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -16,12 +19,32 @@ from training_framework.components import (
     Resource,
     hook,
     rank_zero_only,
+    requires_resource,
     resource,
 )
 from training_framework.util import format_execution_time
 
 if TYPE_CHECKING:
     from training_framework.session import Session, TrainingSession
+
+
+def reported(session: Session, attribute: str) -> Any:
+    """The first non-None `attribute` any hook or resource exposes.
+
+    Duck-typed so the value is found whatever the component is called or
+    bound as -- `current_lrs`, `grad_norm`, `last_loss` and
+    `completed_steps` come from the optimizer resource, and a hook may
+    expose them too.
+    """
+    for listing in ("get_all_hooks", "get_all_resources"):
+        get_all = getattr(session, listing, None)
+        if get_all is None:
+            continue
+        for component in get_all():
+            value = getattr(component, attribute, None)
+            if value is not None:
+                return value
+    return None
 
 
 @rank_zero_only
@@ -70,25 +93,14 @@ class Logger(LifecycleHook, ExtendableComponent):
         grad_norm = self._reported(session, "grad_norm")
         if grad_norm is not None:
             line += f" | grad_norm: {grad_norm:.3e}"
+        loss = self._reported(session, "last_loss")
+        if loss is not None:
+            line += f" | loss: {loss:.4e}"
         self.print(line)
 
     @staticmethod
     def _reported(session: Session, attribute: str) -> Any:
-        """The first non-None `attribute` any hook or resource exposes.
-
-        Duck-typed so the value is found whatever the component is called or
-        bound as -- `current_lrs` and `grad_norm` come from the optimizer
-        resource, and a hook may expose them too.
-        """
-        for listing in ("get_all_hooks", "get_all_resources"):
-            get_all = getattr(session, listing, None)
-            if get_all is None:
-                continue
-            for component in get_all():
-                value = getattr(component, attribute, None)
-                if value is not None:
-                    return value
-        return None
+        return reported(session, attribute)
 
     def post_iteration_callback(self, session: Session) -> None:
         pass
@@ -193,6 +205,142 @@ class Tensorboard(Resource):
             self._tb_process = None
             if process is not None and process.poll() is None:
                 process.terminate()
+
+
+# -- tensorboard_summaries ------------------------------------------------------
+
+
+@dataclass
+class TensorboardSummariesConfig:
+    """What is written, by kind of summary.
+
+    `scalars` maps a TensorBoard tag to the iteration_context key whose
+    value is written under it. `optimizer` adds the optimizer's learning
+    rates (one tag per group), gradient norm, loss and completed steps.
+    """
+
+    call_every: int = 1
+    scalars: Any = field(default_factory=dict)
+    optimizer: bool = False
+
+    def __post_init__(self):
+        if (
+                isinstance(self.call_every, bool)
+                or not isinstance(self.call_every, int)
+                or self.call_every <= 0
+        ):
+            raise ValueError(
+                f"call_every must be a positive integer; got {self.call_every!r}"
+            )
+        if not isinstance(self.scalars, Mapping):
+            raise ValueError(
+                "scalars must be a mapping of TensorBoard tag to "
+                f"iteration_context key; got {self.scalars!r}"
+            )
+        for tag, key in self.scalars.items():
+            for name, value in (("tag", tag), ("key", key)):
+                if not isinstance(value, str) or not value:
+                    raise ValueError(
+                        f"scalars maps non-empty tags to non-empty keys; got "
+                        f"{name} {value!r}"
+                    )
+        self.scalars = dict(self.scalars)
+        if not isinstance(self.optimizer, bool):
+            raise ValueError(
+                f"optimizer must be true or false; got {self.optimizer!r}"
+            )
+        if not self.scalars and not self.optimizer:
+            raise ValueError(
+                "tensorboard_summaries writes nothing: give scalars, or set "
+                "optimizer: true"
+            )
+
+
+def _scalars(tag: str, value: Any) -> list[tuple[str, float]]:
+    """`value` as (tag, number) pairs: a number or one-element tensor under
+    `tag`, a mapping as one tag per entry (`tag/name`)."""
+    if isinstance(value, Mapping):
+        pairs = []
+        for name, item in value.items():
+            pairs.extend(_scalars(f"{tag}/{name}", item))
+        return pairs
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            raise TypeError(
+                f"tensorboard_summaries scalar {tag!r} is a tensor of shape "
+                f"{tuple(value.shape)}; a scalar needs one element"
+            )
+        return [(tag, float(value.detach()))]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return [(tag, float(value))]
+    raise TypeError(
+        f"tensorboard_summaries scalar {tag!r} is a {type(value).__name__}, "
+        "not a number, a one-element tensor or a mapping of them"
+    )
+
+
+@rank_zero_only
+@requires_resource("tensorboard")
+@hook("tensorboard_summaries")
+class TensorboardSummaries(LifecycleHook):
+    """Write summaries of the run to the `tensorboard` resource's writer.
+
+    Every `call_every` iterations, after the iteration's steps, each value
+    `scalars` names is written at `session.iteration`. The values are read
+    from the iteration context like any step's inputs, so a key no step
+    writes is an error when the session is built. With `optimizer: true`,
+    the optimizer's learning rates, gradient norm, loss and completed steps
+    are written too (`optimizer/...`). Written on rank 0 only.
+    """
+
+    config_schema = TensorboardSummariesConfig
+
+    def __init__(self, config: Mapping | None = None) -> None:
+        super().__init__(config)
+        self.call_every = self._cfg.call_every
+
+    @override
+    def context_reads(self) -> dict[str, str]:
+        # Keys need not be identifiers, so values arrive by key.
+        return {key: key for key in dict.fromkeys(self._cfg.scalars.values())}
+
+    def pre_session(self, session: Session) -> None:
+        pass
+
+    def post_session(self, session: Session) -> None:
+        writer = self.get_dependency("tensorboard").summary_writer
+        if writer is not None:
+            writer.flush()
+
+    def pre_iteration_callback(self, session: Session) -> None:
+        return None
+
+    def post_iteration_callback(self, session: Session, /, *args: Any, **reads: Any) -> None:
+        writer = self.get_dependency("tensorboard").summary_writer
+        if writer is None:
+            raise RuntimeError(
+                "tensorboard_summaries has no writer: the tensorboard resource "
+                "is not set up"
+            )
+        step = session.iteration
+        for tag, key in self._cfg.scalars.items():
+            for name, value in _scalars(tag, reads[key]):
+                writer.add_scalar(name, value, step)
+        if self._cfg.optimizer:
+            for name, value in self._optimizer_scalars(session):
+                writer.add_scalar(name, value, step)
+
+    @staticmethod
+    def _optimizer_scalars(session: Session) -> list[tuple[str, float]]:
+        values = []
+        lrs = reported(session, "current_lrs")
+        for index, lr in enumerate(lrs or ()):
+            values.append((f"optimizer/lr/group_{index}", float(lr)))
+        for attribute in ("grad_norm", "last_loss", "completed_steps"):
+            value = reported(session, attribute)
+            if value is not None:
+                values.append((f"optimizer/{attribute}", float(value)))
+        return values
 
 
 @rank_zero_only

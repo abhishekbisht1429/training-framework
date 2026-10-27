@@ -220,15 +220,25 @@ def _default_momentum() -> dict[str, Any]:
 @dataclass
 class EMAUpdateConfig:
     """`momentum` is a schedule (see `schedules`) over optimizer steps;
-    default cosine 0.996 -> 1.0 over the run, as DINO and BYOL use."""
+    default cosine 0.996 -> 1.0 over the run, as DINO and BYOL use.
+    `momentum_key` (default: none) also writes the momentum in effect --
+    the one the last update used -- under that key, every iteration."""
 
     momentum: Any = field(default_factory=_default_momentum)
+    momentum_key: Any = None
 
     def __post_init__(self):
         self.momentum = check_range(
             parse_schedule(self.momentum, "momentum"),
             "momentum", low=0.0, high=1.0,
         )
+        if self.momentum_key is not None and (
+                not isinstance(self.momentum_key, str) or not self.momentum_key
+        ):
+            raise ValueError(
+                "momentum_key must be a non-empty iteration_context key; got "
+                f"{self.momentum_key!r}"
+            )
 
 
 @requires_resource("model")
@@ -255,12 +265,28 @@ class EMAUpdate(StatefulStep):
         self.last_momentum: float | None = None
 
     @override
-    def run(self, session: Session, /, *args: Any, **reads: Any) -> None:
+    def context_writes(self) -> dict[str, str]:
+        key = self._cfg.momentum_key
+        return {"momentum": key} if key is not None else {}
+
+    @override
+    def run(self, session: Session, /, *args: Any, **reads: Any) -> Any:
         optimizer = self.get_dependency("optimizer")
-        if not optimizer.stepped:
-            # Inside an accumulation group, or fp16 skipped the step: the
-            # student did not change, so neither does the teacher.
+        if optimizer.stepped:
+            self._update(session, optimizer)
+        # Inside an accumulation group, or when fp16 skipped the step, the
+        # student did not change, so neither did the teacher.
+        if self._cfg.momentum_key is None:
             return None
+        if self._length is None:
+            self._length = self._schedule.length(
+                optimizer.optimizer_steps(session.session_config.max_iterations)
+            )
+        return torch.tensor(
+            self._schedule.value(optimizer.completed_steps - 1, self._length)
+        )
+
+    def _update(self, session: Session, optimizer: Any) -> None:
         model = self.get_dependency("model")
         update = getattr(model, "update_teacher", None)
         if not callable(update):
@@ -277,7 +303,6 @@ class EMAUpdate(StatefulStep):
         momentum = self._schedule.value(optimizer.completed_steps - 1, self._length)
         update(momentum)
         self.last_momentum = momentum
-        return None
 
     @override
     def get_state(self) -> dict[str, Any]:

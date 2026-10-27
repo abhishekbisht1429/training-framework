@@ -280,6 +280,9 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         self._no_sync = None
         self._processed: set[int] = set()
         self._grad_norm: float | None = None
+        # The loss backward last received, detached; read as a number only
+        # when asked (see last_loss), so recording it costs no device sync.
+        self._last_loss: torch.Tensor | None = None
         # The iteration begun, how many micro-batches its accumulation group
         # has and where it starts, and the last iteration whose backward
         # ran -- which tells a retried iteration from a fresh one.
@@ -1038,6 +1041,7 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
         right away, so every later step sees true gradients.
         """
         self.exit_autocast()
+        self._last_loss = loss.detach()
         # A norm is measured only when this iteration steps; until then
         # there is none for it.
         self._grad_norm = None
@@ -1155,6 +1159,14 @@ class OptimizerResource(StatefulResource, ExtendableComponent):
     def grad_norm(self) -> float | None:
         """The last gradient norm measured, before clipping; None if none."""
         return self._grad_norm
+
+    @property
+    def last_loss(self) -> float | None:
+        """The loss `backward` last backpropagated, as given to it (before
+        accumulation averaging and fp16 scaling); None before the first."""
+        if self._last_loss is None:
+            return None
+        return float(self._last_loss)
 
     @property
     def current_lrs(self) -> list[float] | None:

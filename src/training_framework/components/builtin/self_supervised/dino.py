@@ -57,6 +57,11 @@ class DINOLossConfig:
     `teacher_temp` is a schedule (see `schedules`); DINO warms it up
     linearly, e.g. `{start: 0.04, end: 0.07, kind: linear, steps: <30
     epochs of steps>}`. `center_momentum` is the centre's EMA momentum.
+
+    `metrics_key` (default: none) also writes, under that key, a mapping of
+    `teacher_temp`, `center_norm` and `teacher_entropy` (the mean entropy
+    of the teacher's target distributions: near 0 or near log(out_dim)
+    means collapse) -- for `tensorboard_summaries` to plot.
     """
 
     out_dim: int
@@ -68,6 +73,7 @@ class DINOLossConfig:
     student_key: str = "student"
     teacher_key: str = "teacher"
     loss_key: str = "loss"
+    metrics_key: Any = None
 
     def __post_init__(self):
         self.out_dim = _positive_int(self.out_dim, "out_dim")
@@ -95,6 +101,8 @@ class DINOLossConfig:
         )
         for name in ("student_key", "teacher_key", "loss_key"):
             setattr(self, name, _key(getattr(self, name), name))
+        if self.metrics_key is not None:
+            self.metrics_key = _key(self.metrics_key, "metrics_key")
 
 
 @requires_resource("optimizer")
@@ -126,7 +134,10 @@ class DINOLoss(StatefulStep):
 
     @override
     def context_writes(self) -> dict[str, str]:
-        return {"loss": self._cfg.loss_key}
+        writes = {"loss": self._cfg.loss_key}
+        if self._cfg.metrics_key is not None:
+            writes["metrics"] = self._cfg.metrics_key
+        return writes
 
     @override
     def run(
@@ -180,8 +191,30 @@ class DINOLoss(StatefulStep):
             student_temp=cfg.student_temp,
             teacher_temp=teacher_temp,
         )
+        entropy = (
+            self._teacher_entropy(teacher, teacher_temp)
+            if cfg.metrics_key is not None else None
+        )
         self._update_center(teacher)
-        return loss
+        if cfg.metrics_key is None:
+            return loss
+        return {
+            "loss": loss,
+            "metrics": {
+                "teacher_temp": teacher_temp,
+                "center_norm": self._center.norm(),
+                "teacher_entropy": entropy,
+            },
+        }
+
+    @torch.no_grad()
+    def _teacher_entropy(self, teacher: torch.Tensor, teacher_temp: float) -> torch.Tensor:
+        """Mean entropy of the centred, sharpened teacher distributions --
+        the targets this iteration's loss used."""
+        log_probs = torch.log_softmax(
+            (teacher.detach().float() - self._center) / teacher_temp, dim=-1,
+        )
+        return -(log_probs.exp() * log_probs).sum(dim=-1).mean()
 
     @torch.no_grad()
     def _update_center(self, teacher: torch.Tensor) -> None:

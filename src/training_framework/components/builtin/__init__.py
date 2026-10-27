@@ -27,6 +27,7 @@ from training_framework.components.builtin.model import TrainedModel
 from training_framework.components.builtin.observability import (
     Logger,
     Tensorboard,
+    TensorboardSummaries,
     Timer,
 )
 from training_framework.components.builtin.optimization import (
@@ -86,6 +87,7 @@ __all__ = [
     "Profiler",
     "ProjectionHead",
     "Tensorboard",
+    "TensorboardSummaries",
     "Timer",
     "TrainedModel",
 ]
