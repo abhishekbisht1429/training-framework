@@ -37,6 +37,9 @@ A task-ordered path. It picks up where the
 10. [Setting up a project for HPC batches](guide/10-hpc-projects.md) — code
     modes, generating the pinned requirements, and projects that depend on
     training-framework.
+11. [Self-supervised training with DINO](guide/11-self-supervised-dino.md) —
+    a ViT-S/16 DINO run built part by part, checked on a small scale,
+    resumed, and evaluated with a linear probe; what changes for BYOL.
 
 ## Look it up
 

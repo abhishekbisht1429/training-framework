@@ -3,7 +3,10 @@
 [← Docs](../README.md) · [Built-in components](builtin-components.md)
 
 DINO and BYOL are built from generic parts, with any backbone; here it is
-[`patch_transformer`](transformer-blocks.md). Each part is useful on its own:
+[`patch_transformer`](transformer-blocks.md). For a walkthrough that builds
+a DINO run step by step, see the
+[DINO guide](../guide/11-self-supervised-dino.md). Each part is useful on
+its own:
 
 | Component | Kind | Does |
 |---|---|---|
