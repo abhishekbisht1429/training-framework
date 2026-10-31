@@ -57,6 +57,38 @@ The stop-sync grace period must be a finite non-negative value. The poll
 interval must be finite and greater than zero. These are process-runtime
 settings and are not written into session configuration or checkpoints.
 
+## Run summaries
+
+`summarize` is a separate program, not a flag of your training entry point:
+it reads finished (or running) runs and compares them. See
+[Comparing runs](../guide/12-comparing-runs.md) for what the report holds.
+
+```bash
+python -m training_framework.reporting summarize ROOT [ROOT ...] [options]
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `ROOT` | (required) | A directory to look for runs (`session_*` directories) in: a `sessions_dir`, a directory above several, one session directory, an HPC batch, or `hpc-results/<batch-id>` |
+| `--metric TAG[:min\|:max]` | every tag, last only | A scalar tag to report; with a direction its best value too (repeatable) |
+| `--tags GLOB` | | Also report every tag matching `GLOB`, last value only (repeatable) |
+| `--last-n N` | | Also report the mean of each tag's last `N` points |
+| `--sort TAG` | run id | Order groups and runs by the best value of this `--metric` (it needs a direction) |
+| `--include GLOB` / `--exclude GLOB` | | Choose runs by id (repeatable) |
+| `--seed-key KEY` | `session_config.rng_seed` | A seed: a config path, or `component:path` inside that component's entry wherever it is listed; replaces the default (repeatable) |
+| `--no-seed-groups` | | Report runs only, without grouping over seeds |
+| `--ignore-key PATH` | | A config path not to compare, added to the defaults `session_config.sessions_dir`, `ddp.master_addr`, `ddp.master_port`, `resources.ddp.master_addr`, `resources.ddp.master_port` (repeatable) |
+| `--no-default-ignores` | | Compare the default ignored keys too |
+| `--format markdown\|csv\|json` | `markdown` | Output format |
+| `--table groups\|runs` | `groups` (`runs` with `--no-seed-groups`) | With `--format csv`: which table |
+| `--output PATH`, `-o PATH` | standard output | Where to write the report; never inside a run directory |
+| `--strict` | | Exit with status 1 when the report lists problems |
+
+Exit status: `0` the report was written; `1` it was written, has problems,
+and `--strict` was given; `2` no report could be made (no runs, a tag no run
+writes, an unknown seed key, conflicting options), with the reason on
+standard error.
+
 ---
 
 **See also:** [Architecture and process model](../concepts/architecture.md)

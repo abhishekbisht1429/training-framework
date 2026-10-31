@@ -40,6 +40,9 @@ A task-ordered path. It picks up where the
 11. [Self-supervised training with DINO](guide/11-self-supervised-dino.md) —
     a ViT-S/16 DINO run built part by part, checked on a small scale,
     resumed, and evaluated with a linear probe; what changes for BYOL.
+12. [Comparing runs](guide/12-comparing-runs.md) — one report over a sweep's
+    runs, local or HPC: the hyperparameters that differ, each metric, and
+    runs that differ only in their seed as mean ± std.
 
 ## Look it up
 
@@ -70,7 +73,8 @@ A task-ordered path. It picks up where the
   `DistributedInfiniteSampler`.
 - [Profiler](reference/profiler.md) — `profiler`: `torch.profiler` traces
   of chosen iterations and ranks, and what they show.
-- [CLI reference](reference/cli.md) — every command-line flag.
+- [CLI reference](reference/cli.md) — every command-line flag, and the
+  `summarize` command for comparing runs.
 - [API summary](reference/api.md) — public imports and type members.
 
 ## Understand it

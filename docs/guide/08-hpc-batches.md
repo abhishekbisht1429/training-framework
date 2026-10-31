@@ -594,6 +594,15 @@ the cluster; `fetched.json` maps the batch to its local directory. Resuming a
 fetched checkpoint locally with `--resume-session` is not supported: the
 checkpoint's session would write to its cluster session directory.
 
+To compare the fetched tasks, their matrix values and TensorBoard scalars,
+with runs that differ only in their seed grouped into mean ± std:
+
+```bash
+python -m training_framework.reporting summarize hpc-results/<batch-id> --metric train/loss:min
+```
+
+See [Comparing runs](12-comparing-runs.md).
+
 ## Limitations
 
 Single-node tasks only; Slurm only; no cancel command yet (use `scancel`); resuming cannot change the config or the

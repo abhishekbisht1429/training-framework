@@ -55,6 +55,18 @@ every multi-process launch.
 `FineTunedModel`). They are configured by name in YAML; only
 `GradientProcessor` is meant to be subclassed.
 
+`training_framework.reporting` compares finished runs (see
+[Comparing runs](../guide/12-comparing-runs.md)): `discover_runs(*roots,
+include=(), exclude=())` returns a `Discovery` (`roots`, `runs`: `RunRecord`s,
+`problems`); `summarize_runs(discovery, metrics=(), *, tags=(), last_n=None,
+group_by_seed=True, seed_keys=DEFAULT_SEED_KEYS,
+ignored_keys=DEFAULT_IGNORED_KEYS, sort=None)` returns a `Summary`
+(`columns`, `runs`: `RunSummary`s with `metrics`: `MetricSummary`s,
+`groups`: `GroupSummary`s with `stats[(tag, field)]`: `Stats`, `shared`,
+`unknown_config_runs`, `problems`); `render_markdown`, `render_csv(summary, table=...)` and
+`render_json` write it. A metric is a `Metric(tag, direction=None)` or the
+text `"tag[:min|:max]"`. Options that cannot be met raise `ReportError`.
+
 `training_framework.functions` holds the small functions `compute` finds by
 name: `weighted_sum(*, weights=None, **terms)`; see
 [`training_framework.functions`](generic-steps.md#training_frameworkfunctions).
