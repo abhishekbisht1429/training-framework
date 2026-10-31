@@ -350,7 +350,7 @@ a part path that does not exist.
 | Key | Default | Meaning |
 |---|---|---|
 | `momentum` | `{start: 0.996, end: 1.0, kind: cosine}` | A [schedule](#schedules) in [0, 1] |
-| `momentum_key` | none | Also write the momentum in effect (the last update's) under this key, every iteration |
+| `momentum_key` | none | Also write the momentum under this key, every iteration: the latest teacher update's, or, before the first update (the first accumulation group, or fp16 skipping the first steps), the one the first update will use |
 
 Requires `model` and `optimizer`, and runs after `optimizer_step`, only
 when that step changed the weights (`optimizer.stepped`): not inside a

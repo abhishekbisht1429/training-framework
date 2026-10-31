@@ -221,8 +221,10 @@ def _default_momentum() -> dict[str, Any]:
 class EMAUpdateConfig:
     """`momentum` is a schedule (see `schedules`) over optimizer steps;
     default cosine 0.996 -> 1.0 over the run, as DINO and BYOL use.
-    `momentum_key` (default: none) also writes the momentum in effect --
-    the one the last update used -- under that key, every iteration."""
+    `momentum_key` (default: none) also writes the momentum under that key,
+    every iteration: the one the latest teacher update used, or, before the
+    first update (inside the first accumulation group, or while fp16 skips
+    the first steps), the one the first update will use."""
 
     momentum: Any = field(default_factory=_default_momentum)
     momentum_key: Any = None
@@ -275,7 +277,9 @@ class EMAUpdate(StatefulStep):
         if optimizer.stepped:
             self._update(session, optimizer)
         # Inside an accumulation group, or when fp16 skipped the step, the
-        # student did not change, so neither did the teacher.
+        # student did not change, so neither did the teacher. Before the
+        # first update, `completed_steps - 1` is -1 and the schedule gives
+        # its start: the momentum the first update will use.
         if self._cfg.momentum_key is None:
             return None
         if self._length is None:
