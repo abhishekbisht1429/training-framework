@@ -62,7 +62,9 @@ def test_the_run_writes_its_loss_metrics_and_optimizer_values(tmp_path):
     assert [v for _, v in events["dino/teacher_temp"]] == pytest.approx([0.04, 0.055, 0.07])
     assert [v for _, v in events["ema/momentum"]] == pytest.approx([0.9, 0.9 + 0.1 / 3, 0.9 + 0.2 / 3])
     assert [v for _, v in events["optimizer/completed_steps"]] == [1, 2, 3]
-    assert events["optimizer/last_loss"] == pytest.approx(events["train/loss"])
+    last_losses, losses = events["optimizer/last_loss"], events["train/loss"]
+    assert [step for step, _ in last_losses] == [step for step, _ in losses]
+    assert [v for _, v in last_losses] == pytest.approx([v for _, v in losses])
     entropies = [v for _, v in events["dino/teacher_entropy"]]
     assert all(0 < v < torch.log(torch.tensor(32.0)).item() for v in entropies)
     center = component_named(session, "dino_distillation_loss").center
