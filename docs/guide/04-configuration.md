@@ -127,6 +127,69 @@ see [role bindings](02-wiring-components.md#role-bindings).
 
 Every `sessions[]` entry is registered for the same engine run. Entries may use different registered session types; all resulting worker wrappers start together.
 
+## Sharing configuration between files
+
+A session entry can take part of its configuration from other files, with
+`includes`. Each included file is a *fragment*: a mapping shaped like (part
+of) a session entry, such as a model, an optimizer recipe, or data settings.
+
+<!-- docs-test: skip: the included files are not next to this page -->
+```yaml
+# configs/dino_small.yaml
+sessions:
+  - includes: [common/vit_s16.yaml, common/dino_optimizer.yaml]
+    session_config:
+      rng_seed: 0
+      sessions_dir: ./runs/dino
+      max_iterations: 1000
+      components_package: my_project.components
+    optimizer:
+      optimizer: {kwargs: {lr: 0.0005}}   # overrides the fragment's lr
+```
+
+```yaml
+# configs/common/dino_optimizer.yaml
+optimizer:
+  optimizer: {kind: adamw, kwargs: {lr: 0.001, weight_decay: 0.04}}
+clip_gradients: {max_norm: 3.0}
+```
+
+- Fragments are merged **in list order**, then the session entry itself on
+  top. Mappings merge key by key; **every other value, lists included, is
+  replaced whole**, so a fragment's `steps` order or freezing `rules` is
+  replaced, not appended to.
+- Paths are **relative to the file that names them**. A fragment may have
+  its own `includes`, merged under the fragment's own settings.
+- **Two fragments may not set one value differently**: that is an error
+  naming both files and the setting, so reordering or adding a fragment
+  can never change a setting without anyone noticing. Set it in one of
+  them, or override it in the file that includes them. An empty value
+  (`ddp:`) merges with a mapping, as everywhere.
+- A missing file, a fragment that is not a mapping, a fragment with
+  `sessions`, and includes that form a cycle are errors naming the chain
+  of files. `includes` belongs in a session entry, not at the top of the
+  file.
+- `--override` applies after the includes are merged.
+
+The run records one complete config: its `config.yaml` has every included
+setting and no `includes`. Next to it, `config_sources.yaml` lists the
+files it was built from, each with its SHA-256 and the file that included
+it. For HPC batches the includes are read from the batch's commit and must
+stay inside the repository; see
+[Running batches on an HPC cluster](08-hpc-batches.md).
+
+A Python program can load a file the same way:
+`training_framework.config_files.load_config(path).config`. A session given a
+mapping that still lists `includes` refuses it.
+
+### No `${...}` interpolation
+
+OmegaConf interpolation (`${common.lr}`, `${oc.env:USER}`) is refused when
+a config is loaded, from a file or an `--override`: values are never
+resolved, so it would reach the component as that literal text. Share
+settings with includes instead. Write `\${` for a value that must contain
+a literal `${`.
+
 ## New session
 
 ```bash

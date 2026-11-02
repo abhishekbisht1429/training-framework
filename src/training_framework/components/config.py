@@ -23,6 +23,8 @@ COMMON_RESERVED_CONFIG_NAMES = frozenset({
     *COMPONENT_GROUPS,
     "components",
     "import_components",
+    # Resolved when a config file is loaded (`training_framework.config_files`).
+    "includes",
     "session_config",
     "session_kwargs",
     "session_type",
@@ -46,6 +48,18 @@ def reserved_config_names(session_type: str | None = None) -> frozenset[str]:
         COMMON_RESERVED_CONFIG_NAMES
         | SESSION_RESERVED_CONFIG_NAMES.get(normalized_type, frozenset())
     )
+
+
+def reject_unresolved_includes(config: Mapping) -> None:
+    """`includes` name files, merged when a config file is loaded; a session
+    given a mapping that still has them was not loaded through that."""
+    if "includes" in config:
+        raise ValueError(
+            "The session config still lists 'includes' ("
+            f"{config['includes']!r}). Included files are merged when a config "
+            "file is loaded (--config, or training_framework.config_files."
+            "load_config); give the session the merged config."
+        )
 
 
 def reject_legacy_components_entry(config: Mapping) -> None:
@@ -121,6 +135,7 @@ def parse_session_config(
     when one is read back from a checkpoint, which cannot be changed.
     """
     reject_legacy_components_entry(config)
+    reject_unresolved_includes(config)
     reserved = reserved_config_names(session_type)
 
     global_bindings, legacy_wiring = _top_level_bindings(config, warn_legacy)

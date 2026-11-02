@@ -17,8 +17,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 import yaml
-from omegaconf import OmegaConf
 
+from training_framework.config_files import (
+    ConfigFileError,
+    RepositoryFiles,
+    check_no_interpolation,
+    load_config,
+)
 from training_framework.hpc import EXECUTION_PROTOCOL_VERSION
 from training_framework.hpc.config import address as addresses
 from training_framework.hpc.compile import data as data_module
@@ -305,14 +310,17 @@ def compile_plan(
 
 
 def _training_config(manifest, repository, sha, problems):
-    raw = repository.read(sha, manifest.training_config)
-    if raw is None:
+    if repository.read(sha, manifest.training_config) is None:
         problems.add(f"training.config '{manifest.training_config}' does not exist at {sha[:12]}")
         return {}, {}
+    # Includes are read at the same commit: the commit is the whole config.
     try:
-        config = OmegaConf.to_container(OmegaConf.create(raw.decode()))
-    except Exception as error:  # OmegaConf raises several error types
-        problems.add(f"training.config '{manifest.training_config}' cannot be read ({error})")
+        config = load_config(
+            manifest.training_config,
+            reader=RepositoryFiles(lambda path: repository.read(sha, path)),
+        ).config
+    except ConfigFileError as error:
+        problems.add(f"training.config at {sha[:12]}: {error}")
         return {}, {}
     sessions = config.get("sessions") if isinstance(config, dict) else None
     if not isinstance(sessions, list) or not sessions:
@@ -529,6 +537,11 @@ def _expand(manifest, base_session, dialect, problems):
                     except ValueError as error:
                         problems.add(f"{e_where}: {error}")
                     variant.append({"address": target.as_json(), "value": value})
+                try:
+                    # Overrides and matrix values can bring one in too.
+                    check_no_interpolation(task_session, f"{group.name}/{experiment.name}/{number:03d}")
+                except ConfigFileError as error:
+                    problems.add(str(error))
                 for problem in check_topology(task_session, group.resources):
                     problems.add(f"{group.name}/{experiment.name}/{number:03d}: {problem}")
                 tasks.append((group, experiment, number, array_index, task_session, variant))

@@ -16,7 +16,7 @@ type selection and constructor-specific arguments belong to each
 
 | Argument | Operation | Notes |
 |---|---|---|
-| `--config PATH` | Start new sessions from a YAML file | Overrides are addressed with a `sessions[i].` prefix; see [Configuration](../guide/04-configuration.md#omegaconf-overrides) |
+| `--config PATH` | Start new sessions from a YAML file | Its session entries may [include other files](../guide/04-configuration.md#sharing-configuration-between-files); overrides are addressed with a `sessions[i].` prefix and applied after the includes; see [Configuration](../guide/04-configuration.md#omegaconf-overrides) |
 | `--resume-session PATH` | Continue a checkpoint unchanged | Accepts only the three launch-topology overrides; see [Resume](../guide/05-checkpoints-and-resume.md#resume) |
 | `--extend-session PATH` | Continue a checkpoint with changed, extension-safe settings | Overrides are session-relative, without a `sessions[0]` prefix; see [Extend](../guide/05-checkpoints-and-resume.md#extend) |
 

@@ -159,7 +159,7 @@ Used only for managed environments (no `env.existing`).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `config` | | Repository path of the training config (the usual `sessions:` file). Required. |
+| `config` | | Repository path of the training config (the usual `sessions:` file). Required. Its [includes](../guide/04-configuration.md#sharing-configuration-between-files) are read at the batch's commit, by paths that stay inside the repository; each task's rendered config has them merged. |
 | `session` | `0` | Index of the session in `sessions` that the tasks run. |
 | `engine_options` | `[]` | Engine command-line options passed to every task. Only `--heartbeat-timeout`, `--stop-sync-grace-period`, `--stop-sync-poll-interval`, and `--process_timeout_on_join` are accepted; config changes belong in overrides. |
 
@@ -251,8 +251,10 @@ profile.
 | `overrides` | no | List of `{component?, path, value}`: values set for every task of the experiment. |
 | `matrix` | no | List of `{component?, path, values}`: one task per combination of the values; the last entry varies fastest. Without a matrix the experiment is one task. |
 
-Each task's config is: the training config, then the experiment's
-`overrides`, then its combination of matrix values.
+Each task's config is: the training config (with its includes merged),
+then the experiment's `overrides`, then its combination of matrix values.
+A `${...}` interpolation brought in by an override or matrix value is
+refused, as in the training config itself.
 
 ### Addresses
 

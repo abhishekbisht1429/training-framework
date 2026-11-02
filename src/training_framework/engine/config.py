@@ -6,6 +6,12 @@ from copy import deepcopy
 
 from omegaconf import OmegaConf
 
+from training_framework.config_files import (
+    ConfigFileError,
+    check_no_interpolation,
+    load_config,
+    unescape,
+)
 from training_framework.components.config import (
     parse_session_config,
     reject_legacy_components_entry,
@@ -89,6 +95,7 @@ class Configurator:
         self._args = self._parser.parse_args()
 
         self._session_configs = None
+        self._config_sources = None
         self._checkpoint_path = None
         self._new_max_iters = None
         self._extension_overrides = None
@@ -97,10 +104,21 @@ class Configurator:
 
         if self._args.config:
             self._mode = "new"
-            config = OmegaConf.load(self._args.config)
+            try:
+                loaded = load_config(self._args.config)
+            except ConfigFileError as error:
+                self._parser.error(str(error))
+            config = OmegaConf.create(loaded.config)
             if self._args.override is not None:
                 config.merge_with_dotlist(self._args.override)
-            self._session_configs = OmegaConf.to_container(config)["sessions"]
+            merged = OmegaConf.to_container(config)
+            try:
+                # Again after the overrides, which can bring one in too.
+                check_no_interpolation(merged, f"{self._args.config} with --override")
+            except ConfigFileError as error:
+                self._parser.error(str(error))
+            self._session_configs = unescape(merged)["sessions"]
+            self._config_sources = loaded.sources
         elif self._args.extend_session:
             self._mode = "extend"
             values = self._args.extend_session
@@ -144,6 +162,10 @@ class Configurator:
                 self._parser.error(
                     "--extend-session requires at least one --override"
                 )
+            try:
+                check_no_interpolation(overrides, "--override")
+            except ConfigFileError as error:
+                self._parser.error(str(error))
             self._extension_overrides = tuple(overrides)
         elif self._args.resume_session:
             self._mode = "resume"
@@ -217,6 +239,14 @@ class Configurator:
         for session_config in self._session_configs:
             reject_legacy_components_entry(session_config)
         return deepcopy(self._session_configs)
+
+    @property
+    def config_sources(self):
+        """Per session, the files its config was built from
+        (`ConfigSource`s: the `--config` file, then the files it includes)."""
+        if self._config_sources is None:
+            raise KeyError("Cannot use this property in the current operation!")
+        return list(self._config_sources)
 
     @property
     def checkpoint_path(self):

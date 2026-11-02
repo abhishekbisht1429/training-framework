@@ -55,6 +55,15 @@ every multi-process launch.
 `FineTunedModel`). They are configured by name in YAML; only
 `GradientProcessor` is meant to be subclassed.
 
+`training_framework.config_files` loads a configuration file the way
+`--config` does: `load_config(path, *, reader=None)` returns a
+`LoadedConfig` (`config`, with every session's `includes` merged, and
+`sources`: per session, the `ConfigSource`s `path`, `sha256`,
+`included_by`); `LocalFiles` (default) and `RepositoryFiles(read)` are the
+readers; problems raise `ConfigFileError`. `check_no_interpolation` and
+`unescape` are the `${` rules; see
+[Sharing configuration between files](../guide/04-configuration.md#sharing-configuration-between-files).
+
 `training_framework.reporting` compares finished runs (see
 [Comparing runs](../guide/12-comparing-runs.md)): `discover_runs(*roots,
 include=(), exclude=())` returns a `Discovery` (`roots`, `runs`: `RunRecord`s,

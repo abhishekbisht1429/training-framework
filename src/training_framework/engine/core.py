@@ -1,8 +1,9 @@
 import collections
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 
 from training_framework.components.builtin import Checkpointer
+from training_framework.config_files import ConfigSource, write_config_sources
 from training_framework.components.config import (
     component_entry,
     find_component_entry,
@@ -177,7 +178,10 @@ class TrainingEngine:
             *,
             session_type: str = TRAINING_SESSION_TYPE,
             session_kwargs: Mapping | None = None,
+            config_sources: Sequence[ConfigSource] | None = None,
     ) -> None:
+        """`config_sources`, when given, are written to the run directory
+        as `config_sources.yaml`: the files the config was built from."""
         if not isinstance(config, collections.abc.Mapping):
             raise TypeError(
                 f"config must be a mapping, got {type(config).__name__}"
@@ -242,6 +246,8 @@ class TrainingEngine:
         if hosted is not None:
             self._rendezvous.append(hosted)
         self._session_process_wrappers.extend(wrappers)
+        if config_sources:
+            write_config_sources(sessions[0].session_config.session_dir, config_sources)
 
     @staticmethod
     def _split_session_definition(
@@ -328,7 +334,8 @@ class TrainingEngine:
 
     def _register_configured_sessions(self) -> None:
         if self._configurator.mode == "new":
-            for definition in self._configurator.session_configs:
+            sources = self._configured_sources()
+            for index, definition in enumerate(self._configurator.session_configs):
                 config, session_type, session_kwargs = (
                     self._split_session_definition(definition)
                 )
@@ -336,6 +343,7 @@ class TrainingEngine:
                     config,
                     session_type=session_type,
                     session_kwargs=session_kwargs,
+                    config_sources=None if sources is None else sources[index],
                 )
         elif self._configurator.mode == "extend":
             overrides = getattr(
@@ -362,6 +370,14 @@ class TrainingEngine:
             self.load_session(self._configurator.checkpoint_path)
         else:
             raise RuntimeError("Invalid operation!")
+
+    def _configured_sources(self):
+        """The configurator's per-session config files, when it knows them
+        (a configurator of your own need not)."""
+        try:
+            return getattr(self._configurator, "config_sources", None)
+        except KeyError:
+            return None
 
     def _process_ready_waitables(self, waitables, ready_waitables):
         return process_ready_waitables(waitables, ready_waitables)
