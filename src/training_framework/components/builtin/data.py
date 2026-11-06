@@ -6,8 +6,16 @@ from typing import TYPE_CHECKING, Any, override
 import torch
 from torch.utils.data import DataLoader, default_collate
 
-from training_framework.components import Resource, StatefulResource
-from training_framework.dataloader import DistributedInfiniteSampler
+from training_framework.components import (
+    EpochSource,
+    Resource,
+    StatefulResource,
+)
+from training_framework.dataloader import (
+    DistributedInfiniteSampler,
+    epoch_size,
+    finite_batches,
+)
 from training_framework.components import requires_resource, resource, role
 
 if TYPE_CHECKING:
@@ -55,7 +63,7 @@ class _ManagedDataIterator:
 @requires_resource("ddp")
 @requires_resource("dataset")
 @resource("data_manager", session_type="training")
-class DataManager(StatefulResource):
+class DataManager(StatefulResource, EpochSource):
 
     def __init__(self, config):
         self._batch_size = config["batch_size"]
@@ -104,6 +112,21 @@ class DataManager(StatefulResource):
                 "DataManager batch_size must be divisible by the DDP "
                 "world_size"
             )
+
+    @override
+    def iterations_for_epochs(self, epochs: int) -> int:
+        """Iterations for `epochs` passes of the sampler, padding included.
+
+        An epoch is what the sampler counts as one: the dataset padded to a
+        multiple of the world size. The sampler never stops between epochs,
+        so a batch can straddle two; rounding up makes every sample seen at
+        least `epochs` times.
+        """
+        dataset_size = len(self.get_dependency("dataset"))
+        world_size = self.get_dependency("ddp").world_size
+        self._validate_setup(dataset_size, world_size)
+        samples = epochs * epoch_size(dataset_size, world_size)
+        return -(-samples // self.batch_size)
 
     def _restore_sampler(
             self,
@@ -222,7 +245,7 @@ role(
 
 @requires_resource("dataset")
 @resource("data_manager", session_type="analysis")
-class AnalysisDataManager(Resource):
+class AnalysisDataManager(Resource, EpochSource):
     """Iterate a dataset once, in order, for analysis.
 
     Unlike the training ``DataManager``, it needs no ``ddp`` resource, does
@@ -271,11 +294,33 @@ class AnalysisDataManager(Resource):
     def data_iter(self):
         return self._data_iter
 
+    def _validate_setup(self, dataset_size: int) -> None:
+        if dataset_size <= 0:
+            raise ValueError("DataManager requires a non-empty dataset")
+
+    @override
+    def iterations_for_epochs(self, epochs: int) -> int:
+        """The batches of the one in-order pass this manager makes."""
+        if epochs != 1:
+            raise ValueError(
+                "The analysis DataManager goes through its dataset once, "
+                f"without repeating, so it runs exactly 1 epoch, not {epochs}"
+            )
+        dataset_size = len(self.get_dependency("dataset"))
+        self._validate_setup(dataset_size)
+        batches = finite_batches(dataset_size, self.batch_size, self._drop_last)
+        if batches <= 0:
+            raise ValueError(
+                f"The analysis DataManager delivers no batch: drop_last drops "
+                f"all {dataset_size} samples, fewer than batch_size "
+                f"{self.batch_size}"
+            )
+        return batches
+
     @override
     def setup(self, session: Session):
         dataset = self.get_dependency("dataset")
-        if len(dataset) <= 0:
-            raise ValueError("DataManager requires a non-empty dataset")
+        self._validate_setup(len(dataset))
         collate_fn = getattr(dataset, "collate_fn", default_collate)
         if not callable(collate_fn):
             raise TypeError(

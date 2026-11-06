@@ -134,6 +134,12 @@ reached only through the import's `role` or a binding naming a suffixed
 instance."""
 
 
+def _total_iterations(session_config: Any) -> int | None:
+    if isinstance(session_config, Mapping):
+        return session_config.get("max_iterations")
+    return getattr(session_config, "max_iterations", None)
+
+
 def _manifest(state: Mapping[str, Any], records: Mapping[str, Mapping]) -> dict:
     return {
         "format_version": FORMAT_VERSION,
@@ -142,6 +148,10 @@ def _manifest(state: Mapping[str, Any], records: Mapping[str, Mapping]) -> dict:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "session_type": state.get("session_type"),
         "iteration": state.get("iteration"),
+        # The iterations the run is resolved to, which the configuration does
+        # not say when it gives the length in epochs. Absent from older
+        # checkpoints.
+        "total_iterations": _total_iterations(state.get("session_config")),
         "config": state.get("config"),
         # What the session's imports added to its bindings, which the
         # configuration alone does not say. Absent from older checkpoints.

@@ -19,6 +19,7 @@ from training_framework.components.base import (
     Step,
 )
 from training_framework.components.config_schema import parse_component_config
+from training_framework.components.epochs import EpochSource
 from training_framework.components.module import ModuleResource
 from training_framework.components.registry import (
     ANALYSIS_SESSION_TYPE,
@@ -51,6 +52,7 @@ __all__ = [
     "Component",
     "ComponentAliases",
     "ComponentDependencyError",
+    "EpochSource",
     "ExtendableComponent",
     "Hook",
     "IterationHook",

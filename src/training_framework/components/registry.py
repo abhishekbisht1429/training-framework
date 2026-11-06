@@ -886,6 +886,7 @@ def format_execution_graph(
         hooks: Iterable[Hook],
         steps: Iterable[Step],
         max_iterations: int,
+        epochs: int | None = None,
         role_bindings: RoleBindings | Mapping[str, str] | None = None,
         session_type: str = TRAINING_SESSION_TYPE,
         component_bindings: RoleBindings | Mapping[str, str] | None = None,
@@ -895,7 +896,8 @@ def format_execution_graph(
     """Return the session's component lifecycle as a readable execution graph.
 
     `imported` (instance -> the `import_components` entry that brought it
-    in) is listed in its own section."""
+    in) is listed in its own section. `epochs`, when the run length was
+    given in epochs, is shown next to the `max_iterations` it resolved to."""
     role_bindings = _coalesce_role_bindings(
         role_bindings,
         component_bindings,
@@ -920,6 +922,7 @@ def format_execution_graph(
         hooks=hooks,
         steps=steps,
         max_iterations=max_iterations,
+        epochs=epochs,
         binding_resolver=binding_resolver,
         session_type=normalized,
         order=order,

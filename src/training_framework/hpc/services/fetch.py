@@ -121,8 +121,9 @@ def plan_files(executor, batch_dir: str, tasks: list[FetchTask], checkpoints: st
         found, _ = find_checkpoints(executor, batch_dir, names)
         prefix = batch_dir.rstrip("/") + "/"
         for task in tasks:
-            complete = [(path.removeprefix(prefix), it) for path, it in found.get(task.task, [])
-                        if it is not None]
+            complete = [(checkpoint.path.removeprefix(prefix), checkpoint.iteration)
+                        for checkpoint in found.get(task.task, [])
+                        if checkpoint.iteration is not None]
             if checkpoints == "all":
                 task.checkpoints = sorted(complete, key=lambda item: (item[1], item[0]))
             elif (latest := newest(complete)) is not None:

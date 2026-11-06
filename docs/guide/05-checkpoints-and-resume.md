@@ -266,7 +266,8 @@ python -m my_project.train \
   logger.log_every=25
 ```
 
-The built-in mutable settings are `session_config.max_iterations`, optimizer
+The built-in mutable settings are the run length (`session_config.max_iterations`
+or `session_config.epochs`), optimizer
 constructor values under `optimizer.optimizer.kwargs`, `optimizer.lr_scheduler`,
 the `clip_gradients` and `freeze_gradients` settings, `logger.log_every`,
 and `checkpointer.checkpoint_every` / `checkpoint_first`. Optimizer state such
@@ -275,6 +276,13 @@ parameter-group values are replaced. The optimizer class cannot change, and
 existing optimizer kwargs cannot be removed. Model, DDP, data-manager,
 component-binding, and other session changes are rejected unless a custom
 component explicitly opts into extension.
+
+The run length can be overridden either way, whichever way the session
+was configured. The key you override replaces the other one: overriding
+`session_config.epochs=120` on a run started with `max_iterations` drops
+`max_iterations` from the effective configuration. Overriding both in one
+extend is refused. A new `epochs` is counted by the restored `data_manager`,
+at the world size stored in the checkpoint.
 
 The launch-topology keys `ddp.world_size`, `ddp.master_addr` and
 `ddp.master_port` may be given alongside these. They are not session

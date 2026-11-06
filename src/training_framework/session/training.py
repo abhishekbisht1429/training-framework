@@ -11,11 +11,13 @@ from training_framework.components.config import (
 from training_framework.session.components import read_session_config
 from training_framework.session.base import Session
 from training_framework.session.config import (
-    SessionConfig,
+    RUN_LENGTH_FIELDS,
     TRAINING_SESSION_TYPE,
     normalize_session_config,
+    replace_run_length,
 )
 from training_framework.session.registry import register_session_type
+from training_framework.session.run_length import resolve_session_config
 
 
 @register_session_type(TRAINING_SESSION_TYPE)
@@ -33,18 +35,26 @@ class TrainingSession(Session):
         super().__init__(config)
 
     def update_max_iters(self, new_max_iters):
-        effective_session_settings = deepcopy(self._session_settings)
-        effective_session_settings["max_iterations"] = new_max_iters
+        self._resize_run("max_iterations", new_max_iters)
+
+    def _resize_run(self, field: str, value) -> None:
+        """Give the run a new length, as `field` (one of `RUN_LENGTH_FIELDS`).
+
+        `field` replaces whichever run-length field the configuration had, and
+        the length is resolved the way building the session resolves it, with
+        the restored data manager counting any epochs.
+        """
         effective_session_settings = normalize_session_config(
-            effective_session_settings
+            replace_run_length(self._session_settings, field, value)
+        )
+        session_config = resolve_session_config(
+            effective_session_settings,
+            session_dir=self.session_config.session_dir,
+            components=self._components,
         )
         self._session_settings = effective_session_settings
         self._config["session_config"] = deepcopy(effective_session_settings)
-        self._session_config = SessionConfig(
-            rng_seed=self.session_config.rng_seed,
-            session_dir=self.session_config.session_dir,
-            max_iterations=new_max_iters,
-        )
+        self._session_config = session_config
 
     @staticmethod
     def _changed_paths(
@@ -152,7 +162,7 @@ class TrainingSession(Session):
             path for path in changed_paths if path[0] == "session_config"
         }
         unsupported_session_paths = session_paths - {
-            ("session_config", "max_iterations")
+            ("session_config", field) for field in RUN_LENGTH_FIELDS
         }
         if unsupported_session_paths:
             names = ", ".join(
@@ -160,6 +170,17 @@ class TrainingSession(Session):
             )
             raise ValueError(
                 "Session extension does not allow changes to: " + names
+            )
+        # The override names the run length it sets; that one replaces the
+        # length the session had, given either way. Checked before anything
+        # is applied, so a refused extension changes nothing.
+        run_length_fields = sorted(path[1] for path in session_paths)
+        if len(run_length_fields) > 1:
+            raise ValueError(
+                "Session extension sets the run length one way; give one of "
+                + ", ".join(
+                    f"session_config.{field}" for field in run_length_fields
+                )
             )
 
         reserved_names = {
@@ -200,9 +221,8 @@ class TrainingSession(Session):
             )
 
         if session_paths:
-            self.update_max_iters(
-                effective["session_config"]["max_iterations"]
-            )
+            [field] = run_length_fields
+            self._resize_run(field, effective["session_config"][field])
             effective["session_config"] = deepcopy(self._session_settings)
 
         self._config = deepcopy(effective)

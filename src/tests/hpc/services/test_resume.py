@@ -31,10 +31,12 @@ FS = LocalFilesystem()
 DIALECT = SlurmDialect(SlurmSettings({"account": "lab"}, {"gpu": "gpu", "cpu": "general"}, 1000))
 
 
-def write_checkpoint(directory: Path, iteration: int) -> None:
+def write_checkpoint(directory: Path, iteration: int, total_iterations: int | None = None) -> None:
     directory.mkdir(parents=True)
-    (directory / "manifest.json").write_text(json.dumps({"format_version": 1, "iteration": iteration},
-                                                        indent=2))
+    manifest = {"format_version": 1, "iteration": iteration}
+    if total_iterations is not None:
+        manifest["total_iterations"] = total_iterations
+    (directory / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
 def task_dir(batch: dict, name: str) -> Path:
@@ -100,7 +102,7 @@ def test_jobs_still_queued_are_found_across_attempts():
 def test_the_newest_complete_checkpoint_is_chosen(tmp_path):
     batch = with_checkpoints(tmp_path)
     found, configs = resuming.find_checkpoints(LocalExecutor(), batch["batch_dir"], ["g/e/002"])
-    paths = sorted(Path(path).name for path, _ in found["g/e/002"])
+    paths = sorted(Path(checkpoint.path).name for checkpoint in found["g/e/002"])
     assert paths == ["a", "b"]                               # not c.tmp, not d
     candidate = resuming.Candidate("g/e/002", "g", 2, "interrupted")
     resuming.choose_checkpoints([candidate], found, configs)
@@ -123,11 +125,53 @@ def test_reasons_when_a_task_cannot_be_resumed(tmp_path):
     assert "explicit checkpoints_dir is not searched" in explicit_dir.reason
 
 
+def test_the_manifest_total_is_preferred_to_the_config(tmp_path):
+    batch = with_checkpoints(tmp_path, max_iterations=300)
+    directory = task_dir(batch, "g/e/002")
+    (directory / "config.yaml").write_text(json.dumps({"sessions": [{
+        "session_config": {"epochs": 3}, "checkpointer": {"checkpoint_every": 100}}]}))
+    checkpoints = directory / "sessions" / "session_1" / "checkpoints"
+    write_checkpoint(checkpoints / "e", 400, total_iterations=900)   # given in epochs
+    write_checkpoint(task_dir(batch, "g/e/003") / "sessions" / "session_1" / "checkpoints" / "e",
+                     400, total_iterations=400)                       # extended to 400
+    found, configs = resuming.find_checkpoints(LocalExecutor(), batch["batch_dir"],
+                                               ["g/e/002", "g/e/003"])
+    by_epochs = resuming.Candidate("g/e/002", "g", 2, "interrupted")
+    at_end = resuming.Candidate("g/e/003", "g", 3, "interrupted")
+    resuming.choose_checkpoints([by_epochs, at_end], found, configs)
+    assert (by_epochs.iteration, by_epochs.max_iterations, by_epochs.reason) == (400, 900, None)
+    assert at_end.max_iterations == 400 and "nothing is left to run" in at_end.reason
+
+
+def test_a_length_in_epochs_without_a_manifest_total_is_unknown(tmp_path):
+    batch = with_checkpoints(tmp_path)
+    (task_dir(batch, "g/e/002") / "config.yaml").write_text(json.dumps({"sessions": [{
+        "session_config": {"epochs": 3}, "checkpointer": {"checkpoint_every": 100}}]}))
+    found, configs = resuming.find_checkpoints(LocalExecutor(), batch["batch_dir"], ["g/e/002"])
+    candidate = resuming.Candidate("g/e/002", "g", 2, "interrupted")
+    resuming.choose_checkpoints([candidate], found, configs)
+    assert candidate.iteration == 300
+    assert candidate.max_iterations is None and candidate.reason is None
+
+
+def test_explicit_checkpoints_read_the_manifest_total(tmp_path):
+    batch = with_checkpoints(tmp_path)
+    root = batch["batch_dir"]
+    checkpoints = task_dir(batch, "g/e/002") / "sessions" / "session_1" / "checkpoints"
+    write_checkpoint(checkpoints / "e", 300, total_iterations=300)
+    chosen = resuming.explicit_checkpoints(FS, root, ["g/e/002=tasks/g/e/002/sessions/session_1/checkpoints/e"])
+    candidate = resuming.Candidate("g/e/002", "g", 2, "interrupted")
+    resuming.choose_checkpoints([candidate], {}, {}, chosen)
+    assert chosen["g/e/002"].total_iterations == 300
+    assert candidate.max_iterations == 300 and "nothing is left to run" in candidate.reason
+
+
 def test_explicit_checkpoints_are_checked(tmp_path):
     batch = with_checkpoints(tmp_path)
     root = batch["batch_dir"]
     chosen = resuming.explicit_checkpoints(FS, root, ["g/e/002=tasks/g/e/002/sessions/session_1/checkpoints/a"])
-    assert chosen["g/e/002"] == (f"{root}/tasks/g/e/002/sessions/session_1/checkpoints/a", 100)
+    assert chosen["g/e/002"] == resuming.FoundCheckpoint(
+        f"{root}/tasks/g/e/002/sessions/session_1/checkpoints/a", 100, None)
     for bad, message in (("x=/etc", "outside the batch directory"),
                          ("x=tasks/g/e/002/sessions/session_1/checkpoints/c.tmp", "incomplete"),
                          ("x=tasks/g/e/002/sessions/session_1/checkpoints/d", "no manifest.json"),

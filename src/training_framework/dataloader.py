@@ -31,6 +31,17 @@ def epoch_size(
     return samples_per_rank(num_samples, world_size, drop_last) * world_size
 
 
+def finite_batches(
+        num_samples: int,
+        batch_size: int,
+        drop_last: bool = False,
+) -> int:
+    """How many batches one pass of a non-repeating loader delivers."""
+    if drop_last:
+        return num_samples // batch_size
+    return (num_samples + batch_size - 1) // batch_size
+
+
 def consumed_in_epoch(state: Dict[str, Any]) -> int:
     """How many samples of the epoch were consumed, across all ranks."""
     if "consumed_in_epoch" in state:
@@ -131,7 +142,11 @@ class DistributedInfiniteSampler(Sampler):
             self.world_size,
             self.drop_last,
         )
-        self.total_size = self.num_samples_per_rank * self.world_size
+        self.total_size = epoch_size(
+            self.num_samples,
+            self.world_size,
+            self.drop_last,
+        )
 
     def _generate_epoch_indices(self, epoch: int) -> list[int]:
         """Generates rank-specific indices for a given epoch pass."""

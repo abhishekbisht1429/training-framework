@@ -534,6 +534,7 @@ def render_execution_graph(
         steps: Iterable[Step],
         max_iterations: int,
         binding_resolver,
+        epochs: int | None = None,
         session_type,
         order: Mapping[str, int],
         imported: Mapping[str, str] | None = None,
@@ -574,7 +575,11 @@ def render_execution_graph(
     lines = [
         title,
         "================================",
-        f"Max iterations: {max_iterations}",
+        f"Max iterations: {max_iterations}"
+        + (
+            "" if epochs is None
+            else f" (from {epochs} epoch{'' if epochs == 1 else 's'})"
+        ),
     ]
     if binding_resolver:
         lines.extend(["", "ROLE BINDINGS"])

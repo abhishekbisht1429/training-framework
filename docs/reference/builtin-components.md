@@ -156,6 +156,11 @@ When the dataset does not define `collate_fn`, the data manager uses
 dict and number samples are collated field by field. Keeping the collator on the importable dataset class makes it
 available after checkpoint restoration and in spawned workers.
 
+The data manager defines what an epoch is for
+[`session_config.epochs`](../guide/04-configuration.md#run-length-in-epochs):
+the dataset padded to a multiple of the world size, which is what its sampler
+counts as one epoch.
+
 ### `checkpointer`
 
 Add the built-in `checkpointer` hook to YAML:
@@ -377,7 +382,11 @@ While the session is active, `data_manager.data_iter` is an iterator over the
 optional `collate_fn` is used the same way as in training. When a step calls
 `next(data_iter)` after the last batch, the `StopIteration` ends the analysis
 session cleanly, so a run stops at whichever comes first: the end of the data
-or `max_iterations`. The partial final iteration is not counted.
+or `max_iterations`. The partial final iteration is not counted. Give
+`session_config.epochs: 1` instead of `max_iterations` to run exactly one full
+pass: the session sets `max_iterations` to the number of batches, so progress
+shows the real total. Any other number of epochs is refused, because the data
+does not repeat.
 
 ```python
 @requires_resource("data_manager")

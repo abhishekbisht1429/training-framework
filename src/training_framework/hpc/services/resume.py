@@ -28,7 +28,11 @@ from training_framework.hpc.errors import HpcError
 from training_framework.hpc.ports import SubmissionFailed, SubmissionUncertain
 from training_framework.hpc.remote import preflight
 from training_framework.hpc.remote.lease import KeyMismatch, check_marker
-from training_framework.hpc.services.checkpoints import find_checkpoints, newest
+from training_framework.hpc.services.checkpoints import (
+    FoundCheckpoint,
+    find_checkpoints,
+    newest,
+)
 from training_framework.hpc.services.status import TERMINAL_STATES, Row, is_task
 
 #: Task states resumed by default; failed tasks only when named or asked for.
@@ -122,22 +126,34 @@ def _has_key(value, key: str) -> bool:
 
 
 def _max_iterations(config: dict | None) -> int | None:
+    """The configured iterations, for a checkpoint whose manifest does not
+    record the run's total; None when unknown, which includes a length given
+    in epochs: those resolve against the dataset, on the cluster."""
     try:
-        return int(config["sessions"][0]["session_config"]["max_iterations"])
-    except (KeyError, IndexError, TypeError, ValueError):
+        session_config = config["sessions"][0]["session_config"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not isinstance(session_config, dict) or "epochs" in session_config:
+        return None
+    try:
+        return int(session_config["max_iterations"])
+    except (KeyError, TypeError, ValueError):
         return None
 
 
 def choose_checkpoints(candidates: list[Candidate], checkpoints, configs,
-                       overrides: dict[str, tuple[str, int | None]] | None = None) -> None:
+                       overrides: dict[str, FoundCheckpoint] | None = None) -> None:
     """Fill each candidate's checkpoint (the newest complete one, by
-    iteration), or the reason it cannot be resumed."""
+    iteration) and the run's total iterations, or the reason it cannot be
+    resumed. The total is the one the checkpoint's manifest records -- what
+    the run actually resolved to, epochs and extensions included -- and the
+    task config's `max_iterations` only for a manifest without one."""
     overrides = overrides or {}
     for candidate in candidates:
         config = configs.get(candidate.task)
         candidate.max_iterations = _max_iterations(config)
         if candidate.task in overrides:
-            candidate.checkpoint, candidate.iteration = overrides[candidate.task]
+            found = overrides[candidate.task]
         else:
             found = newest(checkpoints.get(candidate.task, []))
             if found is None:
@@ -151,14 +167,21 @@ def choose_checkpoints(candidates: list[Candidate], checkpoints, configs,
                 else:
                     candidate.reason = "no complete checkpoint was written yet"
                 continue
-            candidate.checkpoint, candidate.iteration = found
+        candidate.checkpoint, candidate.iteration = found.path, found.iteration
+        if found.total_iterations is not None:
+            candidate.max_iterations = found.total_iterations
         if (candidate.max_iterations is not None and candidate.iteration is not None
                 and candidate.iteration >= candidate.max_iterations):
             candidate.reason = (f"its checkpoint is at iteration {candidate.iteration}, the "
-                                "configured max_iterations: nothing is left to run")
+                                "run's total iterations: nothing is left to run")
 
 
-def explicit_checkpoints(filesystem, batch_dir: str, given: list[str]) -> dict[str, tuple[str, int | None]]:
+def _manifest_count(manifest, key: str) -> int | None:
+    value = manifest.get(key) if isinstance(manifest, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def explicit_checkpoints(filesystem, batch_dir: str, given: list[str]) -> dict[str, FoundCheckpoint]:
     """`NAME=PATH` arguments: each a complete checkpoint inside the batch."""
     chosen = {}
     for item in given:
@@ -176,10 +199,13 @@ def explicit_checkpoints(filesystem, batch_dir: str, given: list[str]) -> dict[s
             raise ResumeError(f"--checkpoint {item!r}: {path} is not a complete checkpoint "
                               "(no manifest.json)")
         try:
-            iteration = json.loads(manifest).get("iteration")
+            described = json.loads(manifest)
         except ValueError:
             raise ResumeError(f"--checkpoint {item!r}: {path}/manifest.json is not valid JSON") from None
-        chosen[name] = (path, iteration if isinstance(iteration, int) else None)
+        chosen[name] = FoundCheckpoint(
+            path, _manifest_count(described, "iteration"),
+            _manifest_count(described, "total_iterations"),
+        )
     return chosen
 
 

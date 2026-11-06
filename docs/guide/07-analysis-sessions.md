@@ -70,6 +70,11 @@ sessions:
       output_path: ./analysis-runs/report.json
 ```
 
+`max_iterations: 1` runs a single iteration. To go through the whole analysis
+dataset once, give `epochs: 1` in its place. The session then runs as many
+iterations as the analysis `data_manager` has batches
+([details](04-configuration.md#run-length-in-epochs)).
+
 ## Running an analysis
 
 For direct execution, construct the concrete analysis subclass:

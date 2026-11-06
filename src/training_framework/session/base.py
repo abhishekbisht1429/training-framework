@@ -31,6 +31,7 @@ from training_framework.session.config import (
 )
 from training_framework.session.io import write_session_config
 from training_framework.session.registry import session_class_for_type
+from training_framework.session.run_length import resolve_session_config
 from training_framework.session.state import (
     CHECKPOINT_VERSION,
     capture_rng_state,
@@ -84,19 +85,15 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             self._session_settings["sessions_dir"],
             f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         )
-        self._session_config = SessionConfig(
-            rng_seed=self._session_settings["rng_seed"],
-            session_dir=session_dir,
-            max_iterations=self._session_settings["max_iterations"],
-        )
 
         self._iteration = 0
         self._extension_config_history_pending = False
 
-        torch.manual_seed(self._session_config.rng_seed)
-        random.seed(self._session_config.rng_seed)
-        torch.cuda.manual_seed(self._session_config.rng_seed)
-        np.random.seed(self._session_config.rng_seed)
+        rng_seed = self._session_settings["rng_seed"]
+        torch.manual_seed(rng_seed)
+        random.seed(rng_seed)
+        torch.cuda.manual_seed(rng_seed)
+        np.random.seed(rng_seed)
 
         self._session_context: dict[str, Any] = {}
 
@@ -118,6 +115,13 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             self._config,
             default_configs=self._default_component_configs(),
             view=config_view,
+        )
+        # Resolved once the components exist: a length given in epochs is
+        # counted by the data manager, from its dataset and world size.
+        self._session_config = resolve_session_config(
+            self._session_settings,
+            session_dir=session_dir,
+            components=self._components,
         )
 
     @classmethod
@@ -440,6 +444,7 @@ class Session(Stateful, metaclass=CaptureInitMeta):
             hooks=self.get_all_hooks(),
             steps=self.get_all_steps(),
             max_iterations=self.session_config.max_iterations,
+            epochs=self.session_config.epochs,
             role_bindings=self._components.role_bindings,
             session_type=self._session_type,
             imported=self._components.imported,

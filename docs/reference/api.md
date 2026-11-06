@@ -33,6 +33,12 @@ remain valid without implementing them. A component should override its
 rollback method only when failed initialization can leave partial effects to
 release.
 
+`training_framework.components.EpochSource` is the interface a resource bound
+as `data_manager` implements to support `session_config.epochs`.
+`iterations_for_epochs(epochs)` is called once, before `setup`, and returns
+the iterations those epochs take; both built-in data managers implement it
+(see [run length in epochs](../guide/04-configuration.md#run-length-in-epochs)).
+
 `training_framework.dataloader` remains the public home of the infinite
 samplers. `DistributedInfiniteSampler.get_state()` records how far an epoch
 got across all ranks, and `set_state()` rebases a saved position onto the rank

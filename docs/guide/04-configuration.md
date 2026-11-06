@@ -39,10 +39,48 @@ sessions:
 |---|:---:|---|
 | `rng_seed` | Yes | Seed used for Python, NumPy, PyTorch, and CUDA RNG initialization |
 | `sessions_dir` | Yes | Parent directory for timestamped session directories |
-| `max_iterations` | Yes | Number of training or analysis iterations |
+| `max_iterations` | One of these two | Number of training or analysis iterations |
+| `epochs` | One of these two | Length of the run in epochs of the data; the session turns it into `max_iterations` (see below) |
 | `components_package` | Yes | Importable package recursively scanned for decorated components |
 | `device` | No | Requested device string; defaults to CPU, and unavailable CUDA requests currently fall back to CPU |
 | `show_execution_graph` | No | Print the resolved lifecycle graph on entry; defaults to `true` |
+
+### Run length in epochs
+
+Give the run's length as exactly one of `max_iterations` or `epochs`. Giving
+both, or neither, is an error. With `epochs`, the session asks its
+`data_manager` resource how many iterations that many epochs take. It asks
+once, when the session is built, and the answer becomes
+`session_config.max_iterations`, which everything else reads (the iteration
+loop, `$max_iterations` in schedules, the loggers). The execution graph shows
+both values, e.g. `Max iterations: 8 (from 3 epochs)`, and the checkpoint
+stores both.
+
+```yaml
+sessions:
+  - session_config:
+      rng_seed: 42
+      sessions_dir: ./runs
+      epochs: 90
+      components_package: my_project.components
+```
+
+- **Training.** An epoch is what the training `DataManager`'s sampler counts
+  as one: the dataset padded to a multiple of `ddp.world_size`. The total is
+  `ceil(epochs * padded_size / batch_size)`, where `batch_size` is the global
+  batch. The sampler never stops between epochs, so the last batch may start
+  the next epoch, and every sample is seen at least `epochs` times. An empty
+  dataset or a `batch_size` that `ddp.world_size` does not divide is refused
+  when the session is built.
+- **Analysis.** The analysis `DataManager` makes a single in-order pass, so
+  only `epochs: 1` is accepted. It means one full pass: `ceil(N /
+  batch_size)` batches, or `floor` with `drop_last`.
+- **Your own data manager.** If you bind `data_manager` to your own resource,
+  it counts epochs only if it subclasses
+  `training_framework.components.EpochSource` and implements
+  `iterations_for_epochs(epochs)`. Otherwise `epochs` is refused.
+- **Resuming** keeps the total that was stored, even under a different world
+  size, so schedules do not move mid-run.
 
 A session directory is created as:
 

@@ -507,9 +507,13 @@ What it does:
    `manifest.json`; a checkpoint still being written is skipped) under the
    task's sessions directory, by iteration. Tasks that cannot resume are
    listed with the reason: no `checkpointer` in the config, no checkpoint
-   written yet, a checkpoint already at `max_iterations`, or an explicit
-   `checkpointer.checkpoints_dir` (not searched; pass `--checkpoint
-   <task>=<path>`).
+   written yet, a checkpoint already at the run's total iterations, or an
+   explicit `checkpointer.checkpoints_dir` (not searched; pass
+   `--checkpoint <task>=<path>`). The total is the one the checkpoint's
+   manifest records (`total_iterations`), which counts extensions and a
+   length given in `epochs`. A checkpoint written before manifests recorded
+   it falls back to the task config's `max_iterations`, or to `?` when the
+   config gives `epochs`.
 3. Checks the cluster can still run them: the batch's source checkout and
    environment are there, and its framework supports resuming (batches
    whose environment predates `resume` are refused: submit a new batch).
